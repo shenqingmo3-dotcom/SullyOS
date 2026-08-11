@@ -460,3 +460,11 @@
 - 完整备份新增 `backendChatConfig`，localStorage 镜像新增 `sullyos_backend_chat_v1`，避免今后换域名或换设备后再次丢失自主后端配对信息。
 - “日程与纪念”新增固定的“和谁一起记录”角色选择器。用户日程仍是用户自己的全局日程；角色日程和纪念日按所选角色切换，桌面纪念日组件跟随当前角色，不再默认只属于 Sully。
 - 验证结果：设置与日程定向测试 11/11；后端完整测试 38/38；后端 TypeScript build、6 个 Worker bundle 和 Vite 生产构建通过。390×844 手机视口已确认未配对时四项工具与 heartbeat 占位可见，控制台无运行错误（仅保留项目既有 Tailwind CDN 警告）。
+
+## 21. 自主设置恢复版已更新线上（2026-08-12）
+
+- 功能提交 `5f0682e2` 已推送到远端 `sharkos` 分支，并实际覆盖原 VPS，不是另建服务器。线上后端镜像为 `sullyos-backend:sharkos-5f0682e2`，前端主资源为 `assets/index-Iglil_N7.js`。
+- 部署前数据库备份为 `/opt/sullyos-backend/backups/sullyos-production-20260811T123737Z.dump`（含 SHA-256）；回滚包为 `/home/ubuntu/sullyos-backend.rollback-5f0682e2.tar.gz` 与 `/home/ubuntu/sullyos-frontend.rollback-5f0682e2.tar.gz`。
+- PostgreSQL 健康、迁移正常退出、API 健康；`https://goldenbite.icu/health` 正常，`www.goldenbite.icu` 继续 301 跳转主域名。
+- heartbeat Worker 已用新镜像重新开启并观察超过一个轮询周期：角色正常完成一次 `action: none` 并排定下一次唤醒，API 与 Worker 近期日志均无 error。
+- 服务器源码已核验同时存在 `runMcpPool` 调用与 `mcp-pool` 分支；通用 MCP 仍是旧任务最终确定的多服务器工具池版本。
