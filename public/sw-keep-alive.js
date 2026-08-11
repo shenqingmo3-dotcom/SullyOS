@@ -1281,7 +1281,7 @@ async function removeQueuedRequest(id) {
 }
 
 // worker/sw-keep-alive.ts
-var SW_VERSION = "1.15.1";
+var SW_VERSION = "1.16.0";
 var PING_INTERVAL = 15e3;
 var MAX_MANUAL_ALIVE_MS = 5 * 6e4;
 var ACTIVE_MSG_DB_NAME = "ActiveMsg";
@@ -1326,6 +1326,16 @@ installReiSW(sw, {
   onBusinessPayload: async (payload) => {
     traceSw("business-payload-start", payload);
     try {
+      if (payload?.metadata?.source === "sullyos-backend") {
+        await notifyClients({
+          type: "sullyos-backend-push",
+          eventId: payload?.metadata?.eventId,
+          eventType: payload?.metadata?.eventType,
+          charId: payload?.metadata?.charId
+        });
+        traceSw("business-payload-backend-event", payload);
+        return;
+      }
       await saveIncomingActiveMessage(payload);
       traceSw("business-payload-done", payload);
     } catch (e) {
@@ -1717,6 +1727,14 @@ sw.addEventListener("notificationclick", (event) => {
     if (clients.length > 0) {
       const client = clients[0];
       await client.focus();
+      if (payload?.metadata?.source === "sullyos-backend") {
+        client.postMessage({
+          type: "sullyos-backend-push",
+          eventId: payload?.metadata?.eventId,
+          eventType: payload?.metadata?.eventType,
+          charId
+        });
+      }
       client.postMessage({ type: "active-msg-open", charId });
       return;
     }

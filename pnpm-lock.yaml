@@ -118,6 +118,12 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@25.9.0)
 
+  worker/health-mcp:
+    devDependencies:
+      wrangler:
+        specifier: ^3.114.17
+        version: 3.114.17
+
   worker/instant-push:
     dependencies:
       '@rei-standard/amsg-instant':

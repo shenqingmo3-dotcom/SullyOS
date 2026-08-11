@@ -10,6 +10,7 @@ import { isStatusBarHidden } from '../utils/iosStandalone';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { Sparkle } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
+import AppIconEditor from '../components/appearance/AppIconEditor';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -1308,7 +1309,9 @@ const Appearance: React.FC = () => {
                 </section>
             </>
         ) : activeTab === 'icons' ? (
-            <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-6">
+              <AppIconEditor />
+              <div className="grid grid-cols-3 gap-4">
                 {INSTALLED_APPS.map(app => {
                     const Icon = Icons[app.icon];
                     const customUrl = customIcons[app.id];
@@ -1337,6 +1340,7 @@ const Appearance: React.FC = () => {
                     );
                 })}
                 <input type="file" ref={iconInputRef} className="hidden" accept="image/*" onChange={(e) => e.target.files?.[0] && handleIconUpload(e.target.files[0])} />
+              </div>
             </div>
         ) : activeTab === 'presets' ? (
             <PresetManager

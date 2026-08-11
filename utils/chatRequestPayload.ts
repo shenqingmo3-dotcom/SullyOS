@@ -28,6 +28,7 @@ import { isPromptBuildSkipped, isSystemMessageMergeEnabled } from './devDebug';
 import { mergeSystemMessages } from './systemMessageMerge';
 import { injectWorldbookDepthEntries, resolveWorldbookEntries } from './worldbook';
 import { normalizeTranslationLangLabel } from './translationLang';
+import { buildActiveCinemaContext } from './cinemaMemory';
 
 export interface UserListeningContext {
     songName: string;
@@ -381,6 +382,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         if (block) {
             systemPrompt += block;
         }
+        volatileTail += await buildActiveCinemaContext(char.id, char.name);
     }
 
     // ── 10. recency 钢印归位 + 组装 fullMessages ─────────

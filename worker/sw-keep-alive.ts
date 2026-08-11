@@ -65,7 +65,7 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *  - 1.15.1: 临时加 instant push trace，定位 iOS PWA 后台导致的 SSE Load failed / backup push
  *            / SW inbox 落库时序。
  */
-const SW_VERSION = '1.15.1';
+const SW_VERSION = '1.16.0';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;
@@ -120,6 +120,16 @@ installReiSW(sw, {
   onBusinessPayload: async (payload: any) => {
     traceSw('business-payload-start', payload);
     try {
+      if (payload?.metadata?.source === 'sullyos-backend') {
+        await notifyClients({
+          type: 'sullyos-backend-push',
+          eventId: payload?.metadata?.eventId,
+          eventType: payload?.metadata?.eventType,
+          charId: payload?.metadata?.charId,
+        });
+        traceSw('business-payload-backend-event', payload);
+        return;
+      }
       await saveIncomingActiveMessage(payload);
       traceSw('business-payload-done', payload);
     } catch (e) {
@@ -657,6 +667,14 @@ sw.addEventListener('notificationclick', (event: NotificationEvent) => {
     if (clients.length > 0) {
       const client = clients[0];
       await client.focus();
+      if (payload?.metadata?.source === 'sullyos-backend') {
+        client.postMessage({
+          type: 'sullyos-backend-push',
+          eventId: payload?.metadata?.eventId,
+          eventType: payload?.metadata?.eventType,
+          charId,
+        });
+      }
       client.postMessage({ type: 'active-msg-open', charId });
       return;
     }

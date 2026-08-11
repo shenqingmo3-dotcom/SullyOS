@@ -25,7 +25,13 @@ import { LUCKIN_PROPOSE_TOOL, autoFixProposalCodesByName as autoFixLuckinProposa
 import { callLuckinTool } from '../utils/luckinMcpClient';
 import { callMcpTool, getMcpUseNativeTools } from '../utils/mcpClient';
 import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpTextFallbackBody, extractTextFakedMcpCalls, formatMcpToolResult, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls, type FakedMcpCall } from '../utils/mcpToolBridge';
+import { observeCinemaMcpCall } from '../utils/cinemaMemory';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
+import {
+    flushBackendMemorySyncQueue,
+    loadBackendChatConfig,
+    syncBackendContext,
+} from '../utils/backendClient';
 import {
     isInstantConfigReady,
     sendInstantPushAndAwaitReply,
@@ -682,7 +688,7 @@ export const useChatAI = ({
         // charForGen 只是本地浅拷贝（清空 buff 字段），不落 DB，不影响角色持久化的情绪状态——
         // 紧接着重跑的情绪评估会基于新回复覆写出新的 buff/innerState。
         const skipEmotionInjection = !!opts?.skipEmotionInjection;
-        const charForGen: CharacterProfile = skipEmotionInjection
+        let charForGen: CharacterProfile = skipEmotionInjection
             ? { ...char, buffInjection: '', activeBuffs: [] }
             : char;
 
@@ -723,6 +729,12 @@ export const useChatAI = ({
                 : Promise.resolve(null);
             const fullHistory = await stageT('dbHistory', fullHistoryPromise);
             const contextMsgs = fullHistory || currentMsgs;
+            const latestMode = [...contextMsgs].reverse().find(msg =>
+                msg.metadata?.interactionMode === 'online' || msg.metadata?.interactionMode === 'offline'
+            )?.metadata?.interactionMode;
+            if (latestMode === 'online' || latestMode === 'offline') {
+                charForGen = { ...charForGen, interactionMode: latestMode };
+            }
             if (fullHistory) {
                 console.log(`📊 [Context] Loaded ${fullHistory.length} msgs from DB (React state had ${currentMsgs.length}, contextLimit=${limit})`);
             }
@@ -898,6 +910,7 @@ export const useChatAI = ({
             //    Gemini 等会直接 400 INVALID_ARGUMENT —— 表现就是"开了思考链的角色一点单就报错,
             //    换个没开思考链的角色就好"。工具循环优先, 思考链这一轮让步。
             const toolModeActive = payload.flags.luckinChatActive || payload.flags.mcdActive || payload.flags.luckinActive || payload.flags.mcpChatActive;
+            const backendConfig = loadBackendChatConfig();
             if (payload.flags.thinkingActive && !toolModeActive) {
                 const m: string = baseReqBody.model || '';
                 if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
@@ -1108,6 +1121,52 @@ export const useChatAI = ({
                     } as any);
                     setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                 }
+            };
+            const persistMcpResultCard = async (
+                serverName: string,
+                toolName: string,
+                result: { success: boolean; data?: unknown; error?: string },
+                args: Record<string, unknown> = {},
+            ): Promise<void> => {
+                const formatted = result.success
+                    ? formatMcpToolResult(result.data)
+                    : (result.error || '工具没有返回结果');
+                const summary = formatted.length > 1600 ? `${formatted.slice(0, 1600)}…` : formatted;
+                const occurredAt = new Date().toISOString();
+                const scoreCard = {
+                    type: 'mcp_activity_card',
+                    eventId: `frontend-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                    eventType: 'mcp_activity',
+                    charName: char.name,
+                    occurredAt,
+                    title: serverName || 'MCP 工具',
+                    capabilityId: serverName,
+                    toolName,
+                    status: result.success ? 'completed' : 'failed',
+                    goal: `使用 ${toolName}`,
+                    result: summary,
+                    summary,
+                };
+                await DB.saveMessage({
+                    charId: char.id,
+                    role: 'system',
+                    type: 'score_card',
+                    content: JSON.stringify(scoreCard),
+                    metadata: {
+                        scoreCard,
+                        source: 'frontend-mcp',
+                        interactionMode: char.interactionMode === 'offline' ? 'offline' : 'online',
+                    },
+                } as any);
+                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                await observeCinemaMcpCall({
+                    serverName,
+                    toolName,
+                    args,
+                    result,
+                    character: char,
+                    user: userProfile,
+                }).catch(error => console.warn('[CinemaMemory] 观影会话同步失败:', error));
             };
 
             // 3.4 麦当劳小程序 propose_cart_items UI 钩子工具循环
@@ -1346,6 +1405,7 @@ export const useChatAI = ({
                             let mcpResult: any;
                             try { mcpResult = await callMcpTool(mcpHit.server, mcpHit.toolName, args); }
                             catch (e: any) { mcpResult = { success: false, error: e?.message || String(e) }; }
+                            await persistMcpResultCard(mcpHit.server.name, mcpHit.toolName, mcpResult, args);
                             const mcpMsg = mcpResult.success
                                 ? `工具 ${fname} 成功。结果: ${formatMcpToolResult(mcpResult.data)}`
                                 : `工具 ${fname} 失败: ${mcpResult.error}`;
@@ -1436,6 +1496,7 @@ export const useChatAI = ({
                         let r: any;
                         try { r = await callMcpTool(call.server, call.toolName, call.args); }
                         catch (e: any) { r = { success: false, error: e?.message || String(e) }; }
+                        await persistMcpResultCard(call.server.name, call.toolName, r, call.args);
                         results.push(r.success
                             ? `工具 ${call.exposedName} 执行成功, 结果: ${formatMcpToolResult(r.data)}`
                             : `工具 ${call.exposedName} 执行失败: ${r.error}`);
@@ -1525,7 +1586,9 @@ export const useChatAI = ({
                 fullMessages,
                 initialData: data,
                 historyMsgCount,
-                mcdInheritMeta,
+                mcdInheritMeta: data?._sullyBackendEventId
+                    ? { ...(mcdInheritMeta || {}), interactionMode: char.interactionMode === 'offline' ? 'offline' : 'online', backendEventId: data._sullyBackendEventId }
+                    : { ...(mcdInheritMeta || {}), interactionMode: char.interactionMode === 'offline' ? 'offline' : 'online' },
                 xhsCaches,
                 api: {
                     baseUrl,
@@ -1540,6 +1603,20 @@ export const useChatAI = ({
                     setDiaryStatus,
                     setXhsStatus,
                     updateTokenUsage,
+                    updateInteractionMode: async (patch) => {
+                        const updatedCharacter = { ...char, ...patch };
+                        updateCharacter?.(char.id, patch);
+                        const backendConfig = loadBackendChatConfig();
+                        if (backendConfig.enabled) {
+                            await syncBackendContext({
+                                config: backendConfig,
+                                character: updatedCharacter,
+                                user: userProfile,
+                                messages: [],
+                                memories: [],
+                            }).catch(error => console.warn('[interaction-mode] assistant backend sync failed', error));
+                        }
+                    },
                     // 整组 musicHooks 由 MusicProvider 注册到模块级 slot, 本地 fetch 路径和
                     // instant push 路径 (activeMsgRuntime) 共享同一份, 见 MusicContext.loadMusicHooks.
                     musicHooks: loadMusicHooks() ?? undefined,
@@ -1550,6 +1627,27 @@ export const useChatAI = ({
                 skipSecondPassLLM: false,
                 directives: [],
             });
+
+            // 普通聊天始终由前端原生 API/模型池完成。回复落库后再把最近消息和记忆变更
+            // 异步同步给 VPS，供心跳、日记和自主活动读取；同步不阻塞聊天显示。
+            if (backendConfig.enabled && backendConfig.baseUrl.trim() && backendConfig.token.trim()) {
+                void Promise.all([
+                    flushBackendMemorySyncQueue({
+                        config: backendConfig,
+                        character: charForGen,
+                        user: userProfile,
+                    }),
+                    DB.getRecentMessagesByCharId(char.id, 30).then(recentMessages => syncBackendContext({
+                        config: backendConfig,
+                        character: charForGen,
+                        user: userProfile,
+                        messages: recentMessages,
+                        memories: [],
+                    })),
+                ]).catch(error => {
+                    console.warn('🧠 [VPS Sync] 聊天增量同步失败，将由后续同步补齐：', error);
+                });
+            }
 
             // 本地路径回复已全部落库。OSContext 监听这个事件 bump lastMsgTimestamp——
             // 当前挂载的 Chat（可能是切走又切回后新 mount 的实例，本闭包的 setMessages

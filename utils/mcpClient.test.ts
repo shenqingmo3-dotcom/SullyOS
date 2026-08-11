@@ -16,7 +16,7 @@ import {
     MCP_REQUEST_TIMEOUT_MS,
     type McpServerConfig,
 } from './mcpClient';
-import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpTextFallbackBody, formatMcpToolResult, MCP_RESULT_MAX_CHARS, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls } from './mcpToolBridge';
+import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpSystemBlock, buildMcpTextFallbackBody, formatMcpToolResult, MCP_RESULT_MAX_CHARS, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls } from './mcpToolBridge';
 import { completeGroupChatWithMcp } from './groupChat/mcp';
 
 const mkServer = (over: Partial<McpServerConfig>): McpServerConfig => ({
@@ -214,6 +214,38 @@ describe('buildMcpOpenAITools', () => {
         // 单服务器可见时描述不带 [来源] 前缀（multi 按角色可见数算）
         expect(buildMcpOpenAITools('char_b').tools[0].function.description).not.toContain('[通用]');
         expect(buildMcpOpenAITools('char_a').tools[0].function.description).toContain('[通用]');
+    });
+});
+
+describe('健康 MCP 的自然关心提示', () => {
+    it('只给已授权角色注入健康自然关心纪律', () => {
+        saveMcpServers([mkServer({
+            id: 'health',
+            name: 'Apple Health',
+            charIds: ['char_health'],
+            tools: [
+                { name: 'health_now', description: '健康快照', inputSchema: { type: 'object', properties: {} } },
+                { name: 'health_detail', description: '健康详情', inputSchema: { type: 'object', properties: {} } },
+                { name: 'health_trends', description: '健康趋势', inputSchema: { type: 'object', properties: {} } },
+            ],
+        })]);
+
+        const allowed = buildMcpSystemBlock('小明', 'char_health');
+        expect(allowed).toContain('健康自然关心');
+        expect(allowed).toContain('自主调用 `health_now`');
+        expect(allowed).toContain('不要每轮监控');
+        expect(allowed).toContain('不能直接等同于“睡眠质量差”');
+        expect(allowed).toContain('`health_detail`');
+        expect(allowed).toContain('`health_trends`');
+
+        expect(buildMcpSystemBlock('小明', 'char_other')).toBe('');
+    });
+
+    it('普通 MCP 不会被误当成健康感知工具', () => {
+        saveMcpServers([mkServer({
+            tools: [{ name: 'search', description: '搜索', inputSchema: { type: 'object', properties: {} } }],
+        })]);
+        expect(buildMcpSystemBlock('小明')).not.toContain('健康自然关心');
     });
 });
 

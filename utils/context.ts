@@ -9,6 +9,7 @@ import {
     splitWorldbookSections,
     type WorldbookScanMessage,
 } from './worldbook';
+import { formatNpcNetworkContext } from './npcNetwork';
 
 /**
  * Memory Central
@@ -186,6 +187,8 @@ export const ContextBuilder = {
             context += `- 名字: ${user.name}\n`;
             context += `- 设定/备注: ${user.bio || '无'}\n\n`;
         }
+
+        context += formatNpcNetworkContext(user.npcNetwork, char.id);
 
         // 4. [NEW] 印象档案 (Private Impression)
         // 这是角色对用户的私密看法，只有角色知道

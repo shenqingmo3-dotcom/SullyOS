@@ -2,7 +2,7 @@
 
 
 import {
-    CharacterProfile, ChatTheme, Message, UserProfile,
+    CharacterProfile, ChatTheme, Message, UserProfile, BackendConversationEventRecord,
     Task, Anniversary, DiaryEntry, RoomTodo, RoomNote, DailySchedule,
     GalleryImage, FullBackupData, GroupProfile, SocialPost, StudyCourse, GameSession, Worldbook, NovelBook, Emoji, EmojiCategory,
     BankTransaction, SavingsGoal, BankFullState, DollhouseState, XhsStockImage, XhsActivityRecord, SongSheet, QuizSession, GuidebookSession,
@@ -23,7 +23,8 @@ const DB_NAME = 'AetherOS_Data';
 // v67：两条并行线各自用掉了 v65/v66（A线: blob_assets + 生活记录；B线: room_plates 门牌 + digest_reports 消化日志），
 // 合并后统一推到 67——建表全部走幂等的 if(!contains)，任一侧的 v66 老库升级时都会补齐缺的那组表。
 // v68：character_groups 角色分组（神经链接"文件夹"，见 types.ts CharacterGroup）。
-const DB_VERSION = 68;
+// v69：backend_sync_queue，记录完整快照之后的记忆宫殿增量变化。
+const DB_VERSION = 71;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
@@ -77,6 +78,10 @@ const STORE_WORLD_EPISODES = 'world_episodes';    // 家园·演绎历史（每�
 const STORE_LIFE_RECORDS = 'life_records';        // 生活记录：生理期/药盒打卡/锻炼（记账走 bank_transactions）
 const STORE_MED_PLANS = 'med_plans';              // 药盒计划（每天几点吃什么药）
 const STORE_LIFE_SETTINGS = 'life_record_settings'; // 生活记录设置单例（id='main'：周期长度等）
+const STORE_BACKEND_SYNC_QUEUE = 'backend_sync_queue';
+const STORE_BACKEND_EVENTS = 'backend_events';
+const STORE_TOGETHER_ITEMS = 'together_items';
+const STORE_TOGETHER_SESSIONS = 'together_sessions';
 
 // API 调用记录：保留近 5 天，超期丢弃；再加一个硬上限防止异常情况撑爆
 const API_CALL_LOG_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
@@ -321,6 +326,12 @@ export const openDB = (): Promise<IDBDatabase> => {
       createStore(STORE_LIFE_SIM, { keyPath: 'id' });
       createStore(STORE_DAILY_SCHEDULE, { keyPath: 'id' });
       createStore(STORE_HANDBOOK, { keyPath: 'id' });
+      createStore(STORE_TOGETHER_ITEMS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_TOGETHER_SESSIONS)) {
+          const togetherSessions = db.createObjectStore(STORE_TOGETHER_SESSIONS, { keyPath: 'id' });
+          togetherSessions.createIndex('charId', 'charId', { unique: false });
+          togetherSessions.createIndex('itemId', 'itemId', { unique: false });
+      }
 
       createStore(STORE_TRACKERS, { keyPath: 'id' });
       if (!db.objectStoreNames.contains(STORE_TRACKER_ENTRIES)) {
@@ -407,6 +418,19 @@ export const openDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains('digest_reports')) {
           const drStore = db.createObjectStore('digest_reports', { keyPath: 'id' });
           drStore.createIndex('charId', 'charId', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_BACKEND_SYNC_QUEUE)) {
+          const queueStore = db.createObjectStore(STORE_BACKEND_SYNC_QUEUE, { keyPath: 'key' });
+          queueStore.createIndex('charId', 'charId', { unique: false });
+          queueStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_BACKEND_EVENTS)) {
+          const eventStore = db.createObjectStore(STORE_BACKEND_EVENTS, { keyPath: 'id' });
+          eventStore.createIndex('sequenceId', 'sequenceId', { unique: true });
+          eventStore.createIndex('charId', 'charId', { unique: false });
+          eventStore.createIndex('eventType', 'eventType', { unique: false });
       }
 
       // ─── v48 一次性强制清空记忆宫殿（EventBox 体系，旧 boxId 数据不兼容） ───
@@ -725,6 +749,66 @@ export const DB = {
         const request = store.add({ ...payload, timestamp });
         request.onsuccess = () => resolve(request.result as number);
         request.onerror = () => reject(request.error);
+    });
+  },
+
+  /**
+   * Idempotently stores a backend event. When a proactive message is supplied,
+   * the event receipt and chat message are committed in the same transaction so
+   * a reload cannot create a duplicate bubble or lose the event cursor.
+   */
+  saveBackendEvent: async (
+    event: BackendConversationEventRecord,
+    message?: Omit<Message, 'id' | 'timestamp'> & { timestamp?: number },
+  ): Promise<{ created: boolean; messageId?: number }> => {
+    const db = await openDB();
+    const storeNames = message
+      ? [STORE_BACKEND_EVENTS, STORE_MESSAGES]
+      : [STORE_BACKEND_EVENTS];
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeNames, 'readwrite');
+      const eventStore = transaction.objectStore(STORE_BACKEND_EVENTS);
+      let created = false;
+      let messageId: number | undefined;
+
+      const existingRequest = eventStore.get(event.id);
+      existingRequest.onsuccess = () => {
+        if (existingRequest.result) return;
+        created = true;
+        eventStore.add(event);
+        if (message) {
+          const { timestamp: suppliedTimestamp, ...payload } = message;
+          const addMessageRequest = transaction.objectStore(STORE_MESSAGES).add({
+            ...payload,
+            timestamp: typeof suppliedTimestamp === 'number' ? suppliedTimestamp : Date.now(),
+          });
+          addMessageRequest.onsuccess = () => {
+            messageId = addMessageRequest.result as number;
+          };
+        }
+      };
+      existingRequest.onerror = () => reject(existingRequest.error);
+      transaction.oncomplete = () => resolve({ created, messageId });
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to store backend event'));
+      transaction.onabort = () => reject(transaction.error || new Error('Backend event transaction aborted'));
+    });
+  },
+
+  getBackendEventsByCharId: async (
+    charId: string,
+    limit = 200,
+  ): Promise<BackendConversationEventRecord[]> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_BACKEND_EVENTS, 'readonly');
+      const request = transaction.objectStore(STORE_BACKEND_EVENTS).index('charId').getAll(charId);
+      request.onsuccess = () => {
+        const rows = (request.result as BackendConversationEventRecord[])
+          .sort((a, b) => b.sequenceId - a.sequenceId)
+          .slice(0, Math.max(1, limit));
+        resolve(rows);
+      };
+      request.onerror = () => reject(request.error);
     });
   },
 
@@ -1412,6 +1496,43 @@ export const DB = {
           request.onsuccess = () => resolve(request.result || []);
           request.onerror = () => reject(request.error);
       });
+  },
+
+  getDiaryByBackendId: async (charId: string, backendDiaryId: string): Promise<DiaryEntry | null> => {
+      if (!backendDiaryId) return null;
+      const diaries = await DB.getDiariesByCharId(charId);
+      return diaries.find(diary => diary.backendDiaryId === backendDiaryId) || null;
+  },
+
+  getDiaryById: async (id: string): Promise<DiaryEntry | null> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_DIARIES, 'readonly');
+          const request = transaction.objectStore(STORE_DIARIES).get(id);
+          request.onsuccess = () => resolve((request.result as DiaryEntry | undefined) || null);
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  mergeDiaryComment: async (
+      charId: string,
+      backendDiaryId: string,
+      comment: NonNullable<DiaryEntry['comments']>[number],
+  ): Promise<{ diary: DiaryEntry | null; changed: boolean }> => {
+      const diary = await DB.getDiaryByBackendId(charId, backendDiaryId);
+      if (!diary) return { diary: null, changed: false };
+      const comments = diary.comments || [];
+      const duplicate = comments.some(item =>
+          item.id === comment.id
+          || (item.backendCommentId && comment.backendCommentId && item.backendCommentId === comment.backendCommentId),
+      );
+      if (duplicate) return { diary, changed: false };
+      const updated: DiaryEntry = {
+          ...diary,
+          comments: [...comments, comment].sort((a, b) => a.createdAt - b.createdAt),
+      };
+      await DB.saveDiary(updated);
+      return { diary: updated, changed: true };
   },
 
   saveDiary: async (diary: DiaryEntry): Promise<void> => {
@@ -2550,7 +2671,7 @@ export const DB = {
           });
       };
 
-      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings, togetherItems, togetherSessions] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
           getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
@@ -2600,19 +2721,21 @@ export const DB = {
           getAllFromStore(STORE_LIFE_RECORDS),
           getAllFromStore(STORE_MED_PLANS),
           getAllFromStore(STORE_LIFE_SETTINGS),
+          getAllFromStore(STORE_TOGETHER_ITEMS),
+          getAllFromStore(STORE_TOGETHER_SESSIONS),
       ]);
 
-      const userProfile = userProfiles.length > 0 ? {
-          name: userProfiles[0].name,
-          avatar: userProfiles[0].avatar,
-          bio: userProfiles[0].bio
-      } : undefined;
+      const userProfile = userProfiles.length > 0
+          ? Object.fromEntries(Object.entries(userProfiles[0]).filter(([key]) => key !== 'id'))
+          : undefined;
 
       const mainState = bankData.find((d: any) => d.id === 'main_state');
       const dollhouseRecord = bankData.find((d: any) => d.id === 'dollhouse_state');
 
       return {
           characters, characterGroups, messages, customThemes: themes, savedEmojis: emojis, emojiCategories, assets, galleryImages, userProfile, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, savedJournalStickers: journalStickers, socialPosts, courses, games, worldbooks, novels,
+          togetherItems,
+          togetherSessions,
           bankState: mainState ? { ...mainState, id: undefined } : undefined,
           bankDollhouse: dollhouseRecord?.data || undefined,
           bankTransactions: bankTx,
@@ -2691,6 +2814,10 @@ export const DB = {
           STORE_WORLDS, STORE_WORLD_EPISODES,
           'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
           'room_plates', 'digest_reports',
+          STORE_BACKEND_SYNC_QUEUE,
+          STORE_BACKEND_EVENTS,
+          STORE_TOGETHER_ITEMS,
+          STORE_TOGETHER_SESSIONS,
           'memory_batches', 'pixel_home_assets', 'pixel_home_layouts'
       ].filter(name => db.objectStoreNames.contains(name));
 
@@ -2747,6 +2874,8 @@ export const DB = {
           data.games !== undefined,
           data.worldbooks !== undefined,
           data.novels !== undefined,
+          data.togetherItems !== undefined,
+          data.togetherSessions !== undefined,
           data.songs !== undefined,
           data.quizSessions !== undefined,
           data.guidebookSessions !== undefined,
@@ -3021,6 +3150,14 @@ export const DB = {
           await clearAndAdd(STORE_NOVELS, data.novels, '小说', false);
           data.novels = undefined as any;
       }, data.novels?.length || 0);
+      await runSection('一起看片库', data.togetherItems !== undefined, async () => {
+          await clearAndAdd(STORE_TOGETHER_ITEMS, data.togetherItems, '一起看片库', false);
+          data.togetherItems = undefined as any;
+      }, data.togetherItems?.length || 0);
+      await runSection('一起看会话', data.togetherSessions !== undefined, async () => {
+          await clearAndAdd(STORE_TOGETHER_SESSIONS, data.togetherSessions, '一起看会话', false);
+          data.togetherSessions = undefined as any;
+      }, data.togetherSessions?.length || 0);
       await runSection('彼方小说库', data.vrNovels !== undefined, async () => {
           await clearAndAdd(STORE_VR_NOVELS, data.vrNovels, '彼方小说库', false);
           data.vrNovels = undefined as any;

@@ -63,6 +63,7 @@ export interface RealtimeConfig {
         loggedInNickname?: string;
         loggedInUserId?: string;
         userXsecToken?: string; // 从 feed 列表自动获取，用于 getUserProfile 等
+        autonomyPermissions?: { shareToChat: boolean; like: boolean };
     };
 
     // 缓存配置

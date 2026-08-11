@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallba
 import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
+import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot, CharacterProfile, InteractionMode } from '../types';
 import { processImage } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
@@ -49,6 +49,9 @@ import { resolveActiveSound, playWhiteboxSound, unlockWhiteboxAudio, parseWhiteb
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import { normalizeTranslationLangLabel } from '../utils/translationLang';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { enqueueBackendChatMessageDeletes } from '../utils/backendSyncQueue';
+import { currentInteractionMode, inferExplicitUserMode } from '../utils/interactionMode';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 type InstantToolUiStatus = {
@@ -60,7 +63,7 @@ type InstantToolUiStatus = {
 };
 
 const Chat: React.FC = () => {
-    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, apiPresets, addApiPreset, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars, openDateWithChar } = useOS();
+    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, apiPresets, addApiPreset, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, updateUserProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars } = useOS();
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
 
     // 记忆宫殿高水位（用于清空聊天时的安全检查）
@@ -180,6 +183,22 @@ const Chat: React.FC = () => {
 
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
     charRef.current = char; // Keep ref in sync for async callbacks
+    const deleteMessagesEverywhere = useCallback(async (targets: Message[]): Promise<boolean> => {
+        if (!char || targets.length === 0) return false;
+        await enqueueBackendChatMessageDeletes(char.id, targets);
+        const backendConfig = loadBackendChatConfig();
+        let backendSynced = false;
+        if (backendConfig.enabled) {
+            await flushBackendMemorySyncQueue({
+                config: backendConfig,
+                character: char,
+                user: userProfile,
+            });
+            backendSynced = true;
+        }
+        await DB.deleteMessages(targets.map(message => message.id));
+        return backendSynced;
+    }, [char, userProfile]);
     const currentThemeId = char?.bubbleStyle || 'default';
     // 解析逻辑抽到 utils/groupChat/theme.ts（群聊共用），行为不变
     const activeTheme = useMemo(
@@ -738,14 +757,21 @@ const Chat: React.FC = () => {
             } catch { /* ignore */ }
             setInstantToolStatus(null);
         };
+        const backendMessageHandler = (e: Event) => {
+            const detail = (e as CustomEvent<{ charId?: string; eventType?: string }>).detail;
+            if (detail?.eventType !== 'user_message' || detail.charId !== activeCharIdRef.current) return;
+            void reloadMessages(visibleCountRef.current);
+        };
         window.addEventListener('instant-tool-status', handler);
         window.addEventListener('active-msg-received', receivedHandler);
+        window.addEventListener('backend-event-received', backendMessageHandler);
         return () => {
             window.removeEventListener('instant-tool-status', handler);
             window.removeEventListener('active-msg-received', receivedHandler);
+            window.removeEventListener('backend-event-received', backendMessageHandler);
             if (clearTimer) clearTimeout(clearTimer);
         };
-    }, []);
+    }, [reloadMessages]);
 
     // Auto-generate daily schedule (fire-and-forget on chat load)
     // 总开关关闭时完全跳过：不查询 DB、不调用副 API、不跑兜底
@@ -883,6 +909,18 @@ const Chat: React.FC = () => {
         unlockWhiteboxAudio();
         const text = customContent || input.trim();
         const type = customType || 'text';
+        const explicitMode = type === 'text' ? inferExplicitUserMode(text) : null;
+        const messageMode = explicitMode || currentInteractionMode(char);
+        if (explicitMode && explicitMode !== currentInteractionMode(char)) {
+            updateCharacter(char.id, {
+                interactionMode: explicitMode,
+                interactionScene: {
+                    ...(char.interactionScene || {}),
+                    changedAt: Date.now(),
+                    changedBy: 'user',
+                },
+            });
+        }
 
         // 发消息隐含"回到当前聊天"——退出 windowed 旧消息浏览模式
         if (windowedFocusMsgId !== null) {
@@ -933,7 +971,7 @@ const Chat: React.FC = () => {
             addToast('图片已保存至相册', 'info');
         }
 
-        const msgPayload: any = { charId: char.id, role: 'user', type, content: text, metadata };
+        const msgPayload: any = { charId: char.id, role: 'user', type, content: text, metadata: { ...(metadata || {}), interactionMode: messageMode } };
         
         if (replyTarget) {
             msgPayload.replyTo = {
@@ -1175,7 +1213,14 @@ const Chat: React.FC = () => {
 
         if (toDeleteIds.length === 0) return;
 
-        await DB.deleteMessages(toDeleteIds);
+        const targets = messages.filter(message => toDeleteIds.includes(message.id));
+        try {
+            await deleteMessagesEverywhere(targets);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : '未知错误';
+            addToast('回溯失败，后端上下文未删除：' + detail, 'error');
+            return;
+        }
         discardVoiceForMessages(toDeleteIds);
         const newHistory = messages.slice(0, index + 1);
         setMessages(newHistory);
@@ -1212,7 +1257,33 @@ const Chat: React.FC = () => {
             case 'select-category': setActiveCategory(payload); break;
             case 'category-options': setSelectedCategory(payload); setModalType('category-options'); break;
             case 'delete-category-req': setSelectedCategory(payload); setModalType('delete-category'); break;
-            case 'meetup': if (char) { setShowPanel('none'); openDateWithChar(char.id); } break;
+            case 'interaction-mode-toggle': {
+                if (!char) break;
+                const next: InteractionMode = currentInteractionMode(char) === 'online' ? 'offline' : 'online';
+                const updatedChar: CharacterProfile = {
+                    ...char,
+                    interactionMode: next,
+                    interactionScene: {
+                        ...(char.interactionScene || {}),
+                        changedAt: Date.now(),
+                        changedBy: 'user' as const,
+                    },
+                };
+                updateCharacter(char.id, updatedChar);
+                const backendConfig = loadBackendChatConfig();
+                if (backendConfig.enabled) {
+                    void syncBackendContext({
+                        config: backendConfig,
+                        character: updatedChar,
+                        user: userProfile,
+                        messages: [],
+                        memories: [],
+                    }).catch(error => console.warn('[interaction-mode] backend sync failed', error));
+                }
+                setShowPanel('none');
+                addToast(next === 'offline' ? '已切到线下相处' : '已切回线上聊天', 'success');
+                break;
+            }
             case 'proactive': setShowProactiveModal(true); break;
             case 'emotion': setModalType('schedule'); break; // 情绪已并入日程，打开同一 modal
             case 'schedule': setModalType('schedule'); break;
@@ -1483,6 +1554,19 @@ const Chat: React.FC = () => {
     }, [char, reloadMessages]);
 
     // --- Schedule Handlers ---
+    const syncScheduleSnapshot = (targetChar: typeof char) => {
+        if (!targetChar) return;
+        const backendConfig = loadBackendChatConfig();
+        if (!backendConfig.enabled || !backendConfig.baseUrl.trim() || !backendConfig.token.trim()) return;
+        void syncBackendContext({
+            config: backendConfig,
+            character: targetChar,
+            user: userProfile,
+            messages: [],
+            memories: [],
+        }).catch(error => console.warn('[Schedule] backend snapshot sync failed', error));
+    };
+
     const loadSchedule = async () => {
         if (!char) return;
         if (!isScheduleFeatureOn(char)) { setScheduleData(null); return; }
@@ -1503,6 +1587,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        syncScheduleSnapshot(char);
     };
 
     const handleScheduleDelete = async (index: number) => {
@@ -1511,6 +1596,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        syncScheduleSnapshot(char);
     };
 
     const handleScheduleCoverChange = async (dataUrl: string) => {
@@ -1518,6 +1604,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, coverImage: dataUrl };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        syncScheduleSnapshot(char);
     };
 
     // 小剧场：点某个时段的播放按钮。有缓存直接放；没有则先生成再放（forceRegenerate=重演）。
@@ -1586,7 +1673,10 @@ const Chat: React.FC = () => {
         setIsScheduleGenerating(true);
         try {
             const result = await generateDailyScheduleForChar(targetChar, userProfile, apiConfig, forceRegenerate);
-            if (result) setScheduleData(result);
+            if (result) {
+                setScheduleData(result);
+                syncScheduleSnapshot(targetChar);
+            }
         } catch (e) {
             console.error('[Schedule] Generation error:', e);
         } finally {
@@ -1606,7 +1696,10 @@ const Chat: React.FC = () => {
         setIsScheduleGenerating(true);
         try {
             const result = await generateDailyScheduleForChar(updatedChar, userProfile, apiConfig, true);
-            if (result) setScheduleData(result);
+            if (result) {
+                setScheduleData(result);
+                syncScheduleSnapshot(updatedChar);
+            }
         } catch (e) {
             console.error('[Schedule] Regeneration after style change failed:', e);
         } finally {
@@ -1782,6 +1875,7 @@ const Chat: React.FC = () => {
 
     const handleClearHistory = async () => {
         if (!char) return;
+        try {
 
         // 记忆宫殿安全检查：如果角色启用了记忆宫殿，检查是否有未被向量化处理的消息
         if (char.memoryPalaceEnabled) {
@@ -1812,14 +1906,19 @@ const Chat: React.FC = () => {
                     return;
                 }
                 const processedIds = processedMsgs.map(m => m.id);
-                await DB.deleteMessages(processedIds);
+                const synced = await deleteMessagesEverywhere(processedMsgs);
                 discardVoiceForMessages(processedIds);
                 const remaining = allMessages.filter(m => m.id > hwm);
                 setMessages(remaining.slice(-200));
                 setTotalMsgCount(remaining.length);
                 setVisibleCount(LOAD_BATCH_SIZE);
                 visibleCountRef.current = LOAD_BATCH_SIZE;
-                addToast(`已安全清理 ${processedMsgs.length} 条已处理记录，保留 ${remaining.length} 条未处理记录`, 'success');
+                addToast(
+                    synced
+                        ? '已前后端清理 ' + processedMsgs.length + ' 条已处理记录，保留 ' + remaining.length + ' 条未处理记录'
+                        : '本地已清理 ' + processedMsgs.length + ' 条，后端删除已进入待同步队列',
+                    synced ? 'success' : 'info',
+                );
                 setModalType('none');
                 return;
             }
@@ -1836,24 +1935,34 @@ const Chat: React.FC = () => {
                 return;
             }
             const toDeleteIds = toDelete.map(m => m.id);
-            await DB.deleteMessages(toDeleteIds);
+            const synced = await deleteMessagesEverywhere(toDelete);
             discardVoiceForMessages(toDeleteIds);
             setMessages(toKeep);
             setTotalMsgCount(toKeep.length);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
-            addToast(`已清理 ${toDelete.length} 条历史，保留最近10条`, 'success');
+            addToast(
+                synced ? '已前后端清理 ' + toDelete.length + ' 条历史，保留最近10条' : '本地已清理，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
         } else {
-            const allIds = (await DB.getMessagesByCharId(char.id, true)).map(m => m.id);
-            await DB.clearMessages(char.id);
+            const allMessages = await DB.getMessagesByCharId(char.id, true);
+            const allIds = allMessages.map(m => m.id);
+            const synced = await deleteMessagesEverywhere(allMessages);
             discardVoiceForMessages(allIds);
             setMessages([]);
             setTotalMsgCount(0);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
-            addToast('已清空', 'success');
+            addToast(
+                synced ? '聊天与后端上下文均已清空' : '本地已清空，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
         }
         setModalType('none');
+        } catch (error) {
+            addToast('清理失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
+        }
     };
 
     // 打开「聊天设置」弹窗且开了记忆宫殿时，算一次待处理条数显示在「一键存入」按钮上。
@@ -2151,13 +2260,22 @@ const Chat: React.FC = () => {
     const handleDeleteMessage = async () => {
         if (!selectedMessage) return;
         const deletedId = selectedMessage.id;
-        await DB.deleteMessage(deletedId);
+        try {
+            const synced = await deleteMessagesEverywhere([selectedMessage]);
+            addToast(
+                synced ? '消息已从前端和后端删除' : '消息已删除，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : '未知错误';
+            addToast('删除失败，前端内容已保留：' + detail, 'error');
+            return;
+        }
         discardVoiceForMessages([deletedId]);
         setMessages(prev => prev.filter(m => m.id !== deletedId));
         setTotalMsgCount(prev => Math.max(0, prev - 1));
         setModalType('none');
         setSelectedMessage(null);
-        addToast('消息已删除', 'success');
     };
 
     const confirmEditMessage = async () => {
@@ -2304,7 +2422,14 @@ const Chat: React.FC = () => {
         }
         const ids = Array.from(msgIdsToDelete);
         if (ids.length > 0) {
-            await DB.deleteMessages(ids);
+            const targets = messages.filter(message => msgIdsToDelete.has(message.id));
+            try {
+                await deleteMessagesEverywhere(targets);
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : '未知错误';
+                addToast('删除失败，前端内容已保留：' + detail, 'error');
+                return;
+            }
             discardVoiceForMessages(ids);
         }
 
@@ -2816,6 +2941,8 @@ const Chat: React.FC = () => {
                 onScheduleCoverChange={handleScheduleCoverChange}
                 onScheduleStyleChange={handleScheduleStyleChange}
                 onPlayTheater={handlePlayTheater}
+                weeklySchedule={userProfile.weeklySchedule || []}
+                onSaveWeeklySchedule={(weeklySchedule) => updateUserProfile({ weeklySchedule })}
                 isScheduleFeatureEnabled={isScheduleFeatureOn(char)}
                 onToggleScheduleFeature={handleToggleScheduleFeature}
                 isMemoryPalaceEnabled={!!char.memoryPalaceEnabled}
@@ -3300,6 +3427,7 @@ const Chat: React.FC = () => {
                     luckinActivated={luckinActivated}
                     htmlModeEnabled={!!(char as any).htmlModeEnabled}
                     showThinkingChain={!!(char as any).showThinkingChain}
+                    interactionMode={currentInteractionMode(char)}
                     inputStyle={osTheme.chatInputStyle}
                     sendButtonStyle={osTheme.chatSendButtonStyle}
                     chromeStyle={osTheme.chatChromeStyle}

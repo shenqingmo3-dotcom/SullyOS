@@ -99,6 +99,23 @@ export const buildMcpSystemBlock = (userName: string = '用户', charId?: string
         const names = (s.tools || []).map(t => t.name).join('、');
         return `- ${s.name}: ${names}`;
     });
+    const visibleToolNames = new Set(
+        servers.flatMap(server => (server.tools || []).map(tool => tool.name.toLowerCase())),
+    );
+    const hasHealthTrends = visibleToolNames.has('health_trends');
+    const healthAwareness = visibleToolNames.has('health_now')
+        ? `
+
+**健康自然关心（已由 ${userName} 授权给当前聊天）**:
+- 你可以在对话语境合适时自主调用 \`health_now\`，不必等 ${userName} 明确要求。例如早晨问候、对方提到疲惫/熬夜/情绪/运动，或你正想自然关心对方近况时。
+- 不要每轮监控、不要为了展示工具而硬提健康。只有数据足够新、与当下对话相关或确实值得关心时，才把一两点自然融进原本要说的话；不相关就完全不提。
+- 像亲近的人说话，不要念报告、不要整段复述数值。可以说“昨晚好像睡得有点少，今天别太勉强自己”，必要时再给一两个依据。
+- 区分事实和推测：睡眠时长、阶段、心率等只能说明记录到的数据，不能直接等同于“睡眠质量差”、压力、疾病或情绪原因。
+- 不做诊断、不制造恐慌、不擅自给药物建议。若 ${userName} 描述严重或紧急症状，应建议联系当地急救或专业医疗人员。
+${visibleToolNames.has('health_detail') ? '- 只有当前对话确实需要更细的数据时才继续调用 `health_detail`；普通关心优先使用紧凑的 `health_now`。' : ''}
+${hasHealthTrends ? '- 只有需要判断“最近几天是否持续变化”时才调用 `health_trends`，并把结果说成相对个人基线的趋势，不要下医学结论。' : ''}
+`
+        : '';
     return `
 
 ---
@@ -115,6 +132,7 @@ ${lines.join('\n')}
 - 工具结果只挑与对话相关的部分用角色语气转述，别整段复读 JSON。
 - 工具失败就如实说，并根据报错调整参数重试或换个方式，别编造结果。
 - 涉及真实世界副作用的操作（发布内容、下单、删除等），先跟 ${userName} 确认一句再动手。
+${healthAwareness}
 ---
 `;
 };
@@ -158,7 +176,7 @@ export const sanitizeMcpLeadInText = (raw: string): string => {
     cleaned = cleaned.replace(/<\/?(?:think|thinking|thought)\b[^>]*>/gi, '');
     cleaned = cleaned.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*.*?\]/gi, '');
     cleaned = cleaned.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[^\]]*\]/g, '');
-    cleaned = cleaned.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n');
+    cleaned = cleaned.replace(/\s*\[(?:聊天|线上聊天|线下相处|通话|约会)\]\s*/g, '\n');
     return cleaned.replace(/\n{3,}/g, '\n\n').trim();
 };
 

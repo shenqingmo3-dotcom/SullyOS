@@ -13,6 +13,11 @@ import type {
 import { DIGEST_REPORT_KEEP } from './types';
 import { bm25Index } from './bm25Index';
 import type { VectorIndexEntry as VectorBackupIndexEntry } from '../backupFormat';
+import {
+    enqueueBackendMemoryChange,
+    enqueueBackendMemoryChanges,
+    type BackendMemoryEntityType,
+} from '../backendSyncQueue';
 
 // ─── Store 名称常量 ────────────────────────────────────
 
@@ -87,6 +92,31 @@ async function getAll<T>(storeName: string): Promise<T[]> {
     });
 }
 
+async function queueUpsert(
+    entityType: BackendMemoryEntityType,
+    charId: string,
+    entityId: string,
+    payload: unknown,
+): Promise<void> {
+    try {
+        await enqueueBackendMemoryChange({ charId, entityType, entityId, operation: 'upsert', payload });
+    } catch (error) {
+        console.warn('[BackendSyncQueue] enqueue upsert failed', entityType, entityId, error);
+    }
+}
+
+async function queueDelete(
+    entityType: BackendMemoryEntityType,
+    charId: string,
+    entityId: string,
+): Promise<void> {
+    try {
+        await enqueueBackendMemoryChange({ charId, entityType, entityId, operation: 'delete' });
+    } catch (error) {
+        console.warn('[BackendSyncQueue] enqueue delete failed', entityType, entityId, error);
+    }
+}
+
 // ─── MemoryNode CRUD ──────────────────────────────────
 
 /** 读取远程向量配置（轻量，仅 localStorage 读取） */
@@ -130,13 +160,16 @@ export const MemoryNodeDB = {
         // touchAccess 之类只改 metadata 的写入会被自动跳过。
         bm25Index.onNodeSaved(node);
         syncNodeMetadataToRemote(node);
+        await queueUpsert('memory_node', node.charId, node.id, node);
     },
 
     getById: (id: string) => getByKey<MemoryNode>(STORE_MEMORY_NODES, id),
 
     delete: async (id: string) => {
+        const existing = await getByKey<MemoryNode>(STORE_MEMORY_NODES, id);
         await deleteByKey(STORE_MEMORY_NODES, id);
         bm25Index.onNodeDeleted(id);
+        if (existing) await queueDelete('memory_node', existing.charId, id);
     },
 
     getByCharId: (charId: string) =>
@@ -171,6 +204,13 @@ export const MemoryNodeDB = {
             tx.onerror = () => reject(tx.error);
         });
         bm25Index.onNodesSaved(nodes);
+        await enqueueBackendMemoryChanges(nodes.map(node => ({
+            charId: node.charId,
+            entityType: 'memory_node' as const,
+            entityId: node.id,
+            operation: 'upsert' as const,
+            payload: node,
+        }))).catch(error => console.warn('[BackendSyncQueue] enqueue nodes failed', error));
     },
 
     /** 更新访问记录（检索后调用） */
@@ -265,6 +305,7 @@ export const MemoryVectorDB = {
             console.error(`❌ [MemoryVectorDB] WRITE VERIFICATION FAILED for ${vec.memoryId}`);
             throw new Error(`Memory vector write failed: ${vec.memoryId}`);
         }
+        await queueUpsert('memory_vector', vec.charId, vec.memoryId, vec);
     },
 
     getByMemoryId: async (memoryId: string): Promise<MemoryVector | undefined> => {
@@ -273,7 +314,11 @@ export const MemoryVectorDB = {
         return { ...v, vector: ensureFloat32(v.vector) };
     },
 
-    delete: (memoryId: string) => deleteByKey(STORE_MEMORY_VECTORS, memoryId),
+    delete: async (memoryId: string) => {
+        const existing = await getByKey<MemoryVector>(STORE_MEMORY_VECTORS, memoryId);
+        await deleteByKey(STORE_MEMORY_VECTORS, memoryId);
+        if (existing?.charId) await queueDelete('memory_vector', existing.charId, memoryId);
+    },
 
     /**
      * 获取角色的全部向量 — 优先使用 charId 索引直查，避免全表扫描。
@@ -373,7 +418,7 @@ export const MemoryVectorDB = {
     /** 批量保存 */
     saveMany: async (vectors: MemoryVector[]): Promise<void> => {
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        await new Promise<void>((resolve, reject) => {
             const tx = db.transaction(STORE_MEMORY_VECTORS, 'readwrite');
             const store = tx.objectStore(STORE_MEMORY_VECTORS);
             for (const vec of vectors) {
@@ -382,6 +427,13 @@ export const MemoryVectorDB = {
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
+        await enqueueBackendMemoryChanges(vectors.map(vector => ({
+            charId: vector.charId,
+            entityType: 'memory_vector' as const,
+            entityId: vector.memoryId,
+            operation: 'upsert' as const,
+            payload: vector,
+        }))).catch(error => console.warn('[BackendSyncQueue] enqueue vectors failed', error));
     },
 
     /**
@@ -461,9 +513,21 @@ export const MemoryVectorDB = {
 // ─── MemoryLink CRUD ──────────────────────────────────
 
 export const MemoryLinkDB = {
-    save: (link: MemoryLink) => put<MemoryLink>(STORE_MEMORY_LINKS, link),
+    save: async (link: MemoryLink) => {
+        await put<MemoryLink>(STORE_MEMORY_LINKS, link);
+        const source = await getByKey<MemoryNode>(STORE_MEMORY_NODES, link.sourceId);
+        if (source) await queueUpsert('memory_link', source.charId, link.id, link);
+    },
 
-    delete: (id: string) => deleteByKey(STORE_MEMORY_LINKS, id),
+    /** 全量迁移/审计用；调用方应按当前角色的 MemoryNode ID 集合过滤。 */
+    getAll: () => getAll<MemoryLink>(STORE_MEMORY_LINKS),
+
+    delete: async (id: string) => {
+        const existing = await getByKey<MemoryLink>(STORE_MEMORY_LINKS, id);
+        const source = existing ? await getByKey<MemoryNode>(STORE_MEMORY_NODES, existing.sourceId) : undefined;
+        await deleteByKey(STORE_MEMORY_LINKS, id);
+        if (source) await queueDelete('memory_link', source.charId, id);
+    },
 
     getBySourceId: (sourceId: string) =>
         getAllByIndex<MemoryLink>(STORE_MEMORY_LINKS, 'sourceId', sourceId),
@@ -492,7 +556,7 @@ export const MemoryLinkDB = {
     /** 批量保存 */
     saveMany: async (links: MemoryLink[]): Promise<void> => {
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        await new Promise<void>((resolve, reject) => {
             const tx = db.transaction(STORE_MEMORY_LINKS, 'readwrite');
             const store = tx.objectStore(STORE_MEMORY_LINKS);
             for (const link of links) {
@@ -501,13 +565,34 @@ export const MemoryLinkDB = {
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
+        const sourceIds = [...new Set(links.map(link => link.sourceId))];
+        const sources = await Promise.all(
+            sourceIds.map(sourceId => getByKey<MemoryNode>(STORE_MEMORY_NODES, sourceId)),
+        );
+        const charIdBySource = new Map(
+            sources.filter((source): source is MemoryNode => Boolean(source))
+                .map(source => [source.id, source.charId]),
+        );
+        await enqueueBackendMemoryChanges(links.flatMap(link => {
+            const charId = charIdBySource.get(link.sourceId);
+            return charId ? [{
+                charId,
+                entityType: 'memory_link' as const,
+                entityId: link.id,
+                operation: 'upsert' as const,
+                payload: link,
+            }] : [];
+        })).catch(error => console.warn('[BackendSyncQueue] enqueue links failed', error));
     },
 };
 
 // ─── MemoryBatch CRUD ─────────────────────────────────
 
 export const MemoryBatchDB = {
-    save: (batch: MemoryBatch) => put<MemoryBatch>(STORE_MEMORY_BATCHES, batch),
+    save: async (batch: MemoryBatch) => {
+        await put<MemoryBatch>(STORE_MEMORY_BATCHES, batch);
+        await queueUpsert('memory_batch', batch.charId, batch.id, batch);
+    },
 
     getByCharId: (charId: string) =>
         getAllByIndex<MemoryBatch>(STORE_MEMORY_BATCHES, 'charId', charId),
@@ -516,7 +601,10 @@ export const MemoryBatchDB = {
 // ─── TopicBox CRUD ────────────────────────────────────
 
 export const TopicBoxDB = {
-    save: (box: TopicBox) => put<TopicBox>(STORE_TOPIC_BOXES, box),
+    save: async (box: TopicBox) => {
+        await put<TopicBox>(STORE_TOPIC_BOXES, box);
+        await queueUpsert('topic_box', box.charId, box.id, box);
+    },
 
     getById: (id: string) => getByKey<TopicBox>(STORE_TOPIC_BOXES, id),
 
@@ -538,11 +626,18 @@ export const TopicBoxDB = {
 // ─── EventBox CRUD ────────────────────────────────────
 
 export const EventBoxDB = {
-    save: (box: EventBox) => put<EventBox>(STORE_EVENT_BOXES, box),
+    save: async (box: EventBox) => {
+        await put<EventBox>(STORE_EVENT_BOXES, box);
+        await queueUpsert('event_box', box.charId, box.id, box);
+    },
 
     getById: (id: string) => getByKey<EventBox>(STORE_EVENT_BOXES, id),
 
-    delete: (id: string) => deleteByKey(STORE_EVENT_BOXES, id),
+    delete: async (id: string) => {
+        const existing = await getByKey<EventBox>(STORE_EVENT_BOXES, id);
+        await deleteByKey(STORE_EVENT_BOXES, id);
+        if (existing) await queueDelete('event_box', existing.charId, id);
+    },
 
     getByCharId: (charId: string) =>
         getAllByIndex<EventBox>(STORE_EVENT_BOXES, 'charId', charId),
@@ -551,13 +646,20 @@ export const EventBoxDB = {
     saveMany: async (boxes: EventBox[]): Promise<void> => {
         if (boxes.length === 0) return;
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        await new Promise<void>((resolve, reject) => {
             const tx = db.transaction(STORE_EVENT_BOXES, 'readwrite');
             const store = tx.objectStore(STORE_EVENT_BOXES);
             for (const box of boxes) store.put(box);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
+        await enqueueBackendMemoryChanges(boxes.map(box => ({
+            charId: box.charId,
+            entityType: 'event_box' as const,
+            entityId: box.id,
+            operation: 'upsert' as const,
+            payload: box,
+        }))).catch(error => console.warn('[BackendSyncQueue] enqueue event boxes failed', error));
     },
 };
 
@@ -569,7 +671,10 @@ export function plateId(charId: string, room: PlateRoom): string {
 }
 
 export const RoomPlateDB = {
-    save: (plate: RoomPlate) => put<RoomPlate>(STORE_ROOM_PLATES, plate),
+    save: async (plate: RoomPlate) => {
+        await put<RoomPlate>(STORE_ROOM_PLATES, plate);
+        await queueUpsert('room_plate', plate.charId, plate.id, plate);
+    },
 
     get: (charId: string, room: PlateRoom) =>
         getByKey<RoomPlate>(STORE_ROOM_PLATES, plateId(charId, room)),
@@ -577,8 +682,11 @@ export const RoomPlateDB = {
     getByCharId: (charId: string) =>
         getAllByIndex<RoomPlate>(STORE_ROOM_PLATES, 'charId', charId),
 
-    delete: (charId: string, room: PlateRoom) =>
-        deleteByKey(STORE_ROOM_PLATES, plateId(charId, room)),
+    delete: async (charId: string, room: PlateRoom) => {
+        const id = plateId(charId, room);
+        await deleteByKey(STORE_ROOM_PLATES, id);
+        await queueDelete('room_plate', charId, id);
+    },
 };
 
 // ─── DigestReport CRUD（消化日志） ────────────────────
@@ -587,6 +695,7 @@ export const DigestReportDB = {
     /** 保存并修剪：每角色只留最近 DIGEST_REPORT_KEEP 条 */
     save: async (report: DigestReport): Promise<void> => {
         await put<DigestReport>(STORE_DIGEST_REPORTS, report);
+        await queueUpsert('digest_report', report.charId, report.id, report);
         try {
             const all = await getAllByIndex<DigestReport>(STORE_DIGEST_REPORTS, 'charId', report.charId);
             if (all.length > DIGEST_REPORT_KEEP) {
@@ -595,6 +704,7 @@ export const DigestReportDB = {
                     .slice(DIGEST_REPORT_KEEP);
                 for (const old of overflow) {
                     await deleteByKey(STORE_DIGEST_REPORTS, old.id);
+                    await queueDelete('digest_report', old.charId, old.id);
                 }
             }
         } catch { /* 修剪失败不影响本条保存 */ }
@@ -605,13 +715,20 @@ export const DigestReportDB = {
         getAllByIndex<DigestReport>(STORE_DIGEST_REPORTS, 'charId', charId)
             .then(list => list.sort((a, b) => b.createdAt - a.createdAt)),
 
-    delete: (id: string) => deleteByKey(STORE_DIGEST_REPORTS, id),
+    delete: async (id: string) => {
+        const existing = await getByKey<DigestReport>(STORE_DIGEST_REPORTS, id);
+        await deleteByKey(STORE_DIGEST_REPORTS, id);
+        if (existing) await queueDelete('digest_report', existing.charId, id);
+    },
 };
 
 // ─── Anticipation CRUD ────────────────────────────────
 
 export const AnticipationDB = {
-    save: (ant: Anticipation) => put<Anticipation>(STORE_ANTICIPATIONS, ant),
+    save: async (ant: Anticipation) => {
+        await put<Anticipation>(STORE_ANTICIPATIONS, ant);
+        await queueUpsert('anticipation', ant.charId, ant.id, ant);
+    },
 
     getById: (id: string) => getByKey<Anticipation>(STORE_ANTICIPATIONS, id),
 

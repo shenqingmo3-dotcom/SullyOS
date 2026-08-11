@@ -67,6 +67,14 @@ function formatChatHistoryForSchedule(
     return `\n## 最近的聊天记录（与「${user.name}」）\n${lines.join('\n')}\n`;
 }
 
+function formatWeeklyUserSchedule(user: UserProfile, dayOfWeek: number): string {
+    const entries = (user.weeklySchedule || [])
+        .filter(entry => entry.daysOfWeek.includes(dayOfWeek))
+        .sort((a, b) => a.startTime.localeCompare(b.startTime));
+    if (!entries.length) return '';
+    return `\n## 用户今天固定安排（必须作为现实约束）\n${entries.map(entry => `- ${entry.startTime}-${entry.endTime} ${entry.title}${entry.location ? `，地点：${entry.location}` : ''}${entry.note ? `（${entry.note}）` : ''}`).join('\n')}\n`;
+}
+
 function buildLifestylePrompt(
     baseContext: string,
     char: CharacterProfile,
@@ -246,11 +254,8 @@ export async function generateDailyScheduleForChar(
 
     const today = new Date().toISOString().split('T')[0];
 
-    // Check if already exists
-    if (!forceRegenerate) {
-        const existing = await DB.getDailySchedule(char.id, today);
-        if (existing) return existing;
-    }
+    const existing = await DB.getDailySchedule(char.id, today);
+    if (!forceRegenerate && existing) return existing;
 
     // Preserve cover image from previous schedules
     let coverImage: string | undefined;
@@ -283,14 +288,18 @@ export async function generateDailyScheduleForChar(
     const baseContext = ContextBuilder.buildCoreContext(char, userProfile, true);
 
     const chatHistoryBlock = formatChatHistoryForSchedule(filteredMessages, char, userProfile);
+    const userScheduleBlock = formatWeeklyUserSchedule(userProfile, new Date().getDay());
+    const priorScheduleBlock = forceRegenerate && existing
+        ? `\n## 今天已经存在的角色日程（只在对话有理由时调整）\n${existing.slots.map(slot => `- ${slot.startTime} ${slot.activity}${slot.location ? `，${slot.location}` : ''}`).join('\n')}\n如果最近对话改变了双方安排，只调整受影响的时段及其之后的安排；没有理由改变的时段保持不动。\n`
+        : '';
 
     const now = new Date();
     const dayOfWeek = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
 
     const style = char.scheduleStyle || 'lifestyle';
     const prompt = style === 'mindful'
-        ? buildMindfulPrompt(baseContext, char, userProfile, today, dayOfWeek, chatHistoryBlock)
-        : buildLifestylePrompt(baseContext, char, userProfile, today, dayOfWeek, chatHistoryBlock);
+        ? buildMindfulPrompt(baseContext, char, userProfile, today, dayOfWeek, `${chatHistoryBlock}${userScheduleBlock}${priorScheduleBlock}`)
+        : buildLifestylePrompt(baseContext, char, userProfile, today, dayOfWeek, `${chatHistoryBlock}${userScheduleBlock}${priorScheduleBlock}`);
 
     try {
         const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {

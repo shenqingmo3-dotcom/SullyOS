@@ -1,0 +1,25 @@
+name = "sullyos-health-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# 创建数据库后，把真实 database_id 填到这里：
+#   pnpm exec wrangler d1 create sullyos-health
+[[d1_databases]]
+binding = "DB"
+database_name = "sullyos-health"
+database_id = "c54f1ba5-0756-42bc-9fda-063866cbf441"
+
+# 非密钥配置。新西兰时区会自动处理夏令时。
+[vars]
+HEALTH_TIME_ZONE = "Pacific/Auckland"
+HEALTH_RAW_RETENTION_DAYS = "35"
+HEALTH_DAILY_RETENTION_DAYS = "120"
+MCP_ALLOW_ORIGIN = "*"
+
+# 每天清理过期原始样本和指令。日汇总保留更久，供 health_trends 使用。
+[triggers]
+crons = ["17 3 * * *"]
+
+# 必须使用 `wrangler secret put` 设置，不能写进本文件：
+#   HEALTH_INGEST_TOKEN
+#   MCP_ACCESS_TOKEN

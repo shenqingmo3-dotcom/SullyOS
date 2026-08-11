@@ -63,6 +63,7 @@ const Gallery = lazyApp(() => import('../apps/Gallery'));
 const DateApp = lazyApp(() => import('../apps/DateApp'));
 const UserApp = lazyApp(() => import('../apps/UserApp'));
 const JournalApp = lazyApp(() => import('../apps/JournalApp'));
+const TogetherApp = lazyApp(() => import('../apps/TogetherApp'));
 const ScheduleApp = lazyApp(() => import('../apps/ScheduleApp'));
 const RoomApp = lazyApp(() => import('../apps/RoomApp'));
 const CheckPhone = lazyApp(() => import('../apps/CheckPhone'));
@@ -94,7 +95,7 @@ const SpecialMomentsApp = lazyApp(() => import('./ValentineEvent').then(m => ({ 
 // 预取优先级：高频/常驻 App 先预热，其余随后；逐个在空闲时触发，避免与交互抢主线程/带宽。
 const APP_PRELOAD_ORDER: PreloadableLazy[] = [
   Chat, Character, GroupChat, SocialApp, RoomApp, Settings, Appearance,
-  CheckPhone, JournalApp, ScheduleApp, MusicApp, CallApp, Gallery, DateApp, UserApp,
+  CheckPhone, JournalApp, TogetherApp, ScheduleApp, MusicApp, CallApp, Gallery, DateApp, UserApp,
   StudyApp, GameApp, NovelApp, BankApp, WorldbookApp, MemoryPalaceApp, HandbookApp,
   VRWorldApp, WorldHomeApp, LifeSimApp, SongwritingApp, GuidebookApp, FAQApp, HotNewsApp,
   XhsStockApp, XhsFreeRoamApp, BrowserApp, VoiceDesignerApp, ThemeMaker, QQBridge,
@@ -114,6 +115,7 @@ const APP_BY_ID: Partial<Record<AppID, PreloadableLazy>> = {
   [AppID.GroupChat]: GroupChat, [AppID.ThemeMaker]: ThemeMaker, [AppID.Appearance]: Appearance,
   [AppID.Gallery]: Gallery, [AppID.Date]: DateApp, [AppID.User]: UserApp,
   [AppID.Journal]: JournalApp, [AppID.Schedule]: ScheduleApp, [AppID.Room]: RoomApp,
+  [AppID.Together]: TogetherApp,
   [AppID.CheckPhone]: CheckPhone, [AppID.Social]: SocialApp, [AppID.Study]: StudyApp,
   [AppID.FAQ]: FAQApp, [AppID.Game]: GameApp, [AppID.Worldbook]: WorldbookApp,
   [AppID.Novel]: NovelApp, [AppID.Bank]: BankApp, [AppID.XhsStock]: XhsStockApp,
@@ -808,6 +810,7 @@ const PhoneShell: React.FC = () => {
       case AppID.Date: return <DateApp />; 
       case AppID.User: return <UserApp />;
       case AppID.Journal: return <JournalApp />; 
+      case AppID.Together: return <TogetherApp />;
       case AppID.Schedule: return <ScheduleApp />;
       case AppID.Room: return <RoomApp />; 
       case AppID.CheckPhone: return <CheckPhone />;

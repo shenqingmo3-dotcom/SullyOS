@@ -11,6 +11,13 @@ import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
+import { useBlobRefUrl } from '../../utils/blobRef';
+
+const ActivityImage: React.FC<{ src: string }> = ({ src }) => {
+    const resolved = useBlobRefUrl(src);
+    if (!resolved) return null;
+    return <img src={resolved} alt="手机屏幕快照" className="w-full max-h-80 object-contain rounded-xl border border-black/5 bg-white/50" />;
+};
 
 // 思考链卡片支持的 12 种风格预设 — 同时被 MessageItem 与 ThinkingChainSettingsModal 复用
 export type ThinkingChainStyleId = 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
@@ -1488,6 +1495,58 @@ const MessageItem = React.memo(({
                     </div>
                 );
             }
+            if (scoreData?.type === 'autonomy_activity_card' || scoreData?.type === 'mcp_activity_card') {
+                const isMcp = scoreData.type === 'mcp_activity_card';
+                const statusText = scoreData.status === 'failed'
+                    ? '没有完成'
+                    : scoreData.status === 'planned' ? '准备去做' : '已经完成';
+                const statusTone = scoreData.status === 'failed'
+                    ? 'bg-red-50 text-red-500'
+                    : scoreData.status === 'planned' ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600';
+                const summary = String(scoreData.result || scoreData.summary || scoreData.goal || '').trim();
+                const toolLabel = scoreData.toolName || scoreData.actionName || scoreData.capabilityId || '';
+                return (
+                    <div className={`flex items-center w-full ${selectionMode ? 'pl-8' : ''} animate-fade-in relative transition-[padding] duration-300`}>
+                        {selectionMode && (
+                            <div className="absolute left-2 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
+                                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
+                                    {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                                </div>
+                            </div>
+                        )}
+                        <div className="w-full px-4 my-3" {...interactionProps}>
+                            <div className={`w-72 mx-auto rounded-2xl overflow-hidden shadow-md border ${isMcp ? 'border-cyan-200/70 bg-gradient-to-br from-cyan-50 to-slate-50' : 'border-violet-200/70 bg-gradient-to-br from-violet-50 to-fuchsia-50'}`}>
+                                <div className="px-4 py-3 flex items-center gap-3 border-b border-black/5">
+                                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-lg ${isMcp ? 'bg-cyan-500/10' : 'bg-violet-500/10'}`}>
+                                        {isMcp ? '🧩' : '🪁'}
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <div className={`text-[9px] font-bold tracking-widest uppercase ${isMcp ? 'text-cyan-700' : 'text-violet-700'}`}>
+                                            {isMcp ? 'MCP · 探索记录' : 'Autonomy · 自由活动'}
+                                        </div>
+                                        <div className="text-xs font-bold text-slate-700 truncate">{scoreData.title || (isMcp ? '调用了一项工具' : `${scoreData.charName || charName} 做了点自己的事`)}</div>
+                                    </div>
+                                    <span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${statusTone}`}>{statusText}</span>
+                                </div>
+                                <div className="px-4 py-3 space-y-2">
+                                    {toolLabel && <div className="text-[10px] font-mono text-slate-400">{toolLabel}</div>}
+                                    {scoreData.goal && scoreData.result && (
+                                        <div className="text-[10px] text-slate-500">想做：{scoreData.goal}</div>
+                                    )}
+                                    <div className="text-xs leading-relaxed text-slate-600 whitespace-pre-wrap">
+                                        {summary || (scoreData.status === 'planned' ? '先把这件事记在了活动清单里。' : '这次活动没有留下文字结果。')}
+                                    </div>
+                                    {scoreData.imageUrl && <ActivityImage src={String(scoreData.imageUrl)} />}
+                                </div>
+                                <div className="px-4 py-2 border-t border-black/5 text-[9px] text-slate-400 flex justify-between">
+                                    <span>{isMcp ? `${scoreData.charName || charName} 的工具活动` : `${scoreData.charName || charName} 的自主时间`}</span>
+                                    <span>{scoreData.occurredAt ? new Date(scoreData.occurredAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
             if (scoreData?.type === 'diary_card') {
                 const dateParts = (scoreData.date || '').split('-');
                 const monthDay = dateParts.length === 3 ? `${dateParts[1]}/${dateParts[2]}` : (scoreData.date || '');
@@ -1495,6 +1554,61 @@ const MessageItem = React.memo(({
                 const userText = (scoreData.userText || '').trim();
                 const charText = (scoreData.charText || '').trim();
                 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s);
+                if (Number(scoreData.version || 1) >= 2 && scoreData.primaryAuthor !== 'shared') {
+                    const mainText = String(scoreData.mainText || (scoreData.primaryAuthor === 'character' ? charText : userText)).trim();
+                    const authorName = scoreData.authorName || (scoreData.primaryAuthor === 'character' ? scoreData.charName : scoreData.userName) || '我';
+                    const comments = Array.isArray(scoreData.latestComments) ? scoreData.latestComments : [];
+                    return (
+                        <div className={`flex items-center w-full ${selectionMode ? 'pl-8' : ''} animate-fade-in relative transition-[padding] duration-300`}>
+                            {selectionMode && (
+                                <div className="absolute left-2 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
+                                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
+                                        {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                                    </div>
+                                </div>
+                            )}
+                            <div className="w-full px-4 my-3" {...interactionProps}>
+                                <div className="w-72 mx-auto rounded-2xl overflow-hidden shadow-md" style={{ border: '1.5px solid rgba(217,180,120,0.35)', background: 'linear-gradient(180deg, #fff9ec 0%, #fffdf6 40%, #fdf2dc 100%)' }}>
+                                    <div className="px-4 pt-3 pb-2.5 flex items-center gap-2.5" style={{ borderBottom: '1px dashed rgba(200,160,100,0.3)', background: 'linear-gradient(135deg, rgba(245,210,150,0.25), rgba(240,195,130,0.15))' }}>
+                                        {scoreData.charAvatar ? (
+                                            <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(220,180,110,0.5)' }} />
+                                        ) : (
+                                            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #d4a55a, #b8843a)' }}>{scoreData.charName?.[0] || '?'}</div>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-[9px] font-bold tracking-widest uppercase" style={{ color: '#a07840' }}>Diary · 日记</div>
+                                            <div className="text-xs font-bold truncate" style={{ color: '#5c3e1a' }}>{scoreData.title || `${authorName} 的日记`}</div>
+                                        </div>
+                                        <div className="shrink-0 text-right leading-none">
+                                            <div className="text-[8px] font-mono opacity-60" style={{ color: '#8a6230' }}>{year}</div>
+                                            <div className="text-base font-black font-mono" style={{ color: '#7a4e1a' }}>{monthDay}</div>
+                                        </div>
+                                    </div>
+                                    <div className="px-4 py-3">
+                                        <div className="text-[9px] font-bold tracking-widest uppercase mb-1.5" style={{ color: '#a07840' }}>● {authorName} 写道</div>
+                                        <div className="rounded-xl px-3 py-2.5 text-[11px] leading-relaxed whitespace-pre-wrap" style={{ background: 'rgba(255,253,245,0.88)', border: '1px solid rgba(217,180,120,0.25)', color: '#4a3520', fontFamily: 'ui-serif, Georgia, serif' }}>
+                                            {mainText ? truncate(mainText, 260) : <span className="opacity-40 italic">(空白页)</span>}
+                                        </div>
+                                    </div>
+                                    {comments.length > 0 && (
+                                        <div className="px-4 pb-3 space-y-1.5">
+                                            {comments.map((comment: any, index: number) => (
+                                                <div key={comment.id || index} className={`max-w-[90%] rounded-lg px-2.5 py-1.5 text-[10px] leading-relaxed shadow-sm ${comment.author === 'user' ? 'ml-auto bg-amber-100 text-amber-950 rotate-[0.3deg]' : 'mr-auto bg-pink-100 text-pink-950 -rotate-[0.3deg]'}`}>
+                                                    <span className="font-bold opacity-60 mr-1">{comment.author === 'user' ? (scoreData.userName || '我') : scoreData.charName}：</span>
+                                                    {truncate(String(comment.content || ''), 90)}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <div className="px-4 py-2 flex items-center justify-between" style={{ borderTop: '1px dashed rgba(200,160,100,0.25)', background: 'linear-gradient(135deg, rgba(245,210,150,0.12), rgba(240,195,130,0.06))' }}>
+                                        <span className="text-[9px]" style={{ color: '#b89060' }}>{scoreData.commentCount || 0} 张便签</span>
+                                        <span className="text-[9px] font-bold" style={{ color: '#a07840' }}>日记 · 便签同步 ✿</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
                 return (
                     <div className={`flex items-center w-full ${selectionMode ? 'pl-8' : ''} animate-fade-in relative transition-[padding] duration-300`}>
                         {selectionMode && (
@@ -1514,8 +1628,8 @@ const MessageItem = React.memo(({
                                         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #d4a55a, #b8843a)' }}>{scoreData.charName?.[0] || '?'}</div>
                                     )}
                                     <div className="flex-1 min-w-0">
-                                        <div className="text-[9px] font-bold tracking-widest uppercase" style={{ color: '#a07840' }}>Exchange Diary · 交换日记</div>
-                                        <div className="text-xs font-bold truncate" style={{ color: '#5c3e1a' }}>与 {scoreData.charName} · {scoreData.date}</div>
+                                        <div className="text-[9px] font-bold tracking-widest uppercase" style={{ color: '#a07840' }}>Legacy Diary · 旧版日记</div>
+                                        <div className="text-xs font-bold truncate" style={{ color: '#5c3e1a' }}>迁移前记录 · {scoreData.date}</div>
                                     </div>
                                     <div className="shrink-0 text-right leading-none">
                                         <div className="text-[8px] font-mono opacity-60" style={{ color: '#8a6230' }}>{year}</div>
@@ -1537,7 +1651,7 @@ const MessageItem = React.memo(({
                                 {/* Char page */}
                                 <div className="px-4 pb-3 pt-1.5">
                                     <div className="flex items-center justify-between mb-1.5">
-                                        <span className="text-[9px] font-bold tracking-widest uppercase" style={{ color: '#a07840' }}>● {scoreData.charName} 回道</span>
+                                        <span className="text-[9px] font-bold tracking-widest uppercase" style={{ color: '#a07840' }}>● {scoreData.charName} 写道</span>
                                         {scoreData.charPaperName && <span className="text-[8px] font-mono opacity-50" style={{ color: '#a07840' }}>{scoreData.charPaperName}</span>}
                                     </div>
                                     <div className="rounded-xl px-3 py-2.5 text-[11px] leading-relaxed whitespace-pre-wrap" style={{ background: 'linear-gradient(135deg, rgba(255,245,220,0.85), rgba(255,238,200,0.7))', border: '1px solid rgba(217,180,120,0.3)', color: '#4a3520', fontFamily: 'ui-serif, Georgia, serif' }}>
@@ -1552,7 +1666,7 @@ const MessageItem = React.memo(({
                                             ? `贴了 ${(scoreData.userStickerCount || 0) + (scoreData.charStickerCount || 0)} 张贴纸`
                                             : '今天的纸面很干净'}
                                     </span>
-                                    <span className="text-[9px] font-bold" style={{ color: '#a07840' }}>交换日记 ✿</span>
+                                    <span className="text-[9px] font-bold" style={{ color: '#a07840' }}>旧版日记记录 ✿</span>
                                 </div>
                             </div>
                         </div>
@@ -2063,6 +2177,43 @@ const MessageItem = React.memo(({
             if (u) window.open(u, '_blank', 'noopener,noreferrer');
         };
         const excerpt = (wp.excerpt || '').trim();
+        if (wp.platform === 'x' || wp.siteName === 'X') {
+            const author = String(wp.author || '').trim();
+            const likes = Number(wp.likes || 0);
+            return commonLayout(
+                <div
+                    onClick={openPage}
+                    className="w-64 overflow-hidden rounded-2xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer active:opacity-90 transition-opacity">
+                    <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-sm font-black text-black">{author ? author.replace(/^@/, '')[0]?.toUpperCase() : 'X'}</div>
+                            <span className="truncate text-xs font-semibold text-slate-200">{author || 'X 用户'}</span>
+                        </div>
+                        <span className="text-lg font-black leading-none">𝕏</span>
+                    </div>
+                    {wp.image && (
+                        <div className="mx-3.5 h-36 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+                            <img
+                                src={wp.image}
+                                alt=""
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                                onError={(e: any) => { const c = e.target?.parentElement; if (c) c.style.display = 'none'; }}
+                            />
+                        </div>
+                    )}
+                    <div className="px-3.5 pb-3 pt-2.5">
+                        <div className="line-clamp-2 text-sm font-semibold leading-snug text-white">{wp.title || 'X 帖子'}</div>
+                        {excerpt && excerpt !== wp.title && <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-300">{excerpt}</p>}
+                        <div className="mt-2.5 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px] text-slate-400">
+                            <span>𝕏 · {isUser ? '分享' : '推荐'}</span>
+                            <span className="flex items-center gap-1"><span className="text-pink-400">♥</span>{likes}</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
         const vdStats = vd ? [
             vd.playCount ? `▶ ${formatStatCount(vd.playCount)}` : '',
             vd.likeCount ? `♥ ${formatStatCount(vd.likeCount)}` : '',

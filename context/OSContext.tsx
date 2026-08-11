@@ -45,6 +45,10 @@ import { exportLuckinLocal } from '../utils/luckinMcpClient';
 import { exportMcdLocal } from '../utils/mcdMcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { inspectCsyBackup, prepareCsyMigration, type CsyMigrationReport } from '../utils/csyMigration';
+import { startBackendEventRuntime } from '../utils/backendEventRuntime';
+import { deleteBackendCharacter, loadBackendChatConfig } from '../utils/backendClient';
+import { clearPwaIcon, initPwaIcon, PWA_ICON_APP_ID } from '../utils/appIcon';
+import { startCinemaAgentRuntime } from '../utils/cinemaAgentRuntime';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -695,9 +699,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [userProfile, setUserProfile] = useState<UserProfile>(defaultUserProfile);
   
   const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      return startBackendEventRuntime();
+  }, [isDataLoaded]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [apiPresets, setApiPresets] = useState<ApiPreset[]>([]);
   const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig>(defaultRealtimeConfig);
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      return startCinemaAgentRuntime({ characters, user: userProfile, groups, apiConfig, realtimeConfig });
+  }, [isDataLoaded, characters, userProfile, groups, apiConfig, realtimeConfig]);
   const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
     try { const s = localStorage.getItem('os_memory_palace_config'); return s ? { ...defaultMemoryPalaceConfig, ...JSON.parse(s) } : defaultMemoryPalaceConfig; } catch { return defaultMemoryPalaceConfig; }
   });
@@ -707,6 +720,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   });
   const [customThemes, setCustomThemes] = useState<ChatTheme[]>([]);
   const [customIcons, setCustomIcons] = useState<Record<string, string>>({});
+  useEffect(() => {
+      if (customIcons[PWA_ICON_APP_ID]) void initPwaIcon(customIcons);
+      else clearPwaIcon();
+  }, [customIcons]);
   const [appearancePresets, setAppearancePresets] = useState<AppearancePreset[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [errorDialog, setErrorDialog] = useState<{ title: string; details: string } | null>(null);
@@ -1560,6 +1577,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }).catch(() => {});
       };
 
+      const interactionModeSyncHandler = (e: Event) => {
+          const detail = (e as CustomEvent).detail as {
+              charId?: string;
+              interactionMode?: CharacterProfile['interactionMode'];
+              interactionScene?: CharacterProfile['interactionScene'];
+          };
+          if (!detail?.charId || !detail.interactionMode) return;
+          setCharacters(prev => prev.map(c => c.id === detail.charId
+              ? { ...c, interactionMode: detail.interactionMode, interactionScene: detail.interactionScene }
+              : c));
+      };
+
       // 本地 fetch 聊天回复的全局回落：triggerAI 的异步闭包在 Chat 卸载后继续跑完
       // 并落库，但它捕获的 setMessages 指向已卸载的实例。这里是它跟当前 UI 的唯一桥：
       //   - replyArrived（后处理管线全部落库后）→ bump lastMsgTimestamp 让当前挂载的
@@ -1597,22 +1626,50 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           addToast(`${charName || '角色'}的情绪评估失败：${reason || '未知原因'}（不影响聊天回复）`, 'error');
       };
 
+      const journalEntryHandler = (e: Event) => {
+          const { charName } = ((e as CustomEvent).detail || {}) as { charName?: string };
+          setLastMsgTimestamp(Date.now());
+          addToast(`${charName || '角色'} 写了一篇新日记`, 'success');
+      };
+
+      const journalCommentHandler = (e: Event) => {
+          const { charName } = ((e as CustomEvent).detail || {}) as { charName?: string };
+          setLastMsgTimestamp(Date.now());
+          addToast(`${charName || '角色'} 在日记旁贴了一张便签`, 'success');
+      };
+
+      const backendCardHandler = (e: Event) => {
+          const { charName, eventType } = ((e as CustomEvent).detail || {}) as { charName?: string; eventType?: string };
+          setLastMsgTimestamp(Date.now());
+          if (eventType === 'mcp_activity' || eventType === 'tool_activity') {
+              addToast(`${charName || '角色'} 留下了一条 MCP 探索记录`, 'success');
+          }
+      };
+
       window.addEventListener('active-msg-received', handler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
       window.addEventListener('emotion-updated', buffSyncHandler);
+      window.addEventListener('interaction-mode-updated', interactionModeSyncHandler);
       window.addEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
       window.addEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
       window.addEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
+      window.addEventListener('journal-entry-received', journalEntryHandler);
+      window.addEventListener('journal-comment-received', journalCommentHandler);
+      window.addEventListener('backend-card-received', backendCardHandler);
       document.addEventListener('visibilitychange', onVisible);
       return () => {
           window.removeEventListener('active-msg-received', handler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
+          window.removeEventListener('interaction-mode-updated', interactionModeSyncHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
+          window.removeEventListener('journal-entry-received', journalEntryHandler);
+          window.removeEventListener('journal-comment-received', journalCommentHandler);
+          window.removeEventListener('backend-card-received', backendCardHandler);
           document.removeEventListener('visibilitychange', onVisible);
       };
   }, [sendProactiveNativeNotification]);
@@ -2423,6 +2480,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => { setCharacters(prev => { const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c); const target = updated.find(c => c.id === id); if (target) DB.saveCharacter(target); return updated; }); };
   const deleteCharacter = async (id: string) => {
+    const backendConfig = loadBackendChatConfig();
+    if (backendConfig.enabled) {
+      try {
+        await deleteBackendCharacter(backendConfig, id);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('context_not_found')) throw error;
+      }
+    }
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });
     await DB.deleteCharacter(id);
     // 表情分类不随角色级联删除会留下「幽灵专属包」：单聊面板被可见性过滤掉（删不掉），

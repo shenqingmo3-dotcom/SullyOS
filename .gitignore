@@ -33,3 +33,16 @@ xiaohongshu-skills/
 
 # git worktrees
 .worktrees/
+
+# Local Codex diagnostics and toy MCP runtime dependencies
+.codex-work/
+toy-mcp/.runtime/
+toy-mcp/__pycache__/
+
+# SullyOS backend local state
+backend/.env
+backend/.env.production
+backend/backups/
+backend/node_modules/
+backend/dist/
+backend/coverage/

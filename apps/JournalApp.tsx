@@ -2,18 +2,27 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
+import { CharacterProfile, DiaryComment, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
-import { safeResponseJson, extractJson } from '../utils/safeApi';
-import { normalizeMessageContent } from '../utils/messageFormat';
-import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
+import { safeResponseJson } from '../utils/safeApi';
+import { ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { Sparkle, Archive } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import {
+    addBackendDiaryComment,
+    deleteBackendDiary,
+    generateBackendCharacterDiary,
+    getBackendDiaries,
+    loadBackendChatConfig,
+    requestBackendDiaryCommentResponse,
+    syncBackendDiary,
+} from '../utils/backendClient';
+import { deleteDiaryCardMessages, upsertDiaryCardMessage } from '../utils/journalCards';
 
-const INTRO_SEEN_KEY = 'journal_app_intro_seen_v4';
+const INTRO_SEEN_KEY = 'journal_app_intro_seen_v5';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -36,23 +45,6 @@ const DEFAULT_STICKERS = [
     twemojiUrl('1f48c'), twemojiUrl('1f4a4'), twemojiUrl('1f97a'), twemojiUrl('1f621'), twemojiUrl('1f62d'),
 ];
 
-// 兜底：extractJson 都救不回来时，内容可能是「模型没按 JSON 写的散文」，也可能是
-// 「破损到修不了的 JSON」。前者直接当正文用；后者不能把 { "text": "..." } 整段露出来。
-// 这里做最后一层打捞：若内容像个带 text 字段的 JSON 对象，正则抠出 text 值并还原转义；
-// 否则原样返回。
-const salvageDiaryText = (raw: string): string => {
-    const s = (raw || '').trim();
-    if (!s.startsWith('{') || !/"text"\s*:/.test(s)) return s;
-    const m = s.match(/"text"\s*:\s*"((?:\\.|[^"\\])*)"/);
-    if (!m) return s;
-    try {
-        // 用 JSON.parse 还原 \n \" \\ 等转义，失败就手动替换常见转义
-        return JSON.parse(`"${m[1]}"`);
-    } catch {
-        return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-    }
-};
-
 // HELPER: Get local date string YYYY-MM-DD
 const getLocalDateStr = () => {
     const d = new Date();
@@ -61,6 +53,54 @@ const getLocalDateStr = () => {
     const day = String(d.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
 };
+
+async function upsertDiaryChatCard(
+    entry: DiaryEntry,
+    char: CharacterProfile,
+    userName: string,
+): Promise<DiaryEntry> {
+    return upsertDiaryCardMessage(entry, char, userName, 'journal');
+}
+
+function splitLegacyExchangeDiary(entry: DiaryEntry): DiaryEntry[] {
+    if (entry.primaryAuthor && entry.primaryAuthor !== 'shared') return [entry];
+    const userText = entry.userPage.text.trim();
+    const characterText = entry.charPage?.text?.trim() || '';
+    if (!userText && characterText) {
+        return [{
+            ...entry,
+            primaryAuthor: 'character',
+            userPage: { text: '', paperStyle: 'grid', stickers: [] },
+            charPage: entry.charPage,
+            origin: 'imported',
+            autoSync: true,
+        }];
+    }
+
+    const userEntry: DiaryEntry = {
+        ...entry,
+        primaryAuthor: 'user',
+        charPage: undefined,
+        autoSync: true,
+    };
+    if (!characterText) return [userEntry];
+
+    const characterEntry: DiaryEntry = {
+        id: `${entry.id}-character`,
+        charId: entry.charId,
+        date: entry.date,
+        title: entry.title,
+        primaryAuthor: 'character',
+        userPage: { text: '', paperStyle: 'grid', stickers: [] },
+        charPage: entry.charPage,
+        comments: [],
+        timestamp: entry.timestamp + 1,
+        isArchived: entry.isArchived,
+        autoSync: true,
+        origin: 'imported',
+    };
+    return [userEntry, characterEntry];
+}
 
 const JournalApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups } = useOS();
@@ -82,7 +122,6 @@ const JournalApp: React.FC = () => {
     };
 
     // Editor State
-    const [isThinking, setIsThinking] = useState(false);
     const [archivingId, setArchivingId] = useState<string | null>(null);
     const [archiveResult, setArchiveResult] = useState<{
         date: string;
@@ -92,8 +131,9 @@ const JournalApp: React.FC = () => {
         palace: DiaryIngestResult | null;
     } | null>(null);
     const [showStickerPanel, setShowStickerPanel] = useState(false);
-    const [activeTab, setActiveTab] = useState<'user' | 'char'>('user'); // View Tab
-    const [hideCharStickers, setHideCharStickers] = useState(false); // Toggle to hide char stickers
+    const [commentDraft, setCommentDraft] = useState('');
+    const [commentPending, setCommentPending] = useState(false);
+    const [characterDiaryPending, setCharacterDiaryPending] = useState(false);
     
     // Sticker Interaction State
     const [draggingSticker, setDraggingSticker] = useState<string | null>(null);
@@ -108,6 +148,7 @@ const JournalApp: React.FC = () => {
     const [deletingSticker, setDeletingSticker] = useState<{name: string, url: string} | null>(null);
     const [deletingDiary, setDeletingDiary] = useState<DiaryEntry | null>(null);
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const currentSide: 'user' | 'char' = currentEntry?.primaryAuthor === 'character' ? 'char' : 'user';
 
     // --- Data Loading ---
 
@@ -125,9 +166,107 @@ const JournalApp: React.FC = () => {
     }, [activeCharacterId]);
 
     const loadDiaries = async (charId: string) => {
+        const config = loadBackendChatConfig();
+        const char = characters.find(item => item.id === charId);
+        let localDiaries = await DB.getDiariesByCharId(charId);
+
+        // 旧版“交换日记”可能把两位作者塞进同一条记录。首次加载时无损拆分，
+        // 此后每篇日记始终只有一个作者，旧正文与原聊天卡片都不会丢失。
+        if (char) {
+            for (const legacyEntry of localDiaries) {
+                const splitEntries = splitLegacyExchangeDiary(legacyEntry);
+                const needsMigration = splitEntries.length !== 1 || splitEntries[0] !== legacyEntry;
+                if (!needsMigration) continue;
+                for (const splitEntry of splitEntries) {
+                    const withCard = await upsertDiaryChatCard(splitEntry, char, userProfile.name || '我');
+                    await DB.saveDiary(withCard);
+                }
+            }
+            localDiaries = await DB.getDiariesByCharId(charId);
+        }
+
+        if (config.enabled && char) {
+            try {
+                const remoteDiaries = await getBackendDiaries(config, charId, 200);
+                for (const remote of remoteDiaries) {
+                    const existing = localDiaries.find(item =>
+                        item.backendDiaryId === remote.id
+                        || Boolean(remote.externalId && item.id === remote.externalId),
+                    );
+                    const remoteComments: DiaryComment[] = remote.comments.map(comment => ({
+                        id: comment.externalId || `backend-comment-${comment.id}`,
+                        backendCommentId: comment.id,
+                        author: comment.authorType === 'user' ? 'user' : 'character',
+                        content: comment.content,
+                        createdAt: Date.parse(comment.createdAt) || Date.now(),
+                        replyToId: comment.replyToId || undefined,
+                    }));
+                    const localOnlyComments = (existing?.comments || []).filter(local => !remoteComments.some(remoteComment =>
+                        remoteComment.id === local.id
+                        || Boolean(remoteComment.backendCommentId && remoteComment.backendCommentId === local.backendCommentId),
+                    ));
+                    const author = remote.authorType === 'assistant' ? 'character' : 'user';
+                    const merged: DiaryEntry = existing ? {
+                        ...existing,
+                        backendDiaryId: remote.id,
+                        title: remote.title || existing.title,
+                        date: remote.diaryDate,
+                        primaryAuthor: author,
+                        userPage: author === 'user'
+                            ? { ...existing.userPage, text: remote.content, paperStyle: remote.paperStyle || existing.userPage.paperStyle }
+                            : { text: '', paperStyle: 'grid', stickers: [] },
+                        charPage: author === 'character'
+                            ? { text: remote.content, paperStyle: remote.paperStyle || existing.charPage?.paperStyle || 'plain', stickers: existing.charPage?.stickers || [] }
+                            : undefined,
+                        comments: [...remoteComments, ...localOnlyComments].sort((a, b) => a.createdAt - b.createdAt),
+                    } : {
+                        id: remote.externalId || `backend-diary-${remote.id}`,
+                        charId,
+                        date: remote.diaryDate,
+                        title: remote.title,
+                        primaryAuthor: author,
+                        userPage: author === 'user'
+                            ? { text: remote.content, paperStyle: remote.paperStyle || 'grid', stickers: [] }
+                            : { text: '', paperStyle: 'grid', stickers: [] },
+                        charPage: author === 'character'
+                            ? { text: remote.content, paperStyle: remote.paperStyle || 'plain', stickers: [] }
+                            : undefined,
+                        comments: remoteComments,
+                        timestamp: Date.parse(remote.createdAt) || Date.now(),
+                        isArchived: false,
+                        autoSync: true,
+                        backendDiaryId: remote.id,
+                        origin: remote.metadata?.source === 'heartbeat' ? 'heartbeat' : 'imported',
+                    };
+                    const withCard = await upsertDiaryChatCard(merged, char, userProfile.name || '我');
+                    await DB.saveDiary(withCard);
+                }
+            } catch (error) {
+                console.debug('[Journal] 后端日记暂时无法同步，继续使用本地副本', error);
+            }
+        }
         const list = await DB.getDiariesByCharId(charId);
-        setDiaries(list.sort((a, b) => b.date.localeCompare(a.date)));
+        const sorted = list.sort((a, b) => b.timestamp - a.timestamp || b.date.localeCompare(a.date));
+        setDiaries(sorted);
+        return sorted;
     };
+
+    useEffect(() => {
+        const refresh = async (event: Event) => {
+            const detail = (event as CustomEvent).detail as { charId?: string } | undefined;
+            if (!selectedChar || detail?.charId !== selectedChar.id) return;
+            const list = await DB.getDiariesByCharId(selectedChar.id);
+            const sorted = list.sort((a, b) => b.date.localeCompare(a.date));
+            setDiaries(sorted);
+            setCurrentEntry(previous => previous
+                ? sorted.find(item => item.id === previous.id || (
+                    previous.backendDiaryId && item.backendDiaryId === previous.backendDiaryId
+                )) || previous
+                : previous);
+        };
+        window.addEventListener('backend-event-received', refresh);
+        return () => window.removeEventListener('backend-event-received', refresh);
+    }, [selectedChar?.id]);
 
     const handleCharSelect = (char: CharacterProfile) => {
         setSelectedChar(char);
@@ -135,12 +274,42 @@ const JournalApp: React.FC = () => {
         loadDiaries(char.id);
     };
 
-    const openEntry = (date: string) => {
-        const existing = diaries.find(d => d.date === date);
+    const handleGenerateCharacterDiary = async () => {
+        if (!selectedChar || characterDiaryPending) return;
+        const config = loadBackendChatConfig();
+        if (!config.enabled) {
+            addToast('请先在设置中连接 VPS 自主后端', 'info');
+            return;
+        }
+        setCharacterDiaryPending(true);
+        try {
+            const remote = await generateBackendCharacterDiary(config, selectedChar.id);
+            const refreshed = await loadDiaries(selectedChar.id);
+            const created = refreshed.find(entry => entry.backendDiaryId === remote.id);
+            if (created) {
+                setCurrentEntry(created);
+                setSelectedDate(created.date);
+                setSelectedStickerId(null);
+                setCommentDraft('');
+                setMode('write');
+            }
+            addToast(`${selectedChar.name} 写好了一篇自己的日记`, 'success');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '未知错误';
+            const visible = message.includes('模型池全部不可用') || message.includes('model_unavailable')
+                ? '后端模型池当前没有可用模型，请先换一个模型'
+                : message;
+            addToast(`角色日记生成失败：${visible}`, 'error');
+        } finally {
+            setCharacterDiaryPending(false);
+        }
+    };
+
+    const openEntry = (dateOrId: string, forceNew = false) => {
+        const existing = forceNew ? undefined : diaries.find(d => d.id === dateOrId || d.date === dateOrId);
+        const date = existing?.date || dateOrId;
         if (existing) {
             setCurrentEntry(existing);
-            // Default to char tab if they replied
-            setActiveTab(existing.charPage ? 'char' : 'user');
         } else {
             // New Entry — 打 autoSync=true, 后续不在列表里显示手动归档按钮
             setCurrentEntry({
@@ -151,12 +320,15 @@ const JournalApp: React.FC = () => {
                 timestamp: Date.now(),
                 isArchived: false,
                 autoSync: true,
+                primaryAuthor: 'user',
+                comments: [],
+                origin: 'user',
             });
-            setActiveTab('user');
         }
         setMode('write');
         setSelectedDate(date);
         setSelectedStickerId(null); // Reset selection
+        setCommentDraft('');
     };
 
     // --- Editor Logic ---
@@ -178,7 +350,7 @@ const JournalApp: React.FC = () => {
     };
 
     const addSticker = (url: string) => {
-        const side = activeTab;
+        const side = currentSide;
         const targetPage = side === 'user' ? currentEntry?.userPage : currentEntry?.charPage;
         if (!targetPage && side === 'char') return;
 
@@ -226,83 +398,152 @@ const JournalApp: React.FC = () => {
         }
     };
 
-    // 把一条 diary 序列化成 score_card payload（含纸张样式名等卡片显示需要的字段）
-    const buildDiaryCardPayload = (entry: DiaryEntry, char: CharacterProfile) => {
-        const userPaperName = PAPER_STYLES.find(p => p.id === entry.userPage.paperStyle)?.name || '白纸';
-        const charPaperName = entry.charPage
-            ? (PAPER_STYLES.find(p => p.id === entry.charPage!.paperStyle)?.name || '白纸')
-            : '';
-        return {
-            type: 'diary_card',
-            date: entry.date,
-            charName: char.name,
-            charAvatar: char.avatar || '',
-            userName: userProfile.name,
-            userText: entry.userPage.text,
-            charText: entry.charPage?.text || '',
-            userPaperStyle: entry.userPage.paperStyle,
-            userPaperName,
-            charPaperStyle: entry.charPage?.paperStyle || '',
-            charPaperName,
-            userStickerCount: entry.userPage.stickers?.length || 0,
-            charStickerCount: entry.charPage?.stickers?.length || 0,
-        };
-    };
-
-    // 把一条已有 charPage 的日记同步到聊天里（新建或更新 score_card）。
-    // 没有 charPage → 不做任何事（单方面写的日记不进上下文，这是产品规则）。
+    // 把日记同步为聊天卡片。新版日记不要求双方都写过：任意一方的正文都能成为主卡片，
+    // 便签只更新原卡片，不会再生成普通气泡。
     // 返回最终带 chatCardMessageId 的 entry，供调用方接着 setCurrentEntry/saveDiary。
     const syncDiaryCardToChat = async (entry: DiaryEntry, char: CharacterProfile): Promise<DiaryEntry> => {
-        if (!entry.charPage) return entry;
-        const cardData = buildDiaryCardPayload(entry, char);
+        return upsertDiaryChatCard(entry, char, userProfile.name || '我');
+    };
 
-        if (entry.chatCardMessageId) {
-            try {
-                await DB.updateMessage(entry.chatCardMessageId, JSON.stringify(cardData));
-                await DB.updateMessageMetadata(entry.chatCardMessageId, prev => ({
-                    ...(prev || {}),
-                    scoreCard: cardData,
-                    source: 'journal-exchange',
-                }));
-                return entry;
-            } catch (e) {
-                console.warn('🗒 [Journal] 已存在的卡片更新失败, 重新创建:', e);
-            }
-        }
-        const newId = await DB.saveMessage({
-            charId: char.id,
-            role: 'system',
-            type: 'score_card',
-            content: JSON.stringify(cardData),
-            metadata: { scoreCard: cardData, source: 'journal-exchange' },
+    const syncEntryToBackend = async (entry: DiaryEntry): Promise<DiaryEntry> => {
+        if (!selectedChar) return entry;
+        const config = loadBackendChatConfig();
+        if (!config.enabled) return entry;
+        const authorType = entry.primaryAuthor === 'character' ? 'assistant' : 'user';
+        const page = authorType === 'assistant' ? entry.charPage : entry.userPage;
+        if (!page?.text.trim()) return entry;
+        const remote = await syncBackendDiary(config, {
+            characterId: selectedChar.id,
+            clientDiaryId: entry.id,
+            authorType,
+            title: entry.title || '',
+            content: page.text.trim(),
+            diaryDate: entry.date,
+            paperStyle: page.paperStyle || 'plain',
+            metadata: { origin: entry.origin || 'user' },
         });
-        return { ...entry, chatCardMessageId: newId };
+        return { ...entry, backendDiaryId: remote.id };
     };
 
     const saveEntry = async () => {
         if (!currentEntry || !selectedChar) return;
-        // 若该日记已经在聊天里有卡片（char 回复过 + 自动发送过），保存时同步更新卡片
-        let toSave = currentEntry;
-        if (currentEntry.chatCardMessageId && currentEntry.charPage) {
-            toSave = await syncDiaryCardToChat(currentEntry, selectedChar);
+        const mainText = currentEntry.primaryAuthor === 'character'
+            ? currentEntry.charPage?.text
+            : currentEntry.userPage.text;
+        if (!mainText?.trim()) {
+            addToast('先写一点内容再保存吧', 'info');
+            return;
         }
-        await DB.saveDiary(toSave);
-        if (toSave !== currentEntry) setCurrentEntry(toSave);
-        await loadDiaries(toSave.charId);
-        addToast('日记已保存', 'success');
+        try {
+            let toSave = await syncEntryToBackend(currentEntry);
+            toSave = await syncDiaryCardToChat(toSave, selectedChar);
+            await DB.saveDiary(toSave);
+            setCurrentEntry(toSave);
+            await loadDiaries(toSave.charId);
+            addToast(toSave.backendDiaryId ? '日记已保存并同步到后端' : '日记已保存在本机', 'success');
+        } catch (error) {
+            await DB.saveDiary(currentEntry);
+            await loadDiaries(currentEntry.charId);
+            addToast(`日记已保存在本机，后端同步失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        }
+    };
+
+    const updateDiaryAndCard = async (entry: DiaryEntry): Promise<DiaryEntry> => {
+        if (!selectedChar) return entry;
+        const synced = await syncDiaryCardToChat(entry, selectedChar);
+        await DB.saveDiary(synced);
+        setCurrentEntry(synced);
+        await loadDiaries(synced.charId);
+        return synced;
+    };
+
+    const handleAddComment = async () => {
+        if (!currentEntry || !selectedChar || !commentDraft.trim() || commentPending) return;
+        setCommentPending(true);
+        const comment: DiaryComment = {
+            id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            author: 'user',
+            content: commentDraft.trim(),
+            createdAt: Date.now(),
+        };
+        setCommentDraft('');
+        try {
+            let entry = currentEntry.backendDiaryId ? currentEntry : await syncEntryToBackend(currentEntry);
+            entry = await updateDiaryAndCard({ ...entry, comments: [...(entry.comments || []), comment] });
+            if (entry.backendDiaryId) {
+                await addBackendDiaryComment(loadBackendChatConfig(), entry.backendDiaryId, {
+                    clientCommentId: comment.id,
+                    content: comment.content,
+                });
+            }
+            addToast('便签贴好了', 'success');
+        } catch (error) {
+            addToast(`便签已留在本机，后端同步失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        } finally {
+            setCommentPending(false);
+        }
+    };
+
+    const handleRequestCommentReply = async () => {
+        if (!currentEntry || !selectedChar || commentPending) return;
+        const config = loadBackendChatConfig();
+        if (!config.enabled) {
+            addToast('请先在设置中连接 VPS，自主角色才能回应便签', 'info');
+            return;
+        }
+        setCommentPending(true);
+        try {
+            let entry = currentEntry.backendDiaryId ? currentEntry : await syncEntryToBackend(currentEntry);
+            if (!entry.backendDiaryId) throw new Error('日记还没有同步到后端');
+            const remote = await requestBackendDiaryCommentResponse(config, entry.backendDiaryId);
+            const comment: DiaryComment = {
+                id: remote.externalId || remote.id,
+                backendCommentId: remote.id,
+                author: 'character',
+                content: remote.content,
+                createdAt: Date.parse(remote.createdAt) || Date.now(),
+                replyToId: remote.replyToId || undefined,
+            };
+            if (!(entry.comments || []).some(item => item.id === comment.id || item.backendCommentId === comment.backendCommentId)) {
+                entry = { ...entry, comments: [...(entry.comments || []), comment] };
+            }
+            await updateDiaryAndCard(entry);
+            addToast(`${selectedChar.name} 贴了一张便签`, 'success');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '未知错误';
+            const isModelPoolError = message.includes('模型池全部不可用') || message.includes('model_unavailable');
+            const visibleMessage = isModelPoolError ? '后端模型池当前没有可用模型' : message;
+            const hint = isModelPoolError || message.includes('model')
+                ? '；请在设置里的后端模型池新增或启用一个可用模型'
+                : '';
+            addToast(`贴签失败：${visibleMessage}${hint}`, 'error');
+        } finally {
+            setCommentPending(false);
+        }
     };
 
     const handleDeleteDiary = async () => {
         if (!deletingDiary || !selectedChar) return;
-        // 同步删除聊天里的卡片（如果之前发过）
-        if (deletingDiary.chatCardMessageId) {
-            try { await DB.deleteMessage(deletingDiary.chatCardMessageId); }
-            catch (e) { console.warn('🗒 [Journal] 卡片删除失败 (可能已不存在):', e); }
+        const target = deletingDiary;
+        try {
+            if (target.backendDiaryId) {
+                const config = loadBackendChatConfig();
+                try {
+                    await deleteBackendDiary(config, target.backendDiaryId);
+                } catch (error) {
+                    if (!(error instanceof Error) || !error.message.includes('diary_not_found')) throw error;
+                }
+            }
+            await deleteDiaryCardMessages(target);
+            await DB.deleteDiary(target.id);
+            setDiaries(previous => previous.filter(item => item.id !== target.id));
+            setCurrentEntry(previous => previous?.id === target.id ? null : previous);
+            setDeletingDiary(null);
+            addToast('日记、便签和聊天卡片均已删除', 'success');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '未知错误';
+            addToast('删除失败：' + message, 'error');
         }
-        await DB.deleteDiary(deletingDiary.id);
-        await loadDiaries(selectedChar.id);
-        setDeletingDiary(null);
-        addToast('日记已删除', 'success');
     };
 
     // --- Interaction Logic (Move, Resize, Delete) ---
@@ -315,10 +556,10 @@ const JournalApp: React.FC = () => {
 
     // 2. Remove Sticker from Page
     const removeStickerFromPage = (id: string) => {
-        const targetPage = activeTab === 'user' ? currentEntry?.userPage : currentEntry?.charPage;
+        const targetPage = currentSide === 'user' ? currentEntry?.userPage : currentEntry?.charPage;
         if (!targetPage) return;
         const updated = targetPage.stickers.filter(s => s.id !== id);
-        updatePage({ stickers: updated }, activeTab);
+        updatePage({ stickers: updated }, currentSide);
         setSelectedStickerId(null);
     };
 
@@ -342,7 +583,7 @@ const JournalApp: React.FC = () => {
 
         const rect = paperRef.current.getBoundingClientRect();
         
-        const targetPage = activeTab === 'user' ? currentEntry.userPage : currentEntry.charPage;
+        const targetPage = currentSide === 'user' ? currentEntry.userPage : currentEntry.charPage;
         if (!targetPage) return;
 
         // Logic for Moving
@@ -355,7 +596,7 @@ const JournalApp: React.FC = () => {
             const updatedStickers = targetPage.stickers.map(s => 
                 s.id === draggingSticker ? { ...s, x: clampedX, y: clampedY } : s
             );
-            updatePage({ stickers: updatedStickers }, activeTab);
+            updatePage({ stickers: updatedStickers }, currentSide);
         }
 
         // Logic for Resizing
@@ -374,7 +615,7 @@ const JournalApp: React.FC = () => {
             const updatedStickers = targetPage.stickers.map(s => 
                 s.id === resizingSticker ? { ...s, scale: newScale } : s
             );
-            updatePage({ stickers: updatedStickers }, activeTab);
+            updatePage({ stickers: updatedStickers }, currentSide);
         }
     };
 
@@ -402,136 +643,6 @@ const JournalApp: React.FC = () => {
         }
     };
 
-    // --- AI Interaction ---
-
-    const handleExchange = async () => {
-        if (!currentEntry || !selectedChar || !apiConfig.apiKey) {
-            addToast('配置错误或内容为空', 'error');
-            return;
-        }
-        if (!currentEntry.userPage.text.trim()) {
-            addToast('请先写下今天的日记', 'info');
-            return;
-        }
-
-        setIsThinking(true);
-        saveEntry(); 
-
-        try {
-            await injectMemoryPalace(selectedChar, undefined, currentEntry.userPage.text);
-            let systemPrompt = ContextBuilder.buildCoreContext(selectedChar, userProfile);
-
-            const styleOptions = PAPER_STYLES.map(p => p.id).join(', ');
-            const defaultStickers = DEFAULT_STICKERS.join(' ');
-            const customStickerContext = customStickers.length > 0 
-                ? `Custom Stickers (Name: URL): \n${customStickers.map(s => `- ${s.name}: ${s.url}`).join('\n')}`
-                : '';
-
-            const recentMsgs = await DB.getMessagesByCharId(selectedChar.id);
-            const contextLimit = 30;
-            // 用统一的 normalizeMessageContent 把消息转成可读文本，绝不能直接塞 m.content：
-            // score_card（含上一次交换日记同步进来的卡片）的 content 是整段 JSON，里面带
-            // charAvatar 的 base64 data URL + 双方日记全文。重新生成时这张卡已在历史里，
-            // 直接 dump 原始 content 会把 base64 头像和 JSON 结构整个灌进 prompt，
-            // 造成 token 异常膨胀。normalize 后日记卡会被压成一行摘要，不再泄漏 base64/JSON。
-            const recentContext = recentMsgs.slice(-contextLimit).map(m => {
-                const content = normalizeMessageContent(m, selectedChar.name, userProfile.name);
-                return `[${new Date(m.timestamp).toLocaleTimeString()}] ${m.role === 'user' ? 'User' : 'You'}: ${content}`;
-            }).join('\n');
-
-            systemPrompt += `### [Exchange Diary Mode Instructions]
-你正在和用户进行【交换日记】互动。
-
-### 关键：最近发生的互动 (Recent Context)
-这是你们最近在聊天软件或见面时的对话记录。请**务必**阅读这些记录，并在日记中提及今天发生的具体事情（例如聊过的话题、去过的地方、用户发过的图片）。
-不要只写空泛的回复，还要说一些用户不知道的，你自己没有说过的想法，和你自己独立于用户经历过的今天的事情。
-[RECENT LOGS START]
-${recentContext}
-[RECENT LOGS END]
-
-### 任务
-1. 阅读用户今天的日记 (${currentEntry.date})。
-2. 以你的角色口吻写一篇**回复日记**。
-   - 首先结合上文的聊天记录，回应用户的内容。
-   - 最重要的是分享你的生活，此条为必须项**务必说至少一件用户不知道的，你今天做的事情，尽量与用户无关！用户希望看到角色完全独立的一面**。
-   - 语言风格在符合设定的基础上，应该更加书面化和诗意，不过一切以角色性格优先。
-3. 选择适合你心情的信纸和贴纸。
-
-### 关于贴纸 (Stickers)
-你可以使用默认的 Emoji，也可以使用【Custom Stickers】。
-${customStickerContext}
-如果要使用 Custom Sticker，请将 URL 直接放入返回的 stickers 数组中。
-
-### 输出格式 (必须是纯 JSON)
-- 只输出这个 JSON 对象本身，前后不要有任何多余文字。
-- text 是一个 JSON 字符串：内部的换行必须写成 \\n，引号必须写成 \\"，反斜杠必须写成 \\\\。**绝对不要**在字符串里直接放真实换行或未转义的引号，否则会解析失败。
-Structure:
-{
-  "text": "日记正文第一段\\n\\n第二段...",
-  "paperStyle": "one of: ${styleOptions}",
-  "stickers": ["sticker1", "http://custom-sticker-url..."] (从默认列表或 Custom Stickers 中选0-3个)
-}`;
-
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: `Users Diary:\n${currentEntry.userPage.text}` }
-                    ],
-                    temperature: 0.85
-                })
-            });
-
-            if (!response.ok) throw new Error('API Error');
-            const data = await safeResponseJson(response);
-            let content = data.choices[0].message.content.trim();
-            content = content.replace(/```json/g, '').replace(/```/g, '').trim();
-            
-            // Claude 常返回未转义特殊字符（引号 / 反斜杠 / 换行）的 JSON，裸 JSON.parse 会炸。
-            // 旧代码一炸就把整段原始 JSON（{ "text": ... } 带字面量 \n）直接塞进日记正文，
-            // 这就是「交换日记掉格式」的现象。先走 extractJson 的多层容错；连它都解析不出来
-            // （模型压根没按 JSON 写、直接写了散文）才把内容当纯文本兜底，兜底时再剥一层
-            // 可能残留的 JSON 外壳，保证任何情况下都不会把 { "text": ... } 露给用户。
-            let parsed: any = extractJson(content);
-            if (!parsed || typeof parsed.text !== 'string') {
-                parsed = { text: salvageDiaryText(content), paperStyle: 'plain', stickers: [] };
-            }
-
-            const charStickers: StickerData[] = (parsed.stickers || []).map((s: string) => ({
-                id: `st-${Math.random()}`,
-                url: s,
-                x: Math.random() * 70 + 10,
-                y: Math.random() * 70 + 10,
-                rotation: (Math.random() - 0.5) * 40,
-                scale: 1.0
-            }));
-
-            const charPage: DiaryPage = {
-                text: parsed.text || '',
-                paperStyle: PAPER_STYLES.find(p => p.id === parsed.paperStyle)?.id || 'plain',
-                stickers: charStickers
-            };
-
-            const updatedEntry = { ...currentEntry, charPage };
-            // 自动发送 / 同步到聊天：char 有回复 → 卡片落地到对应角色的聊天历史。
-            // 重交换（同一日记重新让 char 写回复）会复用已有 chatCardMessageId 走更新而不是再创建一条。
-            const synced = await syncDiaryCardToChat(updatedEntry, selectedChar);
-            setCurrentEntry(synced);
-            await DB.saveDiary(synced);
-            await loadDiaries(selectedChar.id);
-            setActiveTab('char');
-            addToast('对方已回复 · 已同步到聊天', 'success');
-
-        } catch (e: any) {
-            addToast(`回复失败: ${e.message}`, 'error');
-        } finally {
-            setIsThinking(false);
-        }
-    };
-
     // 手动归档: 把一条日记总结成神经链接条目 (char.memories), 跟 chatapp 的自动归档对齐 —
     //   - 开了记忆宫殿: 走副 API extractMemoriesFromBuffer 一次提取多条 MemoryNode → 节点入宫,
     //     同一组节点 bullets 化拼成 MemoryFragment 写 char.memories (mood='diary_palace')。
@@ -555,29 +666,33 @@ Structure:
         // 主 API 散文式总结 — 当宫殿没开 / 副 API 缺失 / 提取为空时的 fallback
         const generateProseSummary = async (): Promise<string> => {
             const baseContext = ContextBuilder.buildCoreContext(selectedChar, userProfile);
-            const charPart = diary.charPage?.text?.trim() || '(对方没有回复)';
+            const isCharacterDiary = diary.primaryAuthor === 'character';
+            const authorName = isCharacterDiary ? selectedChar.name : (userProfile.name || '用户');
+            const diaryText = isCharacterDiary ? diary.charPage?.text : diary.userPage.text;
+            const notes = (diary.comments || []).map(comment => (
+                `${comment.author === 'character' ? selectedChar.name : (userProfile.name || '用户')}：${comment.content}`
+            )).join('\n');
             const prompt = `${baseContext}
 
-### [系统指令: 交换日记归档]
-当前任务: 把这篇【交换日记】(日期 ${diary.date}) 总结成一段对你 (${selectedChar.name}) 长期有效的记忆。
+### [系统指令: 独立日记归档]
+当前任务：把 ${authorName} 在 ${diary.date} 写的这篇独立日记，整理成一段对你 (${selectedChar.name}) 长期有效的记忆。
 
-### 输入内容
-${userProfile.name} 的那页:
+### 日记正文
 """
-${diary.userPage.text || '(空白页)'}
+${diaryText || '(空白)'}
 """
 
-你 (${selectedChar.name}) 的回复页:
+### 日记旁的便签互动
 """
-${charPart}
+${notes || '(没有便签)'}
 """
 
 ### 输出要求
 1. **第一人称**: 全程用"我"称呼自己,用"${userProfile.name}"称呼对方,不要写成第三视角叙述。
 2. **要点齐全**: 至少覆盖以下信息 (有就写,没有就跳过,不要生造):
-   - ${userProfile.name} 那天的关键事件 / 心情 / 提到的人或物
-   - 我对这些内容的反应、共鸣、或心里没说出口的想法
-   - 我在自己那页里分享的、属于我自己的事
+   - 正文作者那天的关键事件、心情、提到的人或物
+   - 如果是我的日记，保留我自己的独立经历与想法；如果是 ${userProfile.name} 的日记，保留我从中了解到的具体信息
+   - 便签里出现的回应、共鸣或新信息
    - 如果出现任何承诺、约定、未解决的疑问,都要点名记录下来 (这些以后可能要兑现)
 3. **细节胜过抽象**: 多说具体的事 (人名、地点、物件、当时的情绪),少用"我们度过了美好的一天"这种空话。
 4. **篇幅**: 150~300 字之间的一段中文叙述,不要分段,不要列表,不要任何前缀和标题,直接出叙述。
@@ -677,23 +792,24 @@ ${charPart}
 
     const renderPage = (page: DiaryPage, side: 'user' | 'char') => {
         const style = PAPER_STYLES.find(s => s.id === page.paperStyle) || PAPER_STYLES[0];
-        const isInteractive = true; // Always interactive now for editing
+        const isReadOnly = side === 'char' && currentEntry?.primaryAuthor === 'character';
+        const isInteractive = !isReadOnly;
 
         return (
             <div 
-                ref={side === activeTab ? paperRef : undefined}
+                ref={paperRef}
                 className={`relative w-full h-full shadow-md transition-all duration-300 overflow-hidden ${style.css} flex flex-col rounded-3xl touch-none`}
                 style={{ ...style.style }}
-                onPointerMove={isInteractive && side === activeTab ? handlePointerMove : undefined}
-                onPointerUp={isInteractive && side === activeTab ? handlePointerUp : undefined}
-                onPointerLeave={isInteractive && side === activeTab ? handlePointerUp : undefined}
+                onPointerMove={isInteractive ? handlePointerMove : undefined}
+                onPointerUp={isInteractive ? handlePointerUp : undefined}
+                onPointerLeave={isInteractive ? handlePointerUp : undefined}
                 onClick={handleBackgroundClick}
             >
                 {/* Content Container */}
                 <div className="flex-1 p-6 relative z-10 flex flex-col">
                     <div className="flex justify-between items-center mb-4 pb-2 border-b border-black/5 shrink-0">
                         <span className={`text-xs font-bold uppercase tracking-widest opacity-50 ${style.text}`}>
-                            {side === 'user' ? 'MY DIARY' : 'REPLY'}
+                            {side === 'user' ? '我的日记' : `${selectedChar?.name || 'TA'} 的日记`}
                         </span>
                         <span className={`text-[10px] opacity-40 font-mono ${style.text}`}>
                             {currentEntry?.date}
@@ -703,24 +819,23 @@ ${charPart}
                     <textarea 
                         value={page.text}
                         onChange={e => updatePage({ text: e.target.value }, side)}
-                        placeholder={side === 'user' ? "记录今天发生的事情..." : "等待回复..."}
+                        placeholder={side === 'user' ? "记录今天发生的事情..." : "角色会在自己的时间里写下日记"}
                         className={`flex-1 w-full bg-transparent resize-none outline-none leading-loose text-[16px] font-normal ${style.text} placeholder:opacity-30 no-scrollbar`}
-                        readOnly={isThinking} 
+                        readOnly={isReadOnly}
                     />
                 </div>
 
                 {/* Stickers Layer */}
-                {/* Check Hide Flag for Char Side */}
-                {!(side === 'char' && hideCharStickers) && page.stickers.map(s => {
+                {page.stickers.map(s => {
                     const isSelected = selectedStickerId === s.id;
                     const scale = s.scale || 1.0;
                     
                     return (
                         <div 
                             key={s.id} 
-                            onPointerDown={(e) => handlePointerDown(e, s.id, 'move')}
-                            onClick={(e) => selectSticker(e, s.id)}
-                            className={`absolute text-6xl select-none drop-shadow-md z-20 cursor-move ${draggingSticker === s.id ? 'opacity-90' : ''} transition-transform`}
+                            onPointerDown={isReadOnly ? undefined : (e) => handlePointerDown(e, s.id, 'move')}
+                            onClick={isReadOnly ? undefined : (e) => selectSticker(e, s.id)}
+                            className={`absolute text-6xl select-none drop-shadow-md z-20 ${isReadOnly ? '' : 'cursor-move'} ${draggingSticker === s.id ? 'opacity-90' : ''} transition-transform`}
                             style={{ 
                                 left: `${s.x}%`, 
                                 top: `${s.y}%`, 
@@ -735,7 +850,7 @@ ${charPart}
                             ) : s.url}
 
                             {/* Controls for Selected Sticker */}
-                            {isSelected && (
+                            {isSelected && !isReadOnly && (
                                 <>
                                     {/* Delete Button (Top Right) */}
                                     <div 
@@ -760,11 +875,11 @@ ${charPart}
         );
     };
 
-    // 一次性弹窗:讲清楚新版交换日记的行为变化(自动同步 / 归档移到列表 / 宫殿入向量)
+    // 一次性弹窗：日记正文彼此独立，互动统一通过便签完成。
     const introModal = showIntro ? (
         <Modal
             isOpen={showIntro}
-            title="交换日记 · 更新了"
+            title="日记 · 新互动方式"
             onClose={dismissIntro}
             footer={
                 <button onClick={dismissIntro} className="w-full py-3 bg-amber-500 text-white font-bold rounded-2xl active:scale-95 transition-transform">
@@ -773,12 +888,12 @@ ${charPart}
             }
         >
             <div className="space-y-3 text-sm text-slate-700 leading-relaxed">
-                <p className="font-bold text-amber-700">几个新变化,先看一眼:</p>
+                <p className="font-bold text-amber-700">这里现在是单纯的日记 App，每篇日记只属于一个作者：</p>
                 <div className="rounded-2xl bg-amber-50 border border-amber-100 px-4 py-3 space-y-2">
-                    <p><span className="font-bold text-amber-700">① 自动同步聊天:</span> 角色回复了你的日记之后,会自动变成一张漂亮卡片出现在和这个角色的聊天里 —— 不用再手动发送。你之后在日记本里改文字 / 删日记,聊天里那张卡片也会跟着同步。</p>
-                    <p><span className="font-bold text-amber-700">② 单向日记不进记忆:</span> 如果你只是单方面写给角色看(没让 ta 回复),这一篇就不会进入任何记忆,按以前的方式存着就好。</p>
-                    <p><span className="font-bold text-amber-700">③ 新日记不用管归档:</span> 本次更新<b>之后</b>新写的日记走的就是上面"自动同步聊天"那条线 —— 卡片进了聊天后，系统会像处理普通消息一样自动帮你整理。不需要也<b>不应该</b>再手动归档一次。所以新日记你看不到归档入口, 这是故意的。</p>
-                    <p><span className="font-bold text-amber-700">④ 老日记还能手动归档:</span> 本次更新<b>之前</b>留下的老日记里, 如果是角色回复过的, <b>点进那篇日记, 右上角会有一个"归档"按钮</b>, 点一下就行 —— 就会把这篇日记整理进角色的记忆里，开了记忆宫殿的角色会记得更细。</p>
+                    <p><span className="font-bold text-amber-700">① 谁都可以先写：</span>你可以独立写日记，角色也能在自主活动时写自己的日记，不需要等待另一方先交作业。</p>
+                    <p><span className="font-bold text-amber-700">② 用便签交流：</span>读完一篇日记后可以贴一两句话。你能回应角色的日记，角色也能评论你的日记或回应你的便签。</p>
+                    <p><span className="font-bold text-amber-700">③ 自动同步聊天：</span>正文和便签会合在同一张日记卡片里；新增便签只更新原卡片，不会刷出一串普通气泡。</p>
+                    <p><span className="font-bold text-amber-700">④ 旧数据继续兼容：</span>以前的双页记录会无损拆成两篇独立日记，正文不会丢失。</p>
                 </div>
                 <p className="text-xs text-slate-400">这条提示只出现一次。</p>
             </div>
@@ -945,30 +1060,41 @@ ${charPart}
                          <div className="w-6"></div>
                     </div>
                     <div className="text-white">
-                        <div className="text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
+                        <div className="text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Diary</div>
                         <div className="text-3xl font-bold tracking-tight">{selectedChar.name}</div>
                     </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-5 pb-20 no-scrollbar">
-                    <button onClick={() => openEntry(getLocalDateStr())} className="w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
-                        <span className="text-xl">+</span> 写今天的日记
+                    <button onClick={() => openEntry(getLocalDateStr(), true)} className="w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
+                        <span className="text-xl">+</span> 写一篇日记
+                    </button>
+                    <button
+                        onClick={() => void handleGenerateCharacterDiary()}
+                        disabled={characterDiaryPending}
+                        className="w-full py-4 -mt-5 mb-8 rounded-2xl border border-violet-200 bg-violet-50 text-violet-600 font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
+                    >
+                        <span className={characterDiaryPending ? 'animate-pulse' : ''}>✦</span>
+                        {characterDiaryPending ? `${selectedChar.name} 正在写…` : `让 ${selectedChar.name} 现在写一篇`}
                     </button>
                     
                     <div className="space-y-4">
                         {diaries.map(d => (
-                            <div key={d.id} onClick={() => openEntry(d.date)} className="flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">
+                            <div key={d.id} onClick={() => openEntry(d.id)} className="flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">
                                 <div className="absolute left-0 top-0 bottom-0 w-1 bg-amber-400"></div>
                                 <div className="w-14 h-14 bg-amber-50 rounded-xl flex flex-col items-center justify-center text-amber-800 shrink-0 border border-amber-100">
                                     <span className="text-[10px] font-bold opacity-60">{d.date.split('-')[1]}月</span>
                                     <span className="text-xl font-bold leading-none">{d.date.split('-')[2]}</span>
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-slate-700 truncate font-medium">{d.userPage.text || '(空)'}</p>
+                                    <p className="text-sm text-slate-700 truncate font-medium">{d.title || (d.primaryAuthor === 'character' ? d.charPage?.text : d.userPage.text) || '(空)'}</p>
                                     <div className="flex justify-between items-center mt-1">
                                         <p className="text-xs text-slate-400 font-mono">{d.date.split('-')[0]}</p>
                                         <div className="flex gap-2">
-                                            {d.charPage && <span className="px-2 py-0.5 bg-green-100 text-green-600 rounded-full text-[9px] font-bold">已回复</span>}
+                                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${d.primaryAuthor === 'character' ? 'bg-purple-100 text-purple-600' : 'bg-amber-100 text-amber-600'}`}>
+                                                {d.primaryAuthor === 'character' ? `${selectedChar.name} 写的` : '我写的'}
+                                            </span>
+                                            {!!d.comments?.length && <span className="px-2 py-0.5 bg-pink-50 text-pink-500 rounded-full text-[9px] font-bold">{d.comments.length} 张便签</span>}
                                             {d.chatCardMessageId && <span className="px-2 py-0.5 bg-emerald-50 text-emerald-500 rounded-full text-[9px] font-bold">同步聊天</span>}
                                             {d.isArchived && <span className="px-2 py-0.5 bg-amber-100 text-amber-600 rounded-full text-[9px] font-bold">已归档</span>}
                                         </div>
@@ -1025,21 +1151,6 @@ ${charPart}
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                     </button>
                     <div className="flex gap-3">
-                        {/* Toggle Char Sticker Visibility Button */}
-                        {activeTab === 'char' && (
-                            <button
-                                onClick={() => setHideCharStickers(!hideCharStickers)}
-                                className={`p-2 rounded-full transition-colors ${hideCharStickers ? 'bg-red-500/20 text-red-400' : 'bg-white/10 text-white/60'}`}
-                                title={hideCharStickers ? "显示贴纸" : "隐藏贴纸"}
-                            >
-                                {hideCharStickers ? (
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>
-                                ) : (
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
-                                )}
-                            </button>
-                        )}
-
                         {currentEntry?.chatCardMessageId && (
                             <div className="px-3 py-1 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 flex items-center gap-1.5" title="该日记已自动同步为聊天卡片">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
@@ -1074,9 +1185,11 @@ ${charPart}
                                 )}
                             </button>
                         )}
-                        <button onClick={saveEntry} className="px-4 py-1.5 bg-white/10 rounded-full text-xs font-bold hover:bg-white/20 active:scale-95 transition-transform">
-                            保存
-                        </button>
+                        {currentEntry?.primaryAuthor !== 'character' && (
+                            <button onClick={saveEntry} className="px-4 py-1.5 bg-white/10 rounded-full text-xs font-bold hover:bg-white/20 active:scale-95 transition-transform">
+                                保存
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>
@@ -1084,83 +1197,99 @@ ${charPart}
             {/* Main Page Area */}
             <div className="flex-1 relative w-full overflow-hidden flex flex-col">
                 <div className="flex-1 w-full max-w-xl mx-auto px-2 pb-4 pt-2 flex flex-col relative">
-                    <div className="flex-1 relative rounded-3xl transition-all duration-500">
-                        {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
-                        
-                        {activeTab === 'char' && (
-                            currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : (
-                                <div className="w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
-                                    <div className="opacity-20 animate-pulse"><img src={twemojiUrl('1f48c')} alt="letter" className="w-12 h-12" /></div>
-                                    {isThinking ? (
-                                        <div className="space-y-2">
-                                            <p className="text-sm font-medium text-amber-500">对方正在阅读你的日记...</p>
-                                            <div className="flex justify-center gap-1">
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-100"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-200"></div>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
-                                            <button 
-                                                onClick={handleExchange} 
-                                                className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
-                                            >
-                                                查看 TA 的今日
-                                            </button>
-                                        </>
-                                    )}
-                                </div>
-                            )
+                    {currentEntry && (
+                        <input
+                            value={currentEntry.title || ''}
+                            onChange={event => setCurrentEntry(previous => previous ? { ...previous, title: event.target.value } : previous)}
+                            readOnly={currentEntry.primaryAuthor === 'character'}
+                            placeholder="给这篇日记起个标题（可选）"
+                            className="shrink-0 mb-2 mx-2 h-9 rounded-xl bg-white/5 border border-white/10 px-3 text-sm text-white/80 placeholder:text-white/25 outline-none focus:border-amber-400/50"
+                        />
+                    )}
+                    <div className="flex-1 min-h-0 relative rounded-3xl transition-all duration-500">
+                        {currentEntry && (
+                            currentEntry.primaryAuthor === 'character' && currentEntry.charPage
+                                ? renderPage(currentEntry.charPage, 'char')
+                                : renderPage(currentEntry.userPage, 'user')
                         )}
                     </div>
+
+                    {currentEntry && (
+                        <div className="shrink-0 mt-2 mx-1 rounded-2xl bg-[#26221b] border border-amber-200/10 px-3 py-2 text-white">
+                            {!!currentEntry.comments?.length && (
+                                <div className="max-h-24 overflow-y-auto no-scrollbar space-y-1.5 mb-2">
+                                    {currentEntry.comments.map(comment => (
+                                        <div
+                                            key={`${comment.id}-${comment.createdAt}`}
+                                            className={`max-w-[88%] rounded-lg px-2.5 py-1.5 text-xs leading-relaxed shadow-sm ${comment.author === 'user' ? 'ml-auto bg-amber-100 text-amber-950 rotate-[0.3deg]' : 'mr-auto bg-pink-100 text-pink-950 -rotate-[0.3deg]'}`}
+                                        >
+                                            <div className="text-[9px] opacity-55 mb-0.5 font-bold">
+                                                {comment.author === 'user' ? (userProfile.name || '我') : selectedChar?.name}
+                                            </div>
+                                            {comment.content}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <div className="flex items-center gap-2">
+                                <input
+                                    value={commentDraft}
+                                    onChange={event => setCommentDraft(event.target.value)}
+                                    onKeyDown={event => {
+                                        if (event.key === 'Enter' && !event.shiftKey) {
+                                            event.preventDefault();
+                                            void handleAddComment();
+                                        }
+                                    }}
+                                    maxLength={2000}
+                                    placeholder="贴一张便签……"
+                                    className="min-w-0 flex-1 h-9 rounded-xl bg-black/20 border border-white/10 px-3 text-xs text-white/80 placeholder:text-white/25 outline-none focus:border-amber-400/50"
+                                />
+                                <button
+                                    onClick={() => void handleAddComment()}
+                                    disabled={!commentDraft.trim() || commentPending}
+                                    className="h-9 px-3 rounded-xl bg-amber-500 text-white text-xs font-bold disabled:opacity-35"
+                                >
+                                    贴上
+                                </button>
+                                <button
+                                    onClick={() => void handleRequestCommentReply()}
+                                    disabled={commentPending}
+                                    className="h-9 px-3 rounded-xl bg-pink-500/80 text-white text-xs font-bold disabled:opacity-35 whitespace-nowrap"
+                                >
+                                    {commentPending ? '稍等' : '请 TA 贴便签'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 
             {/* Bottom Controls */}
             <div className="shrink-0 bg-[#222] border-t border-white/5 pb-safe pt-2 z-30">
-                <div className="flex justify-center gap-4 mb-4 px-4">
-                    <button 
-                        onClick={() => { setActiveTab('user'); setSelectedStickerId(null); }}
-                        className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'user' ? 'bg-white text-black shadow-lg' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
-                    >
-                        My Diary
-                    </button>
-                    <button 
-                        onClick={() => { setActiveTab('char'); setSelectedStickerId(null); }}
-                        className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'char' ? 'bg-amber-500 text-white shadow-lg shadow-amber-900/50' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
-                    >
-                        {selectedChar?.name || 'Partner'}
-                        {currentEntry?.charPage && activeTab !== 'char' && <div className="absolute top-2 right-2 w-2 h-2 bg-green-500 rounded-full shadow-sm animate-pulse"></div>}
-                    </button>
-                </div>
-
                 <div className="flex items-center justify-between px-6 pb-4">
-                    <div className="flex gap-3 bg-[#111] p-1.5 rounded-full border border-white/10">
-                        {PAPER_STYLES.slice(0, 4).map(s => (
-                            <button 
-                                key={s.id} 
-                                onClick={() => updatePage({ paperStyle: s.id }, activeTab)}
-                                className={`w-8 h-8 rounded-full border border-white/10 transition-transform active:scale-90 ${s.css}`}
-                                title={s.name}
-                            />
-                        ))}
-                    </div>
+                    {currentEntry?.primaryAuthor !== 'character' ? (
+                        <div className="flex gap-3 bg-[#111] p-1.5 rounded-full border border-white/10">
+                            {PAPER_STYLES.slice(0, 4).map(s => (
+                                <button
+                                    key={s.id}
+                                    onClick={() => updatePage({ paperStyle: s.id }, currentSide)}
+                                    className={`w-8 h-8 rounded-full border border-white/10 transition-transform active:scale-90 ${s.css}`}
+                                    title={s.name}
+                                />
+                            ))}
+                        </div>
+                    ) : <div className="text-[10px] text-white/30 px-2">角色独立日记 · 用便签互动</div>}
                     
                     <div className="flex gap-3">
-                        {activeTab === 'char' && currentEntry?.charPage && !isThinking && (
-                            <button onClick={handleExchange} className="w-11 h-11 bg-white/10 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform border border-white/5">
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                        {currentEntry?.primaryAuthor !== 'character' && (
+                            <button
+                                onClick={() => setShowStickerPanel(!showStickerPanel)}
+                                className={`w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform ${showStickerPanel ? 'bg-white text-black' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}
+                            >
+                                <Sparkle size={24} weight="fill" />
                             </button>
                         )}
-                        
-                        <button 
-                            onClick={() => setShowStickerPanel(!showStickerPanel)} 
-                            className={`w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform ${showStickerPanel ? 'bg-white text-black' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}
-                        >
-                            <Sparkle size={24} weight="fill" />
-                        </button>
                     </div>
                 </div>
 

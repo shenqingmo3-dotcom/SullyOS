@@ -107,11 +107,29 @@ export function normalizeMessageContent(
             }
             if (card?.type === 'diary_card') {
                 const uName = card.userName || userName;
+                if (Number(card.version || 1) >= 2 && card.primaryAuthor !== 'shared') {
+                    const authorName = card.authorName || (card.primaryAuthor === 'character' ? charName : uName);
+                    const mainText = String(card.mainText || (card.primaryAuthor === 'character' ? card.charText : card.userText) || '').trim();
+                    const notes = Array.isArray(card.latestComments)
+                        ? card.latestComments
+                            .map((comment: any) => `${comment.author === 'user' ? uName : charName}贴签：「${String(comment.content || '').trim()}」`)
+                            .filter((line: string) => !line.endsWith('「」'))
+                            .join('；')
+                        : '';
+                    return `[日记 ${card.date || ''}] ${authorName}写了${card.title ? `《${card.title}》` : '一篇日记'}：「${mainText}」${notes ? `。便签互动：${notes}` : ''}`;
+                }
                 const userTextPart = (card.userText || '').trim();
                 const charTextPart = (card.charText || '').trim();
                 const userBlock = userTextPart ? `${uName}写道：「${userTextPart}」` : `${uName}那页是空的`;
-                const charBlock = charTextPart ? `${charName}回道：「${charTextPart}」` : `${charName}那页是空的`;
-                return `[交换日记 ${card.date || ''}] ${uName}和${charName}今天通过【交换日记】交换了一篇日记。${userBlock} ${charBlock}`;
+                const charBlock = charTextPart ? `${charName}写道：「${charTextPart}」` : `${charName}的旧记录是空的`;
+                return `[旧版日记记录 ${card.date || ''}] 这是迁移前保留下来的两段独立日记正文。${userBlock} ${charBlock}`;
+            }
+            if (card?.type === 'autonomy_activity_card' || card?.type === 'mcp_activity_card') {
+                const kind = card.type === 'mcp_activity_card' ? 'MCP 探索记录' : '自主活动';
+                const tool = card.toolName || card.actionName || card.capabilityId;
+                const status = card.status === 'failed' ? '未完成' : card.status === 'planned' ? '已计划' : '已完成';
+                const detail = card.result || card.summary || card.goal || '';
+                return `[${kind}] ${charName}${status}${tool ? `「${tool}」` : '一项活动'}：${detail}`;
             }
             if (card?.type === 'like520_card') {
                 // 520 特别活动：那个"小小的下午"+ char 给 user 的信。信的内容是这次活动的母题落点，

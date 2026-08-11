@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
-import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFragment } from '../types';
+import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFragment, NpcNetworkEntry } from '../types';
 import { SlidersHorizontal, SpeakerHigh, Books, BookOpen } from '@phosphor-icons/react';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
@@ -27,6 +27,7 @@ import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
+import { loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
 
 // ── 神经链接 · 列表页视觉件（淡紫留白风）────────────────────
 // 之前的「星点 + 玻璃饰带 + 华丽头像框」看久了眼花、低端机也重绘卡。
@@ -81,7 +82,7 @@ const CharacterCard: React.FC<{
 );
 
 const Character: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, worldbooks, addWorldbook } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, updateUserProfile, worldbooks, addWorldbook } = useOS();
   const launchIntent = characterLaunch.peek();
   const [view, setView] = useState<'list' | 'detail'>(() => launchIntent ? 'detail' : 'list');
   const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个，仅未建分组时）
@@ -139,9 +140,66 @@ const Character: React.FC = () => {
   const [wbModalSearch, setWbModalSearch] = useState('');
   const [wbModalExpandedCategory, setWbModalExpandedCategory] = useState<string | null>(null);
   const [showGroupModal, setShowGroupModal] = useState(false); // 角色分组管理
+  const [showNpcModal, setShowNpcModal] = useState(false);
+  const [npcDraft, setNpcDraft] = useState<NpcNetworkEntry | null>(null);
   const [newGroupName, setNewGroupName] = useState('');
   // 编辑页「新建分组并指派」的内联输入
   const [detailGroupDraft, setDetailGroupDraft] = useState<string | null>(null);
+
+  const newNpcDraft = (): NpcNetworkEntry => ({
+      id: `npc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: '', avatar: '', persona: '', userRelation: '', userAffinity: 50,
+      characterRelations: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+
+  const syncNpcContext = (nextUser: typeof userProfile, charIds: string[]) => {
+      const backendConfig = loadBackendChatConfig();
+      if (!backendConfig.enabled) return;
+      for (const charId of [...new Set(charIds)]) {
+          const character = characters.find(item => item.id === charId);
+          if (!character) continue;
+          void syncBackendContext({ config: backendConfig, character, user: nextUser, messages: [], memories: [] })
+              .catch(error => console.warn('[NPC] 后端关系网同步失败:', error));
+      }
+  };
+
+  const saveNpcDraft = () => {
+      if (!npcDraft?.name.trim()) { addToast('请填写 NPC 名字', 'error'); return; }
+      const previous = (userProfile.npcNetwork || []).find(item => item.id === npcDraft.id);
+      const normalized: NpcNetworkEntry = {
+          ...npcDraft,
+          name: npcDraft.name.trim(),
+          persona: npcDraft.persona.trim(),
+          userRelation: npcDraft.userRelation.trim(),
+          userAffinity: Math.max(0, Math.min(100, Math.round(npcDraft.userAffinity || 0))),
+          characterRelations: npcDraft.characterRelations.map(relation => ({
+              ...relation,
+              relation: relation.relation.trim(),
+              affinity: Math.max(0, Math.min(100, Math.round(relation.affinity || 0))),
+          })),
+          updatedAt: Date.now(),
+      };
+      const nextNetwork = (userProfile.npcNetwork || []).some(item => item.id === normalized.id)
+          ? (userProfile.npcNetwork || []).map(item => item.id === normalized.id ? normalized : item)
+          : [...(userProfile.npcNetwork || []), normalized];
+      const nextUser = { ...userProfile, npcNetwork: nextNetwork };
+      updateUserProfile({ npcNetwork: nextNetwork });
+      syncNpcContext(nextUser, [
+          ...(previous?.characterRelations || []).map(relation => relation.charId),
+          ...normalized.characterRelations.map(relation => relation.charId),
+      ]);
+      setNpcDraft(null);
+      addToast(`NPC「${normalized.name}」已保存`, 'success');
+  };
+
+  const deleteNpc = (npc: NpcNetworkEntry) => {
+      if (!window.confirm(`删除 NPC「${npc.name}」？`)) return;
+      const nextNetwork = (userProfile.npcNetwork || []).filter(item => item.id !== npc.id);
+      const nextUser = { ...userProfile, npcNetwork: nextNetwork };
+      updateUserProfile({ npcNetwork: nextNetwork });
+      syncNpcContext(nextUser, npc.characterRelations.map(relation => relation.charId));
+      if (npcDraft?.id === npc.id) setNpcDraft(null);
+  };
 
   const [importText, setImportText] = useState('');
   const [exportText, setExportText] = useState('');
@@ -498,7 +556,33 @@ const Character: React.FC = () => {
       } catch (e: any) { addToast(`精炼失败: ${e.message}`, 'error'); }
   };
 
-  const handleDeleteMemories = (ids: string[]) => { if (!formData) return; handleChange('memories', (formData.memories || []).filter(m => !ids.includes(m.id))); addToast(`已删除 ${ids.length} 条记忆`, 'success'); };
+  const syncCharacterProfile = async (nextCharacter: CharacterProfile): Promise<boolean> => {
+      const config = loadBackendChatConfig();
+      if (!config.enabled) return false;
+      await syncBackendContext({
+          config,
+          character: nextCharacter,
+          user: userProfile,
+          messages: [],
+          memories: [],
+      });
+      return true;
+  };
+
+  const handleDeleteMemories = async (ids: string[]) => {
+      if (!formData) return;
+      const nextMemories = (formData.memories || []).filter(m => !ids.includes(m.id));
+      try {
+          const synced = await syncCharacterProfile({ ...formData, memories: nextMemories });
+          handleChange('memories', nextMemories);
+          addToast(
+              synced ? '记忆已从前端和后端删除' : '记忆已从本地角色档案删除',
+              'success',
+          );
+      } catch (error) {
+          addToast('删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
+      }
+  };
   const handleUpdateMemory = (id: string, newSummary: string) => { if (!formData) return; handleChange('memories', (formData.memories || []).map(m => m.id === id ? { ...m, summary: newSummary } : m)); addToast('记忆已更新', 'success'); };
 
   /**
@@ -579,13 +663,18 @@ const Character: React.FC = () => {
       addToast('核心记忆已更新', 'success');
   };
 
-  const handleDeleteRefinedMemory = (year: string, month: string) => {
+  const handleDeleteRefinedMemory = async (year: string, month: string) => {
       if (!formData || !formData.refinedMemories) return;
       const key = `${year}-${month}`;
       const newRefined = { ...formData.refinedMemories };
       delete newRefined[key];
-      handleChange('refinedMemories', newRefined);
-      addToast('核心记忆已删除', 'success');
+      try {
+          const synced = await syncCharacterProfile({ ...formData, refinedMemories: newRefined });
+          handleChange('refinedMemories', newRefined);
+          addToast(synced ? '核心记忆已从前端和后端删除' : '核心记忆已从本地角色档案删除', 'success');
+      } catch (error) {
+          addToast('删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
+      }
   };
 
   const handleExportPreview = () => { if (!formData) return; const mems = formData.memories as any[]; if (!mems || mems.length === 0) { addToast('暂无记忆数据可导出', 'info'); return; } const sortedMemories = [...mems].sort((a, b) => a.date.localeCompare(b.date)); let text = `【角色档案】\nName: ${formData.name}\nExported: ${new Date().toLocaleString()}\n\n`; if (formData.refinedMemories) { text += `=== 核心记忆 ===\n`; Object.entries(formData.refinedMemories).sort().forEach(([k, v]) => { text += `[${k}]: ${v}\n`; }); text += `\n=== 详细日志 ===\n`; } let currentYear = '', currentMonth = ''; sortedMemories.forEach(mem => { const match = mem.date.match(/(\d{4})[-/年](\d{1,2})/); if (match) { const y = match[1], m = match[2]; if (y !== currentYear) { text += `\n[ ${y}年 ]\n`; currentYear = y; currentMonth = ''; } if (m !== currentMonth) { text += `\n-- ${parseInt(m)}月 --\n\n`; currentMonth = m; } } text += `${mem.date} ${mem.mood ? `(#${mem.mood})` : ''}\n${mem.summary}\n\n--------------------------\n\n`; }); setExportText(text); setShowExportModal(true); navigator.clipboard.writeText(text).then(() => addToast('内容已自动复制到剪贴板', 'info')).catch(() => {}); };
@@ -901,11 +990,15 @@ ${isInitialGeneration ? `
       }
   };
 
-  const confirmDeleteCharacter = () => {
+  const confirmDeleteCharacter = async () => {
       if (deleteConfirmTarget) {
-          deleteCharacter(deleteConfirmTarget);
-          setDeleteConfirmTarget(null);
-          addToast('连接已断开', 'success');
+          try {
+              await deleteCharacter(deleteConfirmTarget);
+              setDeleteConfirmTarget(null);
+              addToast('角色及其后端上下文、记忆、日记和心跳均已删除', 'success');
+          } catch (error) {
+              addToast('角色删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
+          }
       }
   };
 
@@ -1076,8 +1169,11 @@ ${isInitialGeneration ? `
                        <h1 className="text-[30px] font-serif font-bold tracking-wide leading-tight text-slate-800">神经链接</h1>
                        <p className="text-xs text-violet-400/90 mt-2">已建立 <span className="font-bold text-violet-500">{characters.length}</span> 个角色连接</p>
                    </div>
-                   <div className="flex gap-3 pt-1">
-                        <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
+                    <div className="flex gap-2 pt-1">
+                         <ToolButton label="NPC" title="NPC 关系网" onClick={() => { setNpcDraft(null); setShowNpcModal(true); }}>
+                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.1 9.1 0 0 0 3.74-.48 3 3 0 0 0-4.68-2.72m.94 3.2v-.94c0-.87-.34-1.7-.94-2.26M15 7.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM5.94 15.52a3 3 0 0 0-4.68 2.72 9.1 9.1 0 0 0 3.74.48m.94-3.2A5.98 5.98 0 0 1 12 12a5.98 5.98 0 0 1 6.06 3.52M15 19.5a9.05 9.05 0 0 1-6 0" /></svg>
+                         </ToolButton>
+                         <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                             </svg>
@@ -1835,6 +1931,71 @@ ${isInitialGeneration ? `
         </Modal>
 
         {/* 角色分组管理 */}
+        <Modal isOpen={showNpcModal} title="NPC 关系网" onClose={() => { setShowNpcModal(false); setNpcDraft(null); }}>
+            {npcDraft ? (
+                <div className="space-y-4 max-h-[65vh] overflow-y-auto no-scrollbar pr-1">
+                    <div className="flex items-center gap-3">
+                        <label className="w-16 h-16 rounded-full overflow-hidden bg-violet-50 border border-violet-100 shrink-0 cursor-pointer flex items-center justify-center text-xl text-violet-300">
+                            {npcDraft.avatar ? <img src={npcDraft.avatar} alt="" className="w-full h-full object-cover" /> : '＋'}
+                            <input type="file" accept="image/*" className="hidden" onChange={async e => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                try {
+                                    const avatar = await processImage(file);
+                                    setNpcDraft(current => current ? { ...current, avatar } : current);
+                                } catch { addToast('头像处理失败', 'error'); }
+                            }} />
+                        </label>
+                        <div className="flex-1 space-y-2">
+                            <input value={npcDraft.name} onChange={e => setNpcDraft({ ...npcDraft, name: e.target.value })} placeholder="NPC 名字" className="w-full px-3 py-2.5 rounded-xl bg-slate-100 text-sm outline-none" />
+                            <input value={npcDraft.avatar || ''} onChange={e => setNpcDraft({ ...npcDraft, avatar: e.target.value })} placeholder="头像 URL（或点击左侧上传）" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-xs outline-none" />
+                        </div>
+                    </div>
+                    <textarea value={npcDraft.persona} onChange={e => setNpcDraft({ ...npcDraft, persona: e.target.value })} placeholder="简单人设：身份、性格或需要记住的特点" rows={3} className="w-full px-3 py-2.5 rounded-xl bg-slate-100 text-sm outline-none resize-none" />
+                    <div className="rounded-2xl border border-violet-100 p-3 space-y-2">
+                        <div className="text-xs font-bold text-slate-500">和用户的关系</div>
+                        <input value={npcDraft.userRelation} onChange={e => setNpcDraft({ ...npcDraft, userRelation: e.target.value })} placeholder="例如：室友、同学、姐姐" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-sm outline-none" />
+                        <div className="flex items-center gap-3 text-xs text-slate-400"><span>好感</span><input type="range" min="0" max="100" value={npcDraft.userAffinity} onChange={e => setNpcDraft({ ...npcDraft, userAffinity: Number(e.target.value) })} className="flex-1 accent-violet-500" /><span className="w-8 text-right tabular-nums">{npcDraft.userAffinity}</span></div>
+                    </div>
+                    <div className="space-y-2">
+                        <div className="text-xs font-bold text-slate-500">和角色的关系（选择后才会注入该角色）</div>
+                        {characters.map(character => {
+                            const relation = npcDraft.characterRelations.find(item => item.charId === character.id);
+                            return <div key={character.id} className="rounded-2xl border border-slate-100 p-3 bg-white">
+                                <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                                    <input type="checkbox" checked={!!relation} onChange={e => {
+                                        const next = e.target.checked
+                                            ? [...npcDraft.characterRelations, { charId: character.id, relation: '', affinity: 50 }]
+                                            : npcDraft.characterRelations.filter(item => item.charId !== character.id);
+                                        setNpcDraft({ ...npcDraft, characterRelations: next });
+                                    }} className="accent-violet-500" />
+                                    <img src={character.avatar} alt="" className="w-7 h-7 rounded-full object-cover" />{character.name}
+                                </label>
+                                {relation && <div className="mt-2 space-y-2 pl-7">
+                                    <input value={relation.relation} onChange={e => setNpcDraft({ ...npcDraft, characterRelations: npcDraft.characterRelations.map(item => item.charId === character.id ? { ...item, relation: e.target.value } : item) })} placeholder="例如：同事、朋友、看不顺眼的人" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-sm outline-none" />
+                                    <div className="flex items-center gap-3 text-xs text-slate-400"><span>好感</span><input type="range" min="0" max="100" value={relation.affinity} onChange={e => setNpcDraft({ ...npcDraft, characterRelations: npcDraft.characterRelations.map(item => item.charId === character.id ? { ...item, affinity: Number(e.target.value) } : item) })} className="flex-1 accent-violet-500" /><span className="w-8 text-right tabular-nums">{relation.affinity}</span></div>
+                                </div>}
+                            </div>;
+                        })}
+                    </div>
+                    <div className="flex gap-2 sticky bottom-0 bg-white pt-2">
+                        <button onClick={() => setNpcDraft(null)} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold">返回</button>
+                        <button onClick={saveNpcDraft} className="flex-1 py-3 rounded-2xl bg-violet-500 text-white font-bold">保存</button>
+                    </div>
+                </div>
+            ) : (
+                <div className="space-y-3 max-h-[60vh] overflow-y-auto no-scrollbar">
+                    <button onClick={() => setNpcDraft(newNpcDraft())} className="w-full py-3 rounded-2xl border border-dashed border-violet-300 text-violet-500 font-bold text-sm">＋ 新增 NPC</button>
+                    {(userProfile.npcNetwork || []).length === 0 && <div className="py-8 text-center text-xs text-slate-400">还没有 NPC。这里只记录关系，不需要写很长的人设。</div>}
+                    {(userProfile.npcNetwork || []).map(npc => <div key={npc.id} className="flex items-center gap-3 p-3 rounded-2xl border border-slate-100 bg-slate-50">
+                        <div className="w-11 h-11 rounded-full overflow-hidden bg-violet-100 shrink-0 flex items-center justify-center text-violet-400">{npc.avatar ? <img src={npc.avatar} alt="" className="w-full h-full object-cover" /> : npc.name.slice(0, 1)}</div>
+                        <button onClick={() => setNpcDraft({ ...npc, characterRelations: npc.characterRelations.map(item => ({ ...item })) })} className="flex-1 min-w-0 text-left"><div className="font-bold text-sm text-slate-700 truncate">{npc.name}</div><div className="text-xs text-slate-400 truncate">和你：{npc.userRelation || '未定义'} · 关联 {npc.characterRelations.length} 个角色</div></button>
+                        <button onClick={() => deleteNpc(npc)} className="p-2 text-slate-300 hover:text-red-400">删除</button>
+                    </div>)}
+                </div>
+            )}
+        </Modal>
+
         <Modal isOpen={showGroupModal} title="角色分组管理" onClose={() => { setShowGroupModal(false); setNewGroupName(''); }}>
             <div className="space-y-3">
                 <div className="flex gap-2">

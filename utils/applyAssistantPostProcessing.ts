@@ -46,6 +46,7 @@ import {
     runXhsMyProfile,
     runXhsDetail,
 } from './agenticTools';
+import { extractInteractionModeDirective } from './interactionMode';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -58,7 +59,7 @@ const normalizeAiContent = (raw: string): string => {
     cleaned = cleaned.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
     cleaned = cleaned.replace(/^[\w一-龥]+:\s*/, '');
     // Strip source tags [聊天]/[通话]/[约会] leaked from history context — replace with newline to preserve intended splits
-    cleaned = cleaned.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n');
+    cleaned = cleaned.replace(/\s*\[(?:聊天|线上聊天|线下相处|通话|约会)\]\s*/g, '\n');
     cleaned = cleaned.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
     return cleaned;
 };
@@ -253,6 +254,7 @@ export interface PostProcessHooks {
     updateTokenUsage?: (data: any, msgCount: number, pass: string) => void;
     /** 给 ChatParser.parseAndExecuteActions 用的音乐钩子 */
     musicHooks?: PostProcessMusicHooks;
+    updateInteractionMode?: (patch: Pick<CharacterProfile, 'interactionMode' | 'interactionScene'>) => void | Promise<void>;
 }
 
 export interface PostProcessCtx {
@@ -1730,6 +1732,22 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('');
     }
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
+
+    const modeResult = extractInteractionModeDirective(aiContent);
+    aiContent = modeResult.content;
+    if (modeResult.directive) {
+        const nextScene = {
+            ...(char.interactionScene || {}),
+            ...(modeResult.directive.location ? { location: modeResult.directive.location } : {}),
+            ...(modeResult.directive.distance ? { distance: modeResult.directive.distance } : {}),
+            changedAt: Date.now(),
+            changedBy: 'assistant' as const,
+        };
+        const patch = { interactionMode: modeResult.directive.mode, interactionScene: nextScene };
+        if (hooks.updateInteractionMode) await hooks.updateInteractionMode(patch);
+        else await DB.saveCharacter({ ...char, ...patch });
+        window.dispatchEvent(new CustomEvent('interaction-mode-updated', { detail: { charId: char.id, ...patch } }));
+    }
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
     aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks);

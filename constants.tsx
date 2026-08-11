@@ -36,6 +36,7 @@ import {
   Planet,
   Wrench,
   HouseLine,
+  FilmSlate,
 } from '@phosphor-icons/react';
 
 // SVG 图标库 - Phosphor Icons
@@ -76,6 +77,7 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
   VRWorld: ({ className }) => <Planet className={className} weight="bold" />,
   CharCreatorDev: ({ className }) => <Wrench className={className} weight="fill" />,
   WorldHome: ({ className }) => <HouseLine className={className} weight="bold" />,
+  Together: ({ className }) => <FilmSlate className={className} weight="bold" />,
 };
 
 export const INSTALLED_APPS: AppConfig[] = [
@@ -92,7 +94,8 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Date, name: '见面', icon: 'Date', color: 'pink' },
   { id: AppID.User, name: '档案', icon: 'User', color: 'blue' },
   { id: AppID.Bank, name: '存钱罐', icon: 'Bank', color: 'lime' }, // Hidden
-  { id: AppID.Journal, name: '交换日记', icon: 'Journal', color: 'amber' },
+  { id: AppID.Journal, name: '日记', icon: 'Journal', color: 'amber' },
+  { id: AppID.Together, name: '一起看', icon: 'Together', color: 'violet' },
   // { id: AppID.Handbook, name: '手账', icon: 'Handbook', color: 'fuchsia' }, // Hidden temporarily, pending update
   { id: AppID.Social, name: 'Spark', icon: 'Social', color: 'red' },
   { id: AppID.Study, name: '自习室', icon: 'Study', color: 'emerald' },

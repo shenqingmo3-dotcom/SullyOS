@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Sparkle, CaretDown, FadersHorizontal } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, MapPin, CaretDown, FadersHorizontal } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import { AcnhActionTile } from '../os/acnhIcons';
@@ -51,6 +51,7 @@ interface ChatInputAreaProps {
     htmlModeEnabled?: boolean;
     // 思考过程展示（会话级）
     showThinkingChain?: boolean;
+    interactionMode?: 'online' | 'offline';
     // Input style
     inputStyle?: 'default' | 'rounded' | 'flat' | 'wechat' | 'ios' | 'telegram' | 'discord' | 'pixel';
     sendButtonStyle?: 'circle' | 'pill' | 'minimal';
@@ -76,6 +77,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     luckinActivated = false,
     htmlModeEnabled = false,
     showThinkingChain = false,
+    interactionMode = 'online',
     inputStyle = 'default',
     sendButtonStyle = 'circle',
     chromeStyle = 'soft',
@@ -648,12 +650,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             onClickCapture={handleActionsClickCapture}
                         >
                           <div className={`p-6 grid grid-cols-4 gap-8 ${actionsPage === 0 ? '' : 'hidden'}`}>
-                            {/* 见面：直接跳到该角色的见面模式（等同于进见面 App 并点击该角色） */}
-                            <button onClick={() => onPanelAction('meetup')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
-                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-violet-300 border-violet-400/20' : 'bg-violet-50 text-violet-500 border-violet-100'}`}>
-                                    <Sparkle className="w-6 h-6" weight="fill" />
+                            {/* 同一会话内切换线上聊天 / 线下相处，固定放在工具栏第一格。 */}
+                            <button onClick={() => onPanelAction('interaction-mode-toggle')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${interactionMode === 'offline' ? (isDiscordStyle ? 'bg-rose-500/20 text-rose-300 border-rose-400/30' : 'bg-rose-50 text-rose-500 border-rose-200') : (isDiscordStyle ? 'bg-slate-800 text-sky-300 border-sky-400/20' : 'bg-sky-50 text-sky-500 border-sky-100')}`}>
+                                    {interactionMode === 'offline' ? <MapPin className="w-6 h-6" weight="fill" /> : <ChatCircleDots className="w-6 h-6" weight="fill" />}
                                 </div>
-                                <span className="text-xs font-bold">见面</span>
+                                <span className="text-xs font-bold">{interactionMode === 'offline' ? '线下相处' : '线上聊天'}</span>
                             </button>
 
                             <button onClick={() => onPanelAction('transfer')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>

@@ -74,3 +74,45 @@ describe('normalizeMessageContent · webpage_card', () => {
     expect(out).not.toContain('网页正文');
   });
 });
+
+describe('normalizeMessageContent · independent diary and autonomy cards', () => {
+  it('把单人日记正文和双方便签整理进模型上下文', () => {
+    const card = {
+      type: 'diary_card',
+      version: 2,
+      primaryAuthor: 'character',
+      date: '2026-08-09',
+      authorName: 'Char',
+      title: '午后的雨',
+      mainText: '我绕路去了旧书店。',
+      latestComments: [
+        { author: 'user', content: '下次带我一起去。' },
+        { author: 'character', content: '那我替你留一把伞。' },
+      ],
+    };
+    const out = normalizeMessageContent(
+      mk('score_card', JSON.stringify(card), { scoreCard: card }),
+      'Char', '我',
+    );
+    expect(out).toContain('[日记');
+    expect(out).toContain('我绕路去了旧书店');
+    expect(out).toContain('我贴签');
+    expect(out).toContain('Char贴签');
+  });
+
+  it('把 MCP 结果保留为可读的活动记录', () => {
+    const card = {
+      type: 'mcp_activity_card',
+      toolName: 'weather.lookup',
+      status: 'completed',
+      result: '查到下午会下雨。',
+    };
+    const out = normalizeMessageContent(
+      mk('score_card', JSON.stringify(card), { scoreCard: card }),
+      'Char', '我',
+    );
+    expect(out).toContain('MCP 探索记录');
+    expect(out).toContain('weather.lookup');
+    expect(out).toContain('查到下午会下雨');
+  });
+});

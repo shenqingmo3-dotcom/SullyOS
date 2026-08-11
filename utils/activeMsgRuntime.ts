@@ -226,6 +226,7 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
         receivedAt: message.receivedAt,
       },
       ...(message.metadata || {}),
+      interactionMode: char.interactionMode === 'offline' ? 'offline' : 'online',
     },
     xhsCaches: pushXhsCaches,
     lastXhsNotesRef: pushLastXhsNotesRef,

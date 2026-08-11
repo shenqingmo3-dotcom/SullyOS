@@ -1,7 +1,7 @@
 
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
-import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
+import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig, UserScheduleEntry } from '../../types';
 import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
@@ -111,6 +111,8 @@ interface ChatModalsProps {
     onScheduleCoverChange?: (dataUrl: string) => void;
     onScheduleStyleChange?: (style: 'lifestyle' | 'mindful') => void;
     onPlayTheater?: (index: number) => void;
+    weeklySchedule?: UserScheduleEntry[];
+    onSaveWeeklySchedule?: (entries: UserScheduleEntry[]) => void;
     // Schedule master toggle
     isScheduleFeatureEnabled?: boolean;
     onToggleScheduleFeature?: () => void;
@@ -234,6 +236,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable,
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
+    weeklySchedule = [], onSaveWeeklySchedule,
     isScheduleFeatureEnabled, onToggleScheduleFeature,
     isMemoryPalaceEnabled, isVectorizing, vectorizePendingCount, vectorizeProgress, onForceVectorize,
     apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
@@ -248,6 +251,20 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     const HISTORY_PAGE_SIZE = 50;
     const HISTORY_SEARCH_MAX = 200;
     const LONG_PRESS_MS = 450;
+    const [weeklyTitle, setWeeklyTitle] = useState('');
+    const [weeklyStart, setWeeklyStart] = useState('08:00');
+    const [weeklyEnd, setWeeklyEnd] = useState('09:00');
+    const [weeklyDays, setWeeklyDays] = useState<number[]>([1]);
+
+    const addWeeklyEntry = () => {
+        if (!weeklyTitle.trim() || !onSaveWeeklySchedule || weeklyDays.length === 0) return;
+        onSaveWeeklySchedule([...weeklySchedule, {
+            id: `weekly-${Date.now()}`,
+            title: weeklyTitle.trim(), daysOfWeek: weeklyDays,
+            startTime: weeklyStart, endTime: weeklyEnd,
+        }]);
+        setWeeklyTitle('');
+    };
 
     const startHistoryLongPress = (msgId: number) => {
         longPressTriggeredRef.current = false;
@@ -976,6 +993,40 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                 >
                                     <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${isScheduleFeatureEnabled ? 'translate-x-4' : ''}`}></div>
                                 </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {onSaveWeeklySchedule && (
+                        <div className="mb-4 rounded-2xl border border-sky-100 bg-sky-50/70 p-3">
+                            <div className="mb-2 flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-bold text-slate-700">我的每周固定日程</p>
+                                    <p className="mt-0.5 text-[10px] text-slate-500">每天自动生成角色日程时，会避开你今天的课和固定安排。</p>
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                {weeklySchedule.map(entry => (
+                                    <div key={entry.id} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-[11px] text-slate-600">
+                                        <span className="font-bold text-sky-700">{entry.startTime}-{entry.endTime}</span>
+                                        <span className="min-w-0 flex-1 truncate">{entry.title}</span>
+                                        <span className="text-[10px] text-slate-400">{entry.daysOfWeek.map(day => '日一二三四五六'[day]).join('、')}</span>
+                                        <button onClick={() => onSaveWeeklySchedule(weeklySchedule.filter(item => item.id !== entry.id))} className="text-rose-400">×</button>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="mt-3 space-y-2 rounded-xl bg-white/80 p-2">
+                                <input value={weeklyTitle} onChange={e => setWeeklyTitle(e.target.value)} placeholder="课程或固定安排" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs outline-none" />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input type="time" value={weeklyStart} onChange={e => setWeeklyStart(e.target.value)} className="rounded-lg border border-slate-200 px-2 py-2 text-xs" />
+                                    <input type="time" value={weeklyEnd} onChange={e => setWeeklyEnd(e.target.value)} className="rounded-lg border border-slate-200 px-2 py-2 text-xs" />
+                                </div>
+                                <div className="flex gap-1">
+                                    {'日一二三四五六'.split('').map((label, day) => (
+                                        <button key={day} onClick={() => setWeeklyDays(prev => prev.includes(day) ? prev.filter(item => item !== day) : [...prev, day].sort())} className={`h-7 flex-1 rounded-lg text-[10px] font-bold ${weeklyDays.includes(day) ? 'bg-sky-500 text-white' : 'bg-slate-100 text-slate-400'}`}>{label}</button>
+                                    ))}
+                                </div>
+                                <button onClick={addWeeklyEntry} disabled={!weeklyTitle.trim() || weeklyDays.length === 0} className="w-full rounded-lg bg-sky-600 py-2 text-xs font-bold text-white disabled:opacity-40">添加并每周重复</button>
                             </div>
                         </div>
                     )}

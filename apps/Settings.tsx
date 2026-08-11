@@ -26,6 +26,45 @@ import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
+import {
+  addBackendModelProfile,
+  createBackendPairingCode,
+  deleteBackendModelProfile,
+  disableBackendPush,
+  discoverBackendModels,
+  enableBackendPush,
+  exchangeBackendPairingCode,
+  getBackendAgents,
+  getBackendModelPool,
+  getBackendPushConfig,
+  loadBackendChatConfig,
+  saveBackendChatConfig,
+  syncBackendCharacterFully,
+  syncBackendMemoryPalaceFully,
+  testBackendConnection,
+  testBackendPush,
+  updateBackendTool,
+  updateBackendModelRouting,
+  updateBackendAgentAutonomy,
+  type BackendAgentAutonomy,
+  type BackendAgentsResult,
+  type BackendChatConfig,
+  type BackendModelPool,
+  type BackendPushConfig,
+} from '../utils/backendClient';
+import {
+    AnticipationDB,
+    DigestReportDB,
+    EventBoxDB,
+    MemoryBatchDB,
+    MemoryLinkDB,
+    MemoryNodeDB,
+    MemoryVectorDB,
+    RoomPlateDB,
+    TopicBoxDB,
+} from '../utils/memoryPalace/db';
+import { acknowledgeBackendMemoryChangesThrough } from '../utils/backendSyncQueue';
+import BackendToolSettings from '../components/settings/BackendToolSettings';
 
 // hot_news（orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -102,12 +141,17 @@ const SettingsSection: React.FC<{
  * 配置存 localStorage（utils/mcpClient），启用且发现过工具的服务器会在聊天里
  * 以 function-calling 注入，详见 docs/mcp-client.md。
  */
-const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> = ({ addToast }) => {
+const McpServersCard: React.FC<{
+    addToast: (msg: string, type?: any) => void;
+    backendConfig: BackendChatConfig;
+    onBackendSaved?: () => void | Promise<void>;
+}> = ({ addToast, backendConfig, onBackendSaved }) => {
     const { characters, groups } = useOS();
     const [servers, setServers] = useState<McpServerConfig[]>(() => loadMcpServers());
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [testingId, setTestingId] = useState<string | null>(null);
     const [testStatus, setTestStatus] = useState<Record<string, string>>({});
+    const [backendSyncingId, setBackendSyncingId] = useState<string | null>(null);
     const [useNativeTools, setUseNativeToolsState] = useState<boolean>(() => getMcpUseNativeTools());
 
     const persist = (next: McpServerConfig[]) => {
@@ -149,6 +193,50 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
         }
     };
 
+    const syncServersToBackend = async () => {
+        if (!backendConfig.baseUrl.trim() || !backendConfig.token.trim()) {
+            addToast('请先在「VPS 自主后端」保存并测试后端连接', 'error');
+            return;
+        }
+        const enabledServers = servers.filter(server => server.enabled);
+        if (enabledServers.some(server => !server.url.trim() || !server.tools?.length)) {
+            addToast('已启用的 MCP 都需要先测试连接并取得工具清单', 'error');
+            return;
+        }
+        setBackendSyncingId('pool');
+        try {
+            await updateBackendTool(backendConfig, 'mcp.read', {
+                label: 'MCP 服务器池',
+                enabled: enabledServers.length > 0,
+                endpoint: 'mcp-pool',
+                settings: {
+                    mode: 'mcp-pool',
+                    servers: enabledServers.map(server => ({
+                        id: server.id,
+                        name: server.name || 'MCP 服务器',
+                        url: server.url.trim(),
+                        tools: server.tools || [],
+                    })),
+                },
+                secrets: Object.fromEntries(enabledServers.map(server => [
+                    `server:${server.id}`,
+                    JSON.stringify({
+                        token: server.token?.trim() || '',
+                        customHeaders: (server.customHeaders || []).filter(header => header.name.trim() && header.value.trim()),
+                    }),
+                ])),
+            });
+            await onBackendSaved?.();
+            addToast(enabledServers.length
+                ? `已把 ${enabledServers.length} 个 MCP 同步给 VPS 自主活动`
+                : '已关闭 VPS 的 MCP 自主活动', 'success');
+        } catch (error) {
+            addToast(`同步 VPS 失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        } finally {
+            setBackendSyncingId(null);
+        }
+    };
+
     return (
         <div className="bg-violet-50/60 p-4 rounded-2xl space-y-3">
             <div className="flex items-center justify-between">
@@ -179,6 +267,19 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                     <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-violet-500"></div>
                 </label>
             </div>
+            <button
+                type="button"
+                onClick={() => void syncServersToBackend()}
+                disabled={backendSyncingId === 'pool'}
+                className="w-full py-2.5 bg-cyan-50 border border-cyan-200 text-cyan-700 text-xs font-bold rounded-xl active:scale-95 transition-transform disabled:opacity-60"
+            >
+                {backendSyncingId === 'pool'
+                    ? '正在同步全部 MCP…'
+                    : `同步全部已启用 MCP 到 VPS（${servers.filter(server => server.enabled).length}）`}
+            </button>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+                VPS 会从全部已启用服务器的工具中选择最适合当前好奇心的一个；不会再用新服务器覆盖旧服务器。
+            </p>
             {servers.map(server => (
                 <div key={server.id} className="bg-white/70 border border-violet-100 rounded-xl p-3 space-y-2">
                     <div className="flex items-center justify-between gap-2">
@@ -326,9 +427,16 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                                 </div>
                             )}
                             {!!server.tools?.length && (
-                                <p className="text-[10px] text-slate-400 leading-relaxed">
-                                    工具：{server.tools.map(t => t.name).join('、')}
-                                </p>
+                                <>
+                                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                                        工具：{server.tools.map(t => t.name).join('、')}
+                                    </p>
+                                    {server.tools.some(t => t.name.toLowerCase() === 'health_now') && (
+                                        <p className="text-[10px] text-emerald-700 leading-relaxed bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1.5">
+                                            🌿 已识别健康感知：绑定的角色可以在聊天语境合适时自主读取健康快照，并自然地关心你；不会定时监控或每轮播报。
+                                        </p>
+                                    )}
+                                </>
                             )}
                         </div>
                     )}
@@ -344,6 +452,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
 const Settings: React.FC = () => {
   const {
       apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
+      userProfile, characters,
       exportSystem, importSystem, addToast, showError, resetSystem,
       apiPresets, addApiPreset, removeApiPreset,
       sysOperation, // Get progress state
@@ -359,6 +468,26 @@ const Settings: React.FC = () => {
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
+  const [backendChatConfig, setBackendChatConfig] = useState(loadBackendChatConfig);
+  const [backendTesting, setBackendTesting] = useState(false);
+  const [backendTestResult, setBackendTestResult] = useState<string | null>(null);
+  const [backendSyncing, setBackendSyncing] = useState(false);
+  const [backendSyncProgress, setBackendSyncProgress] = useState<string | null>(null);
+  const [backendModelPool, setBackendModelPool] = useState<BackendModelPool | null>(null);
+  const [backendModelBusy, setBackendModelBusy] = useState(false);
+  const [backendAgents, setBackendAgents] = useState<BackendAgentsResult | null>(null);
+  const [backendAgentBusyId, setBackendAgentBusyId] = useState<string | null>(null);
+  const [backendPushBusy, setBackendPushBusy] = useState(false);
+  const [backendPushState, setBackendPushState] = useState<BackendPushConfig | null>(null);
+  const [backendPairingInput, setBackendPairingInput] = useState('');
+  const [backendPairingBusy, setBackendPairingBusy] = useState(false);
+  const [backendGeneratedPairingCode, setBackendGeneratedPairingCode] = useState<string | null>(null);
+  const [newBackendModelLabel, setNewBackendModelLabel] = useState('');
+  const [newBackendModelUrl, setNewBackendModelUrl] = useState('');
+  const [newBackendModelKey, setNewBackendModelKey] = useState('');
+  const [newBackendModelName, setNewBackendModelName] = useState('');
+  const [newBackendAvailableModels, setNewBackendAvailableModels] = useState<string[]>([]);
+  const [backendModelDiscovering, setBackendModelDiscovering] = useState(false);
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -466,6 +595,8 @@ const Settings: React.FC = () => {
   const [rtXhsNickname, setRtXhsNickname] = useState(realtimeConfig.xhsMcpConfig?.loggedInNickname || '');
   const [rtXhsUserId, setRtXhsUserId] = useState(realtimeConfig.xhsMcpConfig?.loggedInUserId || '');
   const [rtXhsCookie, setRtXhsCookie] = useState(realtimeConfig.xhsMcpConfig?.cookie || '');
+  const [rtXhsAllowShare, setRtXhsAllowShare] = useState(realtimeConfig.xhsMcpConfig?.autonomyPermissions?.shareToChat !== false);
+  const [rtXhsAllowLike, setRtXhsAllowLike] = useState(realtimeConfig.xhsMcpConfig?.autonomyPermissions?.like !== false);
   const [rtXhsGuideOpen, setRtXhsGuideOpen] = useState(false);
   const [rtTestStatus, setRtTestStatus] = useState('');
 
@@ -677,6 +808,72 @@ const Settings: React.FC = () => {
       setLocalVoicePromptFish(apiConfig.voicePrompts?.fishaudio || '');
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
   }, [apiConfig]);
+
+  const refreshBackendModelPool = async (configOverride = backendChatConfig) => {
+      const pool = await getBackendModelPool(configOverride);
+      setBackendModelPool(pool);
+      return pool;
+  };
+
+  const discoverNewBackendModelOptions = async () => {
+      if (!newBackendModelUrl.trim() || !newBackendModelKey.trim()) {
+          setBackendTestResult('⚠️ 请先填写后备站点的 API URL 和 API Key');
+          return;
+      }
+      setBackendModelDiscovering(true);
+      try {
+          const candidate = saveBackendChatConfig(backendChatConfig);
+          const models = await discoverBackendModels(candidate, {
+              baseUrl: newBackendModelUrl.trim(),
+              apiKey: newBackendModelKey.trim(),
+          });
+          setNewBackendAvailableModels(models);
+          setNewBackendModelName(current => models.includes(current) ? current : (models[0] || ''));
+          setBackendTestResult(`✅ 获取到 ${models.length} 个可用模型，请从列表中选择`);
+      } catch (error) {
+          setNewBackendAvailableModels([]);
+          setNewBackendModelName('');
+          setBackendTestResult(`❌ 拉取模型列表失败：${error instanceof Error ? error.message : '未知错误'}`);
+      } finally {
+          setBackendModelDiscovering(false);
+      }
+  };
+
+  const refreshBackendAgents = async (configOverride = backendChatConfig) => {
+      const result = await getBackendAgents(configOverride);
+      setBackendAgents(result);
+      return result;
+  };
+
+  const saveBackendAgentAutonomy = async (
+      agent: BackendAgentAutonomy,
+      patch: Partial<Pick<BackendAgentAutonomy, 'enabled' | 'intervalMinutes' | 'policy'>>,
+  ) => {
+      setBackendAgentBusyId(agent.characterId);
+      try {
+          const candidate = saveBackendChatConfig(backendChatConfig);
+          const updated = await updateBackendAgentAutonomy(candidate, agent.characterId, {
+              enabled: patch.enabled ?? agent.enabled,
+              intervalMinutes: patch.intervalMinutes ?? agent.intervalMinutes,
+              policy: patch.policy ?? agent.policy,
+          });
+          setBackendAgents(current => current ? {
+              ...current,
+              agents: current.agents.map(item => item.characterId === updated.characterId ? updated : item),
+          } : current);
+          setBackendTestResult(`✅ ${updated.name} 的自主心跳设置已保存`);
+      } catch (error) {
+          setBackendTestResult(`❌ 保存角色自主设置失败：${error instanceof Error ? error.message : '未知错误'}`);
+      } finally {
+          setBackendAgentBusyId(null);
+      }
+  };
+
+  useEffect(() => {
+      const config = loadBackendChatConfig();
+      void getBackendModelPool(config).then(setBackendModelPool).catch(() => {});
+      void getBackendAgents(config).then(setBackendAgents).catch(() => {});
+  }, []);
 
   const loadPreset = (preset: typeof apiPresets[0]) => {
       setLocalUrl(preset.config.baseUrl);
@@ -1065,7 +1262,9 @@ const Settings: React.FC = () => {
   };
 
   // 保存实时感知配置
-  const handleSaveRealtimeConfig = () => {
+  const handleSaveRealtimeConfig = async () => {
+      const xhsEndpoint = rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl;
+      const xhsCookie = rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined;
       updateRealtimeConfig({
           weatherEnabled: rtWeatherEnabled,
           weatherApiKey: rtWeatherKey,
@@ -1085,16 +1284,38 @@ const Settings: React.FC = () => {
           xhsEnabled: rtXhsEnabled,
           xhsMcpConfig: {
               enabled: rtXhsMcpEnabled,
-              serverUrl: rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl,
-              cookie: rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined,
+              serverUrl: xhsEndpoint,
+              cookie: xhsCookie,
               loggedInNickname: rtXhsNickname || undefined,
               loggedInUserId: rtXhsUserId || undefined,
               userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken, // 保留自动获取的 token
+              autonomyPermissions: { shareToChat: rtXhsAllowShare, like: rtXhsAllowLike },
           }
       });
       RealtimeContextManager.clearCache(); // 城市/来源改了就别再吐旧缓存
       addToast('实时感知配置已保存', 'success');
       setShowRealtimeModal(false);
+      if (backendChatConfig.baseUrl.trim() && backendChatConfig.token.trim()) {
+          try {
+              await updateBackendTool(backendChatConfig, 'xhs.read', {
+                  label: rtXhsMode === 'lite' ? '小红书 Lite' : '小红书 MCP',
+                  enabled: rtXhsMcpEnabled,
+                  endpoint: xhsEndpoint,
+                  settings: {
+                      mode: rtXhsMode === 'lite' ? 'xhs-lite' : 'mcp',
+                      userId: rtXhsUserId || '',
+                      userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken || '',
+                      allowShareToChat: rtXhsAllowShare,
+                      allowLike: rtXhsAllowLike,
+                  },
+                  secrets: rtXhsMode === 'lite' ? { cookie: xhsCookie || '' } : {},
+              });
+              await refreshBackendAgents();
+              addToast('小红书设置已同步给 VPS 自主活动', 'success');
+          } catch (error) {
+              addToast(`本体已保存；VPS 小红书同步失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+          }
+      }
   };
 
   // 测试天气API连接：填了 key 测 OpenWeatherMap，没填测免费的 Open-Meteo
@@ -1676,6 +1897,821 @@ const Settings: React.FC = () => {
             </div>
         </SettingsSection>
 
+        <SettingsSection
+            title="VPS 自主后端"
+            icon={
+                <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
+                    <PlugsConnected size={16} weight="bold" />
+                </div>
+            }
+            badge="已分流"
+        >
+            <div className="space-y-4">
+                <div className="rounded-2xl bg-white/60 border border-violet-100 px-4 py-3">
+                    <div>
+                        <p className="text-sm font-semibold text-slate-600">普通聊天与自主活动已分流</p>
+                        <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                            普通聊天始终使用前端原生 API、模型池与完整提示词。VPS 只接收后台增量同步，并负责心跳、日记、自主活动、预约唤醒与手机推送。
+                        </p>
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-violet-200/70 bg-violet-50/60 p-3 space-y-3">
+                    <div>
+                        <p className="text-xs font-bold text-violet-800">新设备一次性配对</p>
+                        <p className="text-[10px] text-violet-700/70 mt-1 leading-relaxed">
+                            在新手机输入 15 分钟有效的配对码。成功后只连接 VPS，不会自动把手机里的旧记忆覆盖或重复上传。
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-[1fr_auto] gap-2">
+                        <input
+                            type="text"
+                            value={backendPairingInput}
+                            onChange={(event) => setBackendPairingInput(event.target.value.toUpperCase())}
+                            placeholder="XXXX-XXXX-XXXX"
+                            className="min-w-0 bg-white border border-violet-200 rounded-xl px-3 py-2 text-sm font-mono tracking-wider"
+                        />
+                        <button
+                            type="button"
+                            disabled={backendPairingBusy || backendPairingInput.trim().length < 8}
+                            onClick={async () => {
+                                setBackendPairingBusy(true);
+                                try {
+                                    const paired = await exchangeBackendPairingCode(backendChatConfig.baseUrl, backendPairingInput);
+                                    setBackendChatConfig(paired);
+                                    setBackendPairingInput('');
+                                    setBackendTestResult('✅ 本设备已安全连接 VPS；尚未执行旧数据上传');
+                                } catch (error) {
+                                    setBackendTestResult(`❌ 配对失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                } finally {
+                                    setBackendPairingBusy(false);
+                                }
+                            }}
+                            className="px-3 py-2 rounded-xl text-[10px] font-bold bg-violet-600 text-white disabled:opacity-40"
+                        >
+                            连接本设备
+                        </button>
+                    </div>
+                    <button
+                        type="button"
+                        disabled={backendPairingBusy || !backendChatConfig.token.trim()}
+                        onClick={async () => {
+                            setBackendPairingBusy(true);
+                            try {
+                                const candidate = saveBackendChatConfig(backendChatConfig);
+                                const result = await createBackendPairingCode(candidate);
+                                setBackendGeneratedPairingCode(result.code);
+                                setBackendTestResult('✅ 新配对码已生成，15 分钟内使用一次即失效');
+                            } catch (error) {
+                                setBackendTestResult(`❌ 生成配对码失败：${error instanceof Error ? error.message : '未知错误'}`);
+                            } finally {
+                                setBackendPairingBusy(false);
+                            }
+                        }}
+                        className="w-full py-2 rounded-xl text-[10px] font-bold bg-white text-violet-700 border border-violet-200 disabled:opacity-40"
+                    >
+                        为另一台设备生成配对码
+                    </button>
+                    {backendGeneratedPairingCode && (
+                        <div className="text-center rounded-xl bg-white border border-violet-200 px-3 py-2 font-mono text-base font-bold tracking-[0.18em] text-violet-700">
+                            {backendGeneratedPairingCode}
+                        </div>
+                    )}
+                </div>
+
+                <div>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Backend URL</label>
+                    <input
+                        type="text"
+                        value={backendChatConfig.baseUrl}
+                        onChange={(event) => setBackendChatConfig(current => ({ ...current, baseUrl: event.target.value }))}
+                        placeholder="http://127.0.0.1:43210"
+                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all"
+                    />
+                </div>
+
+                <div>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">App Token</label>
+                    <input
+                        type="password"
+                        value={backendChatConfig.token}
+                        onChange={(event) => setBackendChatConfig(current => ({ ...current, token: event.target.value }))}
+                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all"
+                    />
+                </div>
+
+                <p className="text-[10px] text-violet-700/70 leading-relaxed bg-violet-50 rounded-xl px-3 py-2">
+                    <span className="font-mono">backend/.env</span> 中的模型作为只读主模型保留；新增模型的 Key 会由后端加密后保存在本机数据库，不进入聊天、记忆或前端备份。
+                </p>
+
+                <div className="grid grid-cols-2 gap-2">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const saved = saveBackendChatConfig(backendChatConfig);
+                            setBackendChatConfig(saved);
+                            setBackendTestResult('✅ VPS 自主后端设置已保存');
+                        }}
+                        className="py-2.5 rounded-2xl font-bold text-sm text-white bg-violet-500 active:scale-95 transition-all"
+                    >
+                        保存后端设置
+                    </button>
+                    <button
+                        type="button"
+                        disabled={backendTesting || !backendChatConfig.baseUrl.trim() || !backendChatConfig.token.trim()}
+                        onClick={async () => {
+                            setBackendTesting(true);
+                            setBackendTestResult(null);
+                            const candidate = saveBackendChatConfig(backendChatConfig);
+                            setBackendChatConfig(candidate);
+                            const result = await testBackendConnection(candidate);
+                            if (!result.ok) {
+                                setBackendTestResult(`❌ 后端连接失败：${result.message || '未知错误'}`);
+                            } else if (!result.modelConfigured) {
+                                setBackendTestResult('⚠️ 后端已连接，但模型尚未写入 backend/.env');
+                            } else {
+                                setBackendTestResult(`✅ 后端与模型池均正常：${result.model || '已配置'}（${result.profiles?.length || 1} 个模型）`);
+                                await refreshBackendModelPool(candidate);
+                                await refreshBackendAgents(candidate);
+                            }
+                            setBackendTesting(false);
+                        }}
+                        className="py-2.5 rounded-2xl font-bold text-sm border border-violet-200 text-violet-600 bg-violet-50 disabled:opacity-40 active:scale-95 transition-all"
+                    >
+                        {backendTesting ? '测试中...' : '测试后端'}
+                    </button>
+                </div>
+
+                <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/60 p-3 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-bold text-emerald-800">手机后台推送</p>
+                            <p className="text-[10px] text-emerald-700/70 mt-1 leading-relaxed">
+                                由 VPS 心跳生成消息，再通过 Web Push 唤醒手机。PWA 退出、网页关闭或锁屏后仍可收到；不依赖网页后台计时器。
+                            </p>
+                        </div>
+                        <span className={`text-[9px] px-2 py-1 rounded-full ${
+                            backendPushState?.activeSubscriptions
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-white text-emerald-700 border border-emerald-200'
+                        }`}>
+                            {backendPushState?.activeSubscriptions
+                                ? `${backendPushState.activeSubscriptions} 台已订阅`
+                                : '未订阅'}
+                        </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <button
+                            type="button"
+                            disabled={backendPushBusy || !backendChatConfig.baseUrl.trim() || !backendChatConfig.token.trim()}
+                            onClick={async () => {
+                                setBackendPushBusy(true);
+                                try {
+                                    const candidate = saveBackendChatConfig(backendChatConfig);
+                                    await enableBackendPush(candidate);
+                                    const status = await getBackendPushConfig(candidate);
+                                    setBackendPushState(status);
+                                    setBackendTestResult('✅ 本设备后台推送已开启');
+                                } catch (error) {
+                                    setBackendTestResult(`❌ 开启后台推送失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                } finally {
+                                    setBackendPushBusy(false);
+                                }
+                            }}
+                            className="py-2 rounded-xl text-[10px] font-bold bg-emerald-600 text-white disabled:opacity-40"
+                        >
+                            开启本设备
+                        </button>
+                        <button
+                            type="button"
+                            disabled={backendPushBusy}
+                            onClick={async () => {
+                                setBackendPushBusy(true);
+                                try {
+                                    const candidate = saveBackendChatConfig(backendChatConfig);
+                                    const result = await testBackendPush(candidate);
+                                    setBackendTestResult(result.delivered > 0
+                                        ? '✅ 测试推送已发送，请查看系统通知'
+                                        : '⚠️ 没有投递到本设备，请先开启本设备推送');
+                                } catch (error) {
+                                    setBackendTestResult(`❌ 测试推送失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                } finally {
+                                    setBackendPushBusy(false);
+                                }
+                            }}
+                            className="py-2 rounded-xl text-[10px] font-bold bg-white text-emerald-700 border border-emerald-200 disabled:opacity-40"
+                        >
+                            测试推送
+                        </button>
+                        <button
+                            type="button"
+                            disabled={backendPushBusy}
+                            onClick={async () => {
+                                setBackendPushBusy(true);
+                                try {
+                                    const candidate = saveBackendChatConfig(backendChatConfig);
+                                    await disableBackendPush(candidate);
+                                    setBackendPushState(await getBackendPushConfig(candidate));
+                                    setBackendTestResult('✅ 本设备后台推送已关闭');
+                                } catch (error) {
+                                    setBackendTestResult(`❌ 关闭后台推送失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                } finally {
+                                    setBackendPushBusy(false);
+                                }
+                            }}
+                            className="py-2 rounded-xl text-[10px] font-bold bg-white text-slate-500 border border-slate-200 disabled:opacity-40"
+                        >
+                            关闭本设备
+                        </button>
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-3 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-bold text-slate-600">后端模型池</p>
+                            <p className="text-[10px] text-slate-400 mt-1">
+                                自动模式会从主用模型开始，失败后依次尝试其他可用模型；固定模式只调用你选中的一个。
+                            </p>
+                        </div>
+                        <div className="flex rounded-xl bg-slate-100 p-0.5 shrink-0">
+                            {(['auto', 'fixed'] as const).map(mode => (
+                                <button
+                                    key={mode}
+                                    type="button"
+                                    disabled={backendModelBusy || !backendModelPool}
+                                    onClick={async () => {
+                                        if (!backendModelPool) return;
+                                        setBackendModelBusy(true);
+                                        try {
+                                            const candidate = saveBackendChatConfig(backendChatConfig);
+                                            await updateBackendModelRouting(candidate, {
+                                                mode,
+                                                activeProfileId: backendModelPool.routing.activeProfileId
+                                                    || backendModelPool.profiles[0]?.id
+                                                    || null,
+                                            });
+                                            await refreshBackendModelPool(candidate);
+                                        } catch (error) {
+                                            setBackendTestResult(`❌ 切换模式失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                        } finally {
+                                            setBackendModelBusy(false);
+                                        }
+                                    }}
+                                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-colors ${
+                                        backendModelPool?.routing.mode === mode
+                                            ? 'bg-white text-violet-600 shadow-sm'
+                                            : 'text-slate-400'
+                                    }`}
+                                >
+                                    {mode === 'auto' ? '自动切换' : '固定模型'}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="space-y-2">
+                        {(backendModelPool?.profiles || []).map(profile => {
+                            const selected = backendModelPool?.routing.activeProfileId === profile.id;
+                            const lastUsed = backendModelPool?.routing.lastUsedProfileId === profile.id;
+                            return (
+                                <div key={profile.id} className={`rounded-xl border px-3 py-2 ${selected ? 'border-violet-300 bg-violet-50/70' : 'border-slate-200 bg-white/70'}`}>
+                                    <div className="flex items-start gap-2">
+                                        <button
+                                            type="button"
+                                            disabled={backendModelBusy}
+                                            onClick={async () => {
+                                                if (!backendModelPool) return;
+                                                setBackendModelBusy(true);
+                                                try {
+                                                    const candidate = saveBackendChatConfig(backendChatConfig);
+                                                    await updateBackendModelRouting(candidate, {
+                                                        mode: backendModelPool.routing.mode,
+                                                        activeProfileId: profile.id,
+                                                    });
+                                                    await refreshBackendModelPool(candidate);
+                                                } catch (error) {
+                                                    setBackendTestResult(`❌ 切换模型失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                                } finally {
+                                                    setBackendModelBusy(false);
+                                                }
+                                            }}
+                                            className={`mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 ${selected ? 'border-violet-500 bg-violet-500 shadow-[inset_0_0_0_3px_white]' : 'border-slate-300'}`}
+                                            title="设为主用模型"
+                                        />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                <span className="text-xs font-semibold text-slate-650">{profile.label}</span>
+                                                {profile.readOnly && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400">.env</span>}
+                                                {lastUsed && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-600">最近使用</span>}
+                                                <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
+                                                    profile.healthStatus === 'healthy'
+                                                        ? 'bg-emerald-100 text-emerald-600'
+                                                        : profile.healthStatus === 'unhealthy'
+                                                            ? 'bg-red-100 text-red-600'
+                                                            : 'bg-slate-100 text-slate-400'
+                                                }`}>
+                                                    {profile.healthStatus === 'healthy' ? '正常' : profile.healthStatus === 'unhealthy' ? '冷却中' : '未检测'}
+                                                </span>
+                                            </div>
+                                            <p className="text-[10px] font-mono text-slate-500 mt-0.5 break-all">{profile.model}</p>
+                                            <p className="text-[9px] text-slate-400 break-all">{profile.providerOrigin || '未知站点'}</p>
+                                            {profile.lastError && <p className="text-[9px] text-red-400 mt-1 line-clamp-2">{profile.lastError}</p>}
+                                        </div>
+                                        {!profile.readOnly && (
+                                            <button
+                                                type="button"
+                                                disabled={backendModelBusy}
+                                                onClick={async () => {
+                                                    if (!window.confirm(`删除后端模型“${profile.label}”？`)) return;
+                                                    setBackendModelBusy(true);
+                                                    try {
+                                                        const candidate = saveBackendChatConfig(backendChatConfig);
+                                                        await deleteBackendModelProfile(candidate, profile.id);
+                                                        await refreshBackendModelPool(candidate);
+                                                    } catch (error) {
+                                                        setBackendTestResult(`❌ 删除模型失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                                    } finally {
+                                                        setBackendModelBusy(false);
+                                                    }
+                                                }}
+                                                className="text-[10px] text-red-400 px-1"
+                                            >
+                                                删除
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {!backendModelPool && (
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    setBackendModelBusy(true);
+                                    try {
+                                        await refreshBackendModelPool(saveBackendChatConfig(backendChatConfig));
+                                    } catch (error) {
+                                        setBackendTestResult(`❌ 读取模型池失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                    } finally {
+                                        setBackendModelBusy(false);
+                                    }
+                                }}
+                                className="w-full py-2 text-xs text-violet-600 bg-violet-50 rounded-xl"
+                            >
+                                读取模型池
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="border-t border-slate-100 pt-3 space-y-2">
+                        <p className="text-[10px] font-bold text-slate-500">添加后备模型</p>
+                        <input
+                            value={newBackendModelLabel}
+                            onChange={event => setNewBackendModelLabel(event.target.value)}
+                            placeholder="备注名，例如：站点 B Sonnet"
+                            className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs"
+                        />
+                        <input
+                            value={newBackendModelUrl}
+                            onChange={event => {
+                                setNewBackendModelUrl(event.target.value);
+                                setNewBackendAvailableModels([]);
+                                setNewBackendModelName('');
+                            }}
+                            placeholder="API URL，例如 https://example.com/v1"
+                            className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono"
+                        />
+                        <input
+                            type="password"
+                            value={newBackendModelKey}
+                            onChange={event => {
+                                setNewBackendModelKey(event.target.value);
+                                setNewBackendAvailableModels([]);
+                                setNewBackendModelName('');
+                            }}
+                            placeholder="API Key"
+                            className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono"
+                        />
+                        <button
+                            type="button"
+                            disabled={backendModelDiscovering || !newBackendModelUrl.trim() || !newBackendModelKey.trim()}
+                            onClick={() => void discoverNewBackendModelOptions()}
+                            className="w-full py-2.5 rounded-xl text-xs font-bold border border-violet-200 bg-violet-50 text-violet-600 disabled:opacity-40 active:scale-95 transition-all"
+                        >
+                            {backendModelDiscovering ? '正在拉取模型列表…' : '拉取全部模型'}
+                        </button>
+                        {newBackendAvailableModels.length > 0 && (
+                            <select
+                                value={newBackendModelName}
+                                onChange={event => setNewBackendModelName(event.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono"
+                            >
+                                {newBackendAvailableModels.map(model => (
+                                    <option key={model} value={model}>{model}</option>
+                                ))}
+                            </select>
+                        )}
+                        <button
+                            type="button"
+                            disabled={backendModelBusy || !newBackendModelName.trim()}
+                            onClick={async () => {
+                                setBackendModelBusy(true);
+                                try {
+                                    const candidate = saveBackendChatConfig(backendChatConfig);
+                                    await addBackendModelProfile(candidate, {
+                                        label: newBackendModelLabel.trim() || newBackendModelName.trim(),
+                                        baseUrl: newBackendModelUrl.trim(),
+                                        apiKey: newBackendModelKey.trim(),
+                                        model: newBackendModelName.trim(),
+                                        priority: (backendModelPool?.profiles.length || 0) * 10 + 100,
+                                    });
+                                    setNewBackendModelLabel('');
+                                    setNewBackendModelUrl('');
+                                    setNewBackendModelKey('');
+                                    setNewBackendModelName('');
+                                    setNewBackendAvailableModels([]);
+                                    await refreshBackendModelPool(candidate);
+                                    setBackendTestResult('✅ 后备模型已加到后端模型池');
+                                } catch (error) {
+                                    setBackendTestResult(`❌ 添加模型失败：${error instanceof Error ? error.message : '未知错误'}`);
+                                } finally {
+                                    setBackendModelBusy(false);
+                                }
+                            }}
+                            className="w-full py-2.5 rounded-xl text-xs font-bold text-white bg-slate-700 disabled:opacity-40 active:scale-95 transition-all"
+                        >
+                            添加所选模型到后端模型池
+                        </button>
+                    </div>
+                </div>
+
+                <BackendToolSettings
+                    config={backendChatConfig}
+                    characters={characters.map((character) => ({ id: character.id, name: character.name }))}
+                    onStatus={setBackendTestResult}
+                    onSaved={() => refreshBackendAgents()}
+                />
+
+                <div className="rounded-2xl border border-violet-200/70 bg-white/60 p-3 space-y-3">
+                    <div>
+                        <p className="text-xs font-bold text-slate-600">角色自主心跳</p>
+                        <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                            每个角色独立开关。关闭只表示不会自主苏醒，不影响你与该角色普通聊天。
+                        </p>
+                    </div>
+
+                    {backendAgents?.agents.map(agent => (
+                        <div key={agent.characterId} className={`rounded-xl border p-3 space-y-2 ${agent.enabled ? 'border-violet-300 bg-violet-50/60' : 'border-slate-200 bg-white/70'}`}>
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-slate-650 truncate">{agent.name}</p>
+                                    <p className="text-[9px] text-slate-400 mt-0.5">
+                                        {agent.enabled
+                                            ? `下次计划：${agent.nextWakeAt ? new Date(agent.nextWakeAt).toLocaleString() : '等待调度'}`
+                                            : '自主心跳已关闭'}
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    disabled={backendAgentBusyId === agent.characterId}
+                                    onClick={() => void saveBackendAgentAutonomy(agent, { enabled: !agent.enabled })}
+                                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${agent.enabled ? 'bg-violet-500' : 'bg-slate-200'}`}
+                                    aria-label={`${agent.name}自主心跳`}
+                                >
+                                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${agent.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                </button>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-3">
+                                <span className="text-[10px] text-slate-500">苏醒间隔</span>
+                                <select
+                                    value={agent.intervalMinutes}
+                                    disabled={backendAgentBusyId === agent.characterId}
+                                    onChange={event => void saveBackendAgentAutonomy(agent, { intervalMinutes: Number(event.target.value) })}
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600"
+                                >
+                                    {[5, 10, 15, 30, 60, 120].map(minutes => (
+                                        <option key={minutes} value={minutes}>{minutes} 分钟</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2">
+                                <label className="space-y-1">
+                                    <span className="text-[9px] text-slate-500">空闲阈值</span>
+                                    <select
+                                        value={agent.policy.idleThresholdMinutes}
+                                        disabled={backendAgentBusyId === agent.characterId}
+                                        onChange={event => void saveBackendAgentAutonomy(agent, {
+                                            policy: { ...agent.policy, idleThresholdMinutes: Number(event.target.value) },
+                                        })}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600"
+                                    >
+                                        {[10, 20, 30, 60, 120, 240].map(minutes => (
+                                            <option key={minutes} value={minutes}>{minutes} 分钟</option>
+                                        ))}
+                                    </select>
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-[9px] text-slate-500">自主活动冷却</span>
+                                    <select
+                                        value={agent.policy.cooldownMinutes}
+                                        disabled={backendAgentBusyId === agent.characterId}
+                                        onChange={event => void saveBackendAgentAutonomy(agent, {
+                                            policy: { ...agent.policy, cooldownMinutes: Number(event.target.value) },
+                                        })}
+                                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600"
+                                    >
+                                        {[30, 60, 120, 240, 720, 1440].map(minutes => (
+                                            <option key={minutes} value={minutes}>{minutes < 60 ? `${minutes} 分钟` : `${minutes / 60} 小时`}</option>
+                                        ))}
+                                    </select>
+                                </label>
+                            </div>
+
+                            <div className="space-y-1.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[9px] text-slate-500">允许活动时段</span>
+                                    <button
+                                        type="button"
+                                        disabled={backendAgentBusyId === agent.characterId}
+                                        onClick={() => void saveBackendAgentAutonomy(agent, {
+                                            policy: {
+                                                ...agent.policy,
+                                                activityWindow: {
+                                                    ...agent.policy.activityWindow,
+                                                    enabled: !agent.policy.activityWindow.enabled,
+                                                },
+                                            },
+                                        })}
+                                        className={`text-[9px] px-2 py-0.5 rounded-full ${agent.policy.activityWindow.enabled ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-400'}`}
+                                    >
+                                        {agent.policy.activityWindow.enabled ? '限制中' : '全天'}
+                                    </button>
+                                </div>
+                                {agent.policy.activityWindow.enabled && (
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="time"
+                                            value={agent.policy.activityWindow.start}
+                                            disabled={backendAgentBusyId === agent.characterId}
+                                            onChange={event => void saveBackendAgentAutonomy(agent, {
+                                                policy: {
+                                                    ...agent.policy,
+                                                    activityWindow: { ...agent.policy.activityWindow, start: event.target.value },
+                                                },
+                                            })}
+                                            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600"
+                                        />
+                                        <span className="text-[9px] text-slate-400">至</span>
+                                        <input
+                                            type="time"
+                                            value={agent.policy.activityWindow.end}
+                                            disabled={backendAgentBusyId === agent.characterId}
+                                            onChange={event => void saveBackendAgentAutonomy(agent, {
+                                                policy: {
+                                                    ...agent.policy,
+                                                    activityWindow: { ...agent.policy.activityWindow, end: event.target.value },
+                                                },
+                                            })}
+                                            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600"
+                                        />
+                                    </div>
+                                )}
+                                <p className="text-[8px] text-slate-400">按当前设备时区 {agent.timezone || 'UTC'} 判断，可跨午夜。</p>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[9px] text-slate-500">触发概率</span>
+                                <div className="flex rounded-lg bg-slate-100 p-0.5">
+                                    {(['low', 'mid', 'high'] as const).map(level => (
+                                        <button
+                                            key={level}
+                                            type="button"
+                                            disabled={backendAgentBusyId === agent.characterId}
+                                            onClick={() => void saveBackendAgentAutonomy(agent, {
+                                                policy: { ...agent.policy, probabilityLevel: level },
+                                            })}
+                                            className={`px-2 py-1 rounded-md text-[9px] font-semibold ${agent.policy.probabilityLevel === level ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-400'}`}
+                                        >
+                                            {level === 'low' ? '低 15%' : level === 'mid' ? '中 35%' : '高 65%'}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="border-t border-violet-100/80 pt-2">
+                                <p className="text-[9px] font-bold text-slate-500 mb-1.5">允许自主使用的能力（适配器接通后生效）</p>
+                                <div className="grid grid-cols-2 gap-1.5">
+                                    {backendAgents.capabilities.filter(capability => capability.id !== 'memory.reflect').map(capability => {
+                                        const checked = agent.policy.allowedCapabilityIds.includes(capability.id);
+                                        return (
+                                            <button
+                                                key={capability.id}
+                                                type="button"
+                                                disabled={backendAgentBusyId === agent.characterId}
+                                                onClick={() => {
+                                                    const allowed = checked
+                                                        ? agent.policy.allowedCapabilityIds.filter(id => id !== capability.id)
+                                                        : [...agent.policy.allowedCapabilityIds, capability.id];
+                                                    void saveBackendAgentAutonomy(agent, {
+                                                        policy: { ...agent.policy, allowedCapabilityIds: allowed },
+                                                    });
+                                                }}
+                                                className={`text-left rounded-lg border px-2 py-1.5 transition-colors ${
+                                                    checked ? 'border-violet-300 bg-white text-violet-700' : 'border-slate-200 bg-white/50 text-slate-400'
+                                                }`}
+                                                title={capability.description}
+                                            >
+                                                <span className="block text-[9px] font-semibold">
+                                                    {checked ? '✓ ' : ''}{capability.label}
+                                                    {capability.risk === 'write' ? ' · 高风险' : ''}
+                                                </span>
+                                                <span className="block text-[8px] opacity-70 mt-0.5">
+                                                    {capability.available ? '已接通' : '适配器待接入'}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+
+                    {!backendAgents && (
+                        <button
+                            type="button"
+                            onClick={() => void refreshBackendAgents(saveBackendChatConfig(backendChatConfig)).catch(error => {
+                                setBackendTestResult(`❌ 读取角色自主设置失败：${error instanceof Error ? error.message : '未知错误'}`);
+                            })}
+                            className="w-full py-2 text-xs text-violet-600 bg-violet-50 rounded-xl"
+                        >
+                            读取角色自主设置
+                        </button>
+                    )}
+                </div>
+
+                <p className="text-[10px] text-sky-700/75 leading-relaxed bg-sky-50 rounded-xl px-3 py-2">
+                    完整同步会复制角色、聊天、记忆节点、事件盒、门牌内容、关联、期盼、消化报告和向量，并在结束后逐类核对数量。它会把当前设备作为权威快照来对齐后端；不会改写本机原数据，但不要在数据不同的第二台设备上直接执行，否则可能移除后端里仅存在于另一台设备的内容。
+                </p>
+
+                <button
+                    type="button"
+                    disabled={backendSyncing || !backendChatConfig.baseUrl.trim() || !backendChatConfig.token.trim()}
+                    onClick={async () => {
+                        setBackendSyncing(true);
+                        setBackendSyncProgress('正在读取旧版数据…');
+                        try {
+                            const candidate = saveBackendChatConfig(backendChatConfig);
+                            setBackendChatConfig(candidate);
+                            const characters = await DB.getAllCharacters();
+                            const allMemoryLinks = await MemoryLinkDB.getAll();
+                            let totalMessages = 0;
+                            let totalMemories = 0;
+                            let totalEventBoxes = 0;
+                            let totalRoomPlates = 0;
+                            let totalPlateEntries = 0;
+                            let totalLinks = 0;
+                            let totalAnticipations = 0;
+                            let totalDigestReports = 0;
+                            let totalVectors = 0;
+                            let totalBatches = 0;
+                            let totalTopicBoxes = 0;
+                            const mismatches: string[] = [];
+                            for (let index = 0; index < characters.length; index += 1) {
+                                const character = characters[index];
+                                const snapshotStartedAt = Date.now();
+                                setBackendSyncProgress(`正在同步 ${index + 1}/${characters.length}：${character.name}`);
+                                const [
+                                    messages,
+                                    memories,
+                                    vectors,
+                                    eventBoxes,
+                                    roomPlates,
+                                    digestReports,
+                                    anticipations,
+                                    batches,
+                                    topicBoxes,
+                                ] = await Promise.all([
+                                    DB.getMessagesByCharId(character.id, true),
+                                    MemoryNodeDB.getByCharId(character.id),
+                                    MemoryVectorDB.getAllByCharId(character.id),
+                                    EventBoxDB.getByCharId(character.id),
+                                    RoomPlateDB.getByCharId(character.id),
+                                    DigestReportDB.getByCharId(character.id),
+                                    AnticipationDB.getByCharId(character.id),
+                                    MemoryBatchDB.getByCharId(character.id),
+                                    TopicBoxDB.getByCharId(character.id),
+                                ]);
+                                const memoryNodeIds = new Set(memories.map(memory => memory.id));
+                                const snapshotId = typeof crypto?.randomUUID === 'function'
+                                    ? crypto.randomUUID()
+                                    : `snapshot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                                const links = allMemoryLinks.filter(link => (
+                                    memoryNodeIds.has(link.sourceId) && memoryNodeIds.has(link.targetId)
+                                ));
+                                const baseResult = await syncBackendCharacterFully({
+                                    config: candidate,
+                                    character,
+                                    user: userProfile,
+                                    messages,
+                                    memories,
+                                    snapshotId,
+                                    onProgress: (done, total) => setBackendSyncProgress(
+                                        `正在同步 ${index + 1}/${characters.length}：${character.name}（聊天与节点 ${done}/${total}）`,
+                                    ),
+                                });
+                                const palaceResult = await syncBackendMemoryPalaceFully({
+                                    config: candidate,
+                                    characterId: character.id,
+                                    eventBoxes,
+                                    roomPlates,
+                                    links,
+                                    anticipations,
+                                    digestReports,
+                                    vectors,
+                                    batches,
+                                    topicBoxes,
+                                    snapshotId,
+                                    onProgress: (done, total) => setBackendSyncProgress(
+                                        `正在同步 ${index + 1}/${characters.length}：${character.name}（完整记忆宫殿 ${done}/${total}）`,
+                                    ),
+                                });
+                                await acknowledgeBackendMemoryChangesThrough(character.id, snapshotStartedAt);
+                                const expectedCounts: Record<string, number> = {
+                                    nodes: memories.length,
+                                    event_boxes: eventBoxes.length,
+                                    room_plates: roomPlates.length,
+                                    links: links.length,
+                                    anticipations: anticipations.length,
+                                    digest_reports: digestReports.length,
+                                    vectors: vectors.length,
+                                    batches: batches.length,
+                                    topic_boxes: topicBoxes.length,
+                                };
+                                for (const [field, expected] of Object.entries(expectedCounts)) {
+                                    if (palaceResult.backendCounts[field] !== expected) {
+                                        mismatches.push(`${character.name}.${field}：前端 ${expected} / 后端 ${palaceResult.backendCounts[field] ?? '未知'}`);
+                                    }
+                                }
+                                totalMessages += baseResult.messages;
+                                totalMemories += baseResult.memories;
+                                totalEventBoxes += palaceResult.eventBoxes;
+                                totalRoomPlates += palaceResult.roomPlates;
+                                totalPlateEntries += roomPlates.reduce((sum, plate) => sum + plate.entries.length, 0);
+                                totalLinks += palaceResult.links;
+                                totalAnticipations += palaceResult.anticipations;
+                                totalDigestReports += palaceResult.digestReports;
+                                totalVectors += palaceResult.vectors;
+                                totalBatches += palaceResult.batches;
+                                totalTopicBoxes += palaceResult.topicBoxes;
+                            }
+                            setBackendSyncProgress(
+                                mismatches.length === 0
+                                    ? `✅ 完整同步并核对通过：${characters.length} 个角色、${totalMessages} 条聊天、${totalMemories} 条记忆节点、${totalEventBoxes} 个事件盒、${totalRoomPlates} 块门牌（${totalPlateEntries} 条门牌内容）、${totalLinks} 条关联、${totalAnticipations} 条期盼、${totalDigestReports} 份消化报告、${totalVectors} 条向量；另保留 ${totalBatches} 条处理批次和 ${totalTopicBoxes} 个旧话题盒。同一设备可重复执行，不会生成副本。`
+                                    : `⚠️ 同步已完成，但数量核对不一致：${mismatches.slice(0, 3).join('；')}`,
+                            );
+                            await refreshBackendAgents(candidate);
+                        } catch (error) {
+                            setBackendSyncProgress(`❌ 全量同步失败：${error instanceof Error ? error.message : '未知错误'}`);
+                        } finally {
+                            setBackendSyncing(false);
+                        }
+                    }}
+                    className="w-full py-2.5 rounded-2xl font-bold text-sm border border-sky-200 text-sky-700 bg-sky-50 disabled:opacity-40 active:scale-95 transition-all"
+                >
+                    {backendSyncing ? '正在完整同步旧数据…' : '完整同步角色、聊天与记忆宫殿'}
+                </button>
+
+                {backendSyncProgress && (
+                    <div className={`text-xs px-3 py-2 rounded-xl leading-relaxed ${
+                        backendSyncProgress.startsWith('✅')
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : backendSyncProgress.startsWith('⚠️')
+                                ? 'bg-amber-50 text-amber-700'
+                            : backendSyncProgress.startsWith('❌')
+                                ? 'bg-red-50 text-red-600'
+                                : 'bg-sky-50 text-sky-700'
+                    }`}>
+                        {backendSyncProgress}
+                    </div>
+                )}
+
+                {backendTestResult && (
+                    <div className={`text-xs px-3 py-2 rounded-xl ${
+                        backendTestResult.startsWith('✅')
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : backendTestResult.startsWith('⚠️')
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-red-50 text-red-600'
+                    }`}>
+                        {backendTestResult}
+                    </div>
+                )}
+            </div>
+        </SettingsSection>
+
         {/* API 调用记录入口 — 点开看最近 5 天各 App / 角色 / 用途的调用明细 */}
         <button
             type="button"
@@ -2050,9 +3086,6 @@ const Settings: React.FC = () => {
         </SettingsSection>
 
         {/* ───────── 推送凭据 (VAPID) ───────── */}
-        {/* VAPID 公私钥, 与 Proactive / Instant Push 共用一份 — 独立成块, 避免再被当成 */}
-        {/* Instant Push 的子配置, 也避免两边 key 不一致互相抢同一个 pushManager 订阅. */}
-        {/* vapidReadyTick: VAPID 弹窗关闭后 +1, 让本节点 re-render 重读 isPushVapidReady(). */}
         <SettingsSection
             title="推送凭据 (VAPID)"
             sectionProps={{ 'data-vapid-tick': vapidReadyTick }}
@@ -2070,7 +3103,7 @@ const Settings: React.FC = () => {
             }
         >
             <p className="text-xs text-slate-500 mb-3 leading-relaxed">
-                Proactive Push 和 Instant Push <b>共用同一份 VAPID 密钥对</b>。重新生成会让已开的推送失效，需要重新开启。
+                当前仍供旧 Instant Push 的锁屏续答使用。等 VPS 锁屏续答完成并实测后，这一组旧入口会一起移除。
             </p>
             <button
                 type="button"
@@ -2257,7 +3290,7 @@ const Settings: React.FC = () => {
         </SettingsSection>
         )}
 
-        {/* ───────── Instant Push ───────── */}
+        {/* ───────── Instant Push（旧锁屏续答，暂时保留） ───────── */}
         <SettingsSection
             title="Instant Push"
             icon={
@@ -2277,7 +3310,7 @@ const Settings: React.FC = () => {
             }
         >
             <p className="text-xs text-slate-500 leading-relaxed">
-                与上方 Push 加速器不同：前端发 prompt 到你自部署的 Worker，Worker 调你自己的 LLM 生成回复后分句逐条 Web Push。零数据库、零 cron。
+                暂时负责普通聊天发送后锁屏仍继续生成回复。VPS 版本完成并验证前不移除，避免丢掉这项能力。
             </p>
         </SettingsSection>
 
@@ -2963,9 +3996,27 @@ const Settings: React.FC = () => {
                           <p className="text-[10px] text-slate-400 leading-relaxed bg-slate-100/60 rounded-lg px-2 py-1.5">
                               🔒 隐私：cookie 经 HTTPS 加密发到云端 Worker 仅用于请求签名，服务器<b>不保存、不记录</b>，运营方看不到。正常使用是安全的；但凡经第三方云服务都存在理论风险，介意可自行评估。
                           </p>
+                          <p className="text-[10px] text-cyan-700 leading-relaxed bg-cyan-50 border border-cyan-100 rounded-lg px-2 py-1.5">
+                              已连接 VPS 时，点「保存配置」还会把同一份 Cookie 加密保存到你自己的 VPS，供角色在网页关闭后自主浏览；不会发送给模型站或写进聊天、记忆与备份。
+                          </p>
                       </div>
                   )}
               </div>
+
+              {rtXhsMcpEnabled && (
+                  <div className="bg-rose-50/60 p-4 rounded-2xl space-y-2 border border-rose-100">
+                      <div className="text-xs font-bold text-rose-700">角色在小红书里可以自主做什么</div>
+                      <label className="flex items-center gap-2 text-[11px] text-slate-600">
+                          <input type="checkbox" checked={rtXhsAllowShare} onChange={e => setRtXhsAllowShare(e.target.checked)} />
+                          把感兴趣的笔记以小红书卡片分享给我
+                      </label>
+                      <label className="flex items-center gap-2 text-[11px] text-slate-600">
+                          <input type="checkbox" checked={rtXhsAllowLike} onChange={e => setRtXhsAllowLike(e.target.checked)} />
+                          真心喜欢时可以点赞（已赞不会取消）
+                      </label>
+                      <p className="text-[9px] text-slate-400">浏览包含首页、搜索和自己的主页；权限跟着小红书保存，不再另设“对外写入”模块。</p>
+                  </div>
+              )}
 
               {/* 麦当劳 MCP */}
               <div className="bg-yellow-50/60 p-4 rounded-2xl space-y-3">
@@ -3059,7 +4110,7 @@ const Settings: React.FC = () => {
       {/* MCP 工具服务器配置 Modal（高级玩法, 从实时感知里独立出来） */}
       <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => setShowMcpModal(false)}>
           <div className="space-y-4">
-              <McpServersCard addToast={addToast} />
+              <McpServersCard addToast={addToast} backendConfig={backendChatConfig} onBackendSaved={refreshBackendAgents} />
           </div>
       </Modal>
 

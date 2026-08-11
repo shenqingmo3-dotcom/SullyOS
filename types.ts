@@ -13,6 +13,7 @@ export enum AppID {
   Date = 'date',
   User = 'user',
   Journal = 'journal',
+  Together = 'together',
   Schedule = 'schedule',
   Room = 'room',
   CheckPhone = 'check_phone',
@@ -38,6 +39,15 @@ export enum AppID {
   VRWorld = 'vrworld', // 彼方 — 角色自主登入的虚拟世界（定时驱动，房间里看小说/听歌/留言，产出活动卡注入聊天+记忆）
   CharCreatorDev = 'char_creator_dev', // 捏脸系统开发模式 — 仅开发模式可见，向捏人器指定类目追加自定义部件
   WorldHome = 'world_home', // 家园 — 同世界观多角色共同生活的大世界（观测驱动演绎，每角色独立 LLM 调用 + NPC 世界引擎）
+}
+
+export type InteractionMode = 'online' | 'offline';
+
+export interface InteractionScene {
+  location?: string;
+  distance?: string;
+  changedAt: number;
+  changedBy: 'user' | 'assistant';
 }
 
 export interface SystemLog {
@@ -554,6 +564,60 @@ export interface DailySchedule {
      * 注入时根据当前时间找到最近的 key，直接使用整段文本，不做拼接。
      */
     flowNarrative?: Record<string, string>;
+}
+
+export interface UserScheduleEntry {
+    id: string;
+    title: string;
+    daysOfWeek: number[];
+    startTime: string;
+    endTime: string;
+    location?: string;
+    note?: string;
+}
+
+export type TogetherMediaType = 'novel' | 'movie';
+
+export interface TogetherLibraryItem {
+    id: string;
+    type: TogetherMediaType;
+    title: string;
+    text?: string;
+    mediaUrl?: string;
+    fileName?: string;
+    createdAt: number;
+    updatedAt: number;
+    lastPosition?: number;
+}
+
+export interface TogetherSessionMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    createdAt: number;
+    progress?: number;
+}
+
+export interface TogetherSession {
+    id: string;
+    itemId: string;
+    itemTitle: string;
+    mediaType: TogetherMediaType;
+    charId: string;
+    startedAt: number;
+    endedAt?: number;
+    progress: number;
+    interactionMode: InteractionMode;
+    messages: TogetherSessionMessage[];
+    summary?: string;
+    cinema?: {
+        roomId: string;
+        mediaId?: string;
+        consumerName?: string;
+        cursors?: { mediaMs?: number; messageId?: number; observationSequence?: number };
+        lastMediaTimeMs?: number;
+        seenMessageIds?: string[];
+    };
 }
 
 export interface RoomGeneratedState {
@@ -2091,6 +2155,11 @@ export interface CharacterProfile {
 
   mountedWorldbooks?: MountedWorldbook[];
 
+  /** 当前与用户是在手机聊天，还是已经处于同一现实场景。默认 online。 */
+  interactionMode?: InteractionMode;
+  /** 线下模式持续追踪的位置与距离；切回线上时保留，方便下次见面沿用。 */
+  interactionScene?: InteractionScene;
+
   impression?: UserImpression;
 
   bubbleStyle?: string;
@@ -2432,10 +2501,30 @@ export interface CharacterExportData extends Omit<CharacterProfile, 'id' | 'memo
     embeddedTheme?: ChatTheme;
 }
 
+export interface NpcCharacterRelation {
+    charId: string;
+    relation: string;
+    affinity: number;
+}
+
+export interface NpcNetworkEntry {
+    id: string;
+    name: string;
+    avatar?: string;
+    persona: string;
+    userRelation: string;
+    userAffinity: number;
+    characterRelations: NpcCharacterRelation[];
+    createdAt: number;
+    updatedAt: number;
+}
+
 export interface UserProfile {
     name: string;
     avatar: string;
     bio: string;
+    weeklySchedule?: UserScheduleEntry[];
+    npcNetwork?: NpcNetworkEntry[];
     /** 分角色聊天头像（档案 App 设置）：charId → 头像（http(s) URL 或 data:image）。
      *  私聊里「你」的头像取 perCharAvatars[charId] || avatar（上面的整体头像作宏观默认）；
      *  群聊/其他场合仍用整体头像。删角色留下的孤儿键无害，读取端永远按当前 charId 取。 */
@@ -2507,6 +2596,15 @@ export interface DiaryPage {
     stickers: StickerData[];
 }
 
+export interface DiaryComment {
+    id: string;
+    author: 'user' | 'character';
+    content: string;
+    createdAt: number;
+    replyToId?: string;
+    backendCommentId?: string;
+}
+
 export interface DiaryEntry {
     id: string;
     charId: string;
@@ -2520,6 +2618,12 @@ export interface DiaryEntry {
     /** 标记这条日记是"自动同步聊天"时代产生的 (本次更新后新建的). 老日记 (字段未设)
      *  才会在列表里看到手动归档按钮. 防止用户对已经在自动同步上的新日记再点归档造成重复. */
     autoSync?: boolean;
+    /** 新版共同日记的主作者；未设置表示旧版双页交换日记。 */
+    primaryAuthor?: 'user' | 'character' | 'shared';
+    title?: string;
+    comments?: DiaryComment[];
+    backendDiaryId?: string;
+    origin?: 'user' | 'exchange' | 'heartbeat' | 'imported';
 }
 
 // ─── HANDBOOK / 手账 (跨角色聚合·零负担留痕本) ───
@@ -3043,6 +3147,38 @@ export interface Message {
     };
 }
 
+export type BackendConversationEventType =
+    | 'user_message'
+    | 'assistant_message'
+    | 'proactive_message'
+    | 'diary_entry'
+    | 'diary_comment'
+    | 'autonomous_activity'
+    | 'mcp_activity'
+    | 'activity_summary'
+    | 'tool_activity'
+    | 'platform_share'
+    | 'memory_update'
+    | 'scheduled_wake'
+    | 'system_event';
+
+// 后端事件的本地镜像。它与聊天消息分开保存，保证日记、活动、MCP 记录等
+// 以后可以显示成独立卡片，而不是被不可逆地压成普通气泡。
+export interface BackendConversationEventRecord {
+    id: string;
+    sequenceId: number;
+    conversationId: string;
+    charId: string;
+    charName?: string;
+    actorType: 'user' | 'assistant' | 'system' | 'tool';
+    eventType: BackendConversationEventType;
+    content: string | null;
+    metadata: Record<string, unknown>;
+    occurredAt: string;
+    createdAt: string;
+    receivedAt: number;
+}
+
 export interface EmojiCategory {
     id: string;
     name: string;
@@ -3092,6 +3228,8 @@ export interface FullBackupData {
     roomCustomAssets?: { id?: string; name: string; image: string; defaultScale: number; description?: string; visibility?: 'public' | 'character'; assignedCharIds?: string[] }[]; 
     
     novels?: NovelBook[];
+    togetherItems?: TogetherLibraryItem[];
+    togetherSessions?: TogetherSession[];
     vrNovels?: VRWorldNovel[];          // 虚拟世界「彼方」全局小说库
     vrAnnotations?: VRNovelAnnotation[]; // 虚拟世界小说批注
     customCreatorParts?: CustomCreatorPart[]; // 捏脸系统自定义部件
@@ -3344,6 +3482,10 @@ export interface XhsMcpConfig {
     loggedInUserId?: string;   // 登录用户的 user_id，连接测试成功后自动获取
     loggedInNickname?: string; // 登录用户的昵称
     userXsecToken?: string;    // 连接测试时从首页推荐自动提取的 xsec_token
+    autonomyPermissions?: {
+        shareToChat: boolean;
+        like: boolean;
+    };
 }
 
 // ============================================================
