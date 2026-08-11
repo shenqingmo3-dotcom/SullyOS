@@ -506,8 +506,24 @@ export async function testExternalToolConnection(connection: ToolConnection): Pr
     if (required.length > 0) throw new Error(`手机查看还缺少：${required.join(', ')}`);
     return '邮件触发与设备令牌配置完整（未发送测试邮件）';
   }
-  if (!connection.endpoint) throw new Error('尚未填写服务地址。');
   const mode = String(connection.settings.mode ?? 'mcp');
+  if (connection.id === 'mcp.read' && mode === 'mcp-pool') {
+    const servers = mcpPoolServers(connection);
+    if (servers.length === 0) throw new Error('还没有同步已启用且完成工具发现的 MCP 服务器。');
+    let toolCount = 0;
+    for (const item of servers) {
+      const initialized = await mcpRpc(item.connection, 'initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'sullyos-healthcheck', version: '1.0.0' },
+      }, 1);
+      const listed = await mcpRpc(item.connection, 'tools/list', {}, 2, initialized.sessionId);
+      toolCount += Array.isArray(listed.body?.result?.tools) ? listed.body.result.tools.length : 0;
+    }
+    if (toolCount === 0) throw new Error('MCP 服务已连接，但没有提供任何工具。');
+    return `已连接 ${servers.length} 个 MCP 服务器，发现 ${toolCount} 个工具`;
+  }
+  if (!connection.endpoint) throw new Error('尚未填写服务地址。');
   if (connection.id === 'x.read') {
     const status = await getXSessionStatus(connection);
     if (!status.loggedIn) throw new Error('X 登录已失效，请补 Cookie 或打开远程桌面登录。');

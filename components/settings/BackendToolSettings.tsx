@@ -10,6 +10,7 @@ import {
   type BackendToolConnectionId,
 } from '../../utils/backendClient';
 import PhoneShortcutSetup from './PhoneShortcutSetup';
+import { loadMcpServers } from '../../utils/mcpClient';
 
 const TOOL_META: Record<BackendToolConnectionId, { name: string; hint: string; defaultMode: string }> = {
   'x.read': { name: '黑 X', hint: '持久登录 Chrome；浏览、分享与平台内动作统一配置', defaultMode: 'mcp' },
@@ -18,9 +19,9 @@ const TOOL_META: Record<BackendToolConnectionId, { name: string; hint: string; d
   'phone.read': { name: 'iPhone 屏幕查看', hint: '邮件触发快捷指令；每次请求十分钟内有效', defaultMode: 'phone' },
 };
 
-const BACKEND_ONLY_TOOL_IDS: BackendToolConnectionId[] = ['x.read', 'phone.read'];
+const TOOL_IDS: BackendToolConnectionId[] = ['x.read', 'xhs.read', 'mcp.read', 'phone.read'];
 
-const EMPTY_CONNECTIONS = BACKEND_ONLY_TOOL_IDS.map((id): BackendToolConnection => ({
+const EMPTY_CONNECTIONS = TOOL_IDS.map((id): BackendToolConnection => ({
   id, label: TOOL_META[id].name, enabled: false, endpoint: '', settings: { mode: TOOL_META[id].defaultMode },
   secretKeys: [], lastHealthStatus: 'unknown', lastHealthError: null, lastHealthAt: null,
 }));
@@ -101,7 +102,14 @@ const BackendToolSettings: React.FC<{
       patchConnection('xhs.read', {
         enabled: true,
         endpoint: String(local.serverUrl),
-        settings: { ...(byId.get('xhs.read')?.settings || {}), mode: 'xhs-lite' },
+        settings: {
+          ...(byId.get('xhs.read')?.settings || {}),
+          mode: 'xhs-lite',
+          userId: String(local.loggedInUserId || ''),
+          userXsecToken: String(local.userXsecToken || ''),
+          allowShareToChat: local.autonomyPermissions?.shareToChat !== false,
+          allowLike: local.autonomyPermissions?.like !== false,
+        },
       });
       setSecrets((current) => ({ ...current, 'xhs.read:cookie': String(local.cookie) }));
       setExpanded('xhs.read');
@@ -109,6 +117,35 @@ const BackendToolSettings: React.FC<{
     } catch (error) {
       onStatus(`❌ ${error instanceof Error ? error.message : '无法读取前端小红书配置'}`);
     }
+  };
+
+  const importLocalMcp = () => {
+    const servers = loadMcpServers().filter((server) => server.enabled && server.url && server.tools?.length);
+    if (!servers.length) {
+      onStatus('❌ 前端没有已启用且完成工具发现的 MCP 服务器');
+      return;
+    }
+    patchConnection('mcp.read', {
+      enabled: true,
+      endpoint: '',
+      settings: {
+        ...(byId.get('mcp.read')?.settings || {}),
+        mode: 'mcp-pool',
+        servers: servers.map(({ id, name, url, tools }) => ({ id, name, url, tools })),
+      },
+    });
+    setSecrets((current) => ({
+      ...current,
+      ...Object.fromEntries(servers.map((server) => [
+        `mcp.read:server:${server.id}`,
+        JSON.stringify({
+          ...(server.token ? { token: server.token } : {}),
+          ...(server.customHeaders?.length ? { customHeaders: server.customHeaders } : {}),
+        }),
+      ])),
+    }));
+    setExpanded('mcp.read');
+    onStatus(`✅ 已读取前端 ${servers.length} 个 MCP 服务器；点击“保存”后才会加密同步到 VPS`);
   };
 
   const save = async (id: BackendToolConnectionId) => {
@@ -121,6 +158,13 @@ const BackendToolSettings: React.FC<{
         if (secrets.smtpPassword) secretPayload.smtpPassword = secrets.smtpPassword;
       } else if (id === 'xhs.read' && connection.settings.mode === 'xhs-lite') {
         if (secrets['xhs.read:cookie']) secretPayload.cookie = secrets['xhs.read:cookie'];
+      } else if (id === 'mcp.read' && connection.settings.mode === 'mcp-pool') {
+        const servers = Array.isArray(connection.settings.servers) ? connection.settings.servers : [];
+        for (const server of servers) {
+          const serverId = server && typeof server === 'object' ? String((server as { id?: unknown }).id || '') : '';
+          const value = secrets[`mcp.read:server:${serverId}`];
+          if (serverId && value) secretPayload[`server:${serverId}`] = value;
+        }
       } else if (secrets[`${id}:token`]) secretPayload.bearerToken = secrets[`${id}:token`];
       const result = await updateBackendTool(config, id, {
         label: connection.label || TOOL_META[id].name,
@@ -162,8 +206,9 @@ const BackendToolSettings: React.FC<{
     <div className="rounded-2xl border border-cyan-200/70 bg-white/60 p-3 space-y-3">
       <div>
         <p className="text-xs font-bold text-slate-600">自主工具连接</p>
-        <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">这里只保留本体没有的入口。小红书在「实时感知」原页面配置，通用 MCP 在「MCP 工具服务器」原页面配置；保存时会同步给 VPS 自主活动。</p>
+        <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">黑 X、手机截图可直接配置；小红书与通用 MCP 可从前端原设置导入，再加密同步给 VPS 自主活动。</p>
       </div>
+      {!canConnect && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] leading-relaxed text-amber-700">四项能力都还在。请先在上方完成后端配对；配对后即可保存、测试并交给角色 heartbeat 使用。</p>}
       {connections.map((connection) => {
         const meta = TOOL_META[connection.id];
         const isPhone = connection.id === 'phone.read';
@@ -213,16 +258,20 @@ const BackendToolSettings: React.FC<{
                   className="w-full rounded-lg border border-rose-200 bg-rose-50 py-2 text-[10px] font-bold text-rose-600">
                   导入前端已保存的小红书 Lite 配置
                 </button>}
+                {connection.id === 'mcp.read' && <button type="button" onClick={importLocalMcp}
+                  className="w-full rounded-lg border border-cyan-200 bg-cyan-50 py-2 text-[10px] font-bold text-cyan-700">
+                  导入前端已启用的 MCP 服务器
+                </button>}
                 {connection.id === 'xhs.read' && <select value={String(connection.settings.mode || 'mcp')}
                   onChange={(event) => patchSetting(connection.id, 'mode', event.target.value)}
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px]">
                   <option value="xhs-lite">Cookie Lite（免电脑）</option>
                   <option value="mcp">独立 MCP 服务</option>
                 </select>}
-                {!isPhone && <input value={connection.endpoint} onChange={(event) => patchConnection(connection.id, { endpoint: event.target.value })}
+                {!isPhone && !(connection.id === 'mcp.read' && connection.settings.mode === 'mcp-pool') && <input value={connection.endpoint} onChange={(event) => patchConnection(connection.id, { endpoint: event.target.value })}
                   placeholder={connection.id === 'x.read' ? 'http://host.docker.internal:43710/mcp' : 'https://example.com/mcp'}
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px]" />}
-                {!isPhone && !(connection.id === 'xhs.read' && connection.settings.mode === 'xhs-lite') && <input type="password" value={secrets[`${connection.id}:token`] || ''}
+                {!isPhone && !(connection.id === 'xhs.read' && connection.settings.mode === 'xhs-lite') && !(connection.id === 'mcp.read' && connection.settings.mode === 'mcp-pool') && <input type="password" value={secrets[`${connection.id}:token`] || ''}
                   onChange={(event) => setSecrets((current) => ({ ...current, [`${connection.id}:token`]: event.target.value }))}
                   placeholder={connection.secretKeys.includes('bearerToken') ? '访问令牌（已保存，留空不改）' : '访问令牌（没有可留空）'}
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px]" />}

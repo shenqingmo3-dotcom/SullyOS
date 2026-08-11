@@ -29,6 +29,7 @@ export const MIRRORED_KEYS: readonly string[] = [
     'os_api_config',                     // 全局 API（丢了 = 一切生成静默失效）
     'os_api_presets',
     'os_realtime_config',
+    'sullyos_backend_chat_v1',           // SharkOS 自主后端地址与手机配对凭据
     'os_memory_palace_config',
     'os_remote_vector_config',
     'os_cloud_backup_config',            // 丢了连"从云端恢复"都要重新配

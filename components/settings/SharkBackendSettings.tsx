@@ -215,19 +215,26 @@ const SharkBackendSettings: React.FC = () => {
         }
     };
 
-    const toggleAgent = async (agent: BackendAgentAutonomy) => {
+    const saveAgentAutonomy = async (
+        agent: BackendAgentAutonomy,
+        patch: {
+            enabled?: boolean;
+            intervalMinutes?: number;
+            policy?: BackendAgentAutonomy['policy'];
+        },
+    ) => {
         setAgentBusyId(agent.characterId);
         try {
             const updated = await updateBackendAgentAutonomy(persistConfig(), agent.characterId, {
-                enabled: !agent.enabled,
-                intervalMinutes: agent.intervalMinutes,
-                policy: agent.policy,
+                enabled: patch.enabled ?? agent.enabled,
+                intervalMinutes: patch.intervalMinutes ?? agent.intervalMinutes,
+                policy: patch.policy ?? agent.policy,
             });
             setAgents(current => current ? {
                 ...current,
                 agents: current.agents.map(item => item.characterId === updated.characterId ? updated : item),
             } : current);
-            addToast(`${updated.name} heartbeat 已${updated.enabled ? '开启' : '关闭'}`, 'success');
+            addToast(`${updated.name} 的 heartbeat 设置已更新`, 'success');
         } catch (error) {
             setStatus(`❌ heartbeat 更新失败：${error instanceof Error ? error.message : '未知错误'}`);
         } finally {
@@ -302,15 +309,126 @@ const SharkBackendSettings: React.FC = () => {
                 <button disabled={busy !== null || !config.token.trim()} onClick={() => void syncAll()} className="w-full rounded-2xl bg-sky-600 py-3 text-sm font-bold text-white disabled:opacity-50">{busy === 'sync' ? '正在完整同步…' : '完整同步角色、聊天与记忆宫殿'}</button>
                 {status && <div className={`rounded-xl border px-3 py-2 text-xs leading-relaxed ${panelStatusClass(status)}`}>{status}</div>}
 
-                {agents?.agents?.length ? <div className="space-y-2 rounded-2xl bg-violet-50/60 p-3">
+                {agents?.agents?.length ? <div className="space-y-3 rounded-2xl border border-violet-100 bg-violet-50/60 p-3">
+                    <div>
+                        <div className="text-xs font-bold text-violet-700">角色 heartbeat</div>
+                        <p className="mt-1 text-[9px] leading-relaxed text-slate-400">每个角色独立开关与调度；关闭只停止自主苏醒，不影响普通聊天。</p>
+                    </div>
+                    {agents.agents.map(agent => <div key={agent.characterId} className={`space-y-3 rounded-xl border p-3 ${agent.enabled ? 'border-violet-200 bg-white/90' : 'border-slate-200 bg-white/70'}`}>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                                <div className="truncate text-xs font-bold text-slate-700">{agent.name}</div>
+                                <div className="mt-0.5 text-[9px] text-slate-400">{agent.enabled ? `下次计划：${agent.nextWakeAt ? new Date(agent.nextWakeAt).toLocaleString() : '等待调度'}` : '自主 heartbeat 已关闭'}</div>
+                            </div>
+                            <button
+                                type="button"
+                                aria-label={`${agent.name} 自主 heartbeat`}
+                                disabled={agentBusyId === agent.characterId}
+                                onClick={() => void saveAgentAutonomy(agent, { enabled: !agent.enabled })}
+                                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${agent.enabled ? 'bg-violet-500' : 'bg-slate-200'}`}
+                            >
+                                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${agent.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2">
+                            <label className="space-y-1">
+                                <span className="text-[9px] text-slate-500">苏醒间隔</span>
+                                <select value={agent.intervalMinutes} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { intervalMinutes: Number(event.target.value) })}
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-600">
+                                    {[5, 10, 15, 30, 60, 120].map(minutes => <option key={minutes} value={minutes}>{minutes} 分钟</option>)}
+                                </select>
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[9px] text-slate-500">空闲阈值</span>
+                                <select value={agent.policy.idleThresholdMinutes} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { policy: { ...agent.policy, idleThresholdMinutes: Number(event.target.value) } })}
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-600">
+                                    {[0, 10, 20, 30, 60, 120, 240].map(minutes => <option key={minutes} value={minutes}>{minutes === 0 ? '不限制' : `${minutes} 分钟`}</option>)}
+                                </select>
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[9px] text-slate-500">自主活动冷却</span>
+                                <select value={agent.policy.cooldownMinutes} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { policy: { ...agent.policy, cooldownMinutes: Number(event.target.value) } })}
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-600">
+                                    {[0, 30, 60, 120, 240, 720, 1440].map(minutes => <option key={minutes} value={minutes}>{minutes === 0 ? '不限制' : minutes < 60 ? `${minutes} 分钟` : `${minutes / 60} 小时`}</option>)}
+                                </select>
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[9px] text-slate-500">每日工具预算</span>
+                                <select value={agent.policy.dailyToolBudget} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { policy: { ...agent.policy, dailyToolBudget: Number(event.target.value) } })}
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-600">
+                                    {[0, 5, 10, 20, 40, 80].map(count => <option key={count} value={count}>{count === 0 ? '禁用外部工具' : `${count} 次`}</option>)}
+                                </select>
+                            </label>
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[9px] text-slate-500">允许活动时段</span>
+                                <button type="button" disabled={agentBusyId === agent.characterId}
+                                    onClick={() => void saveAgentAutonomy(agent, { policy: { ...agent.policy, activityWindow: { ...agent.policy.activityWindow, enabled: !agent.policy.activityWindow.enabled } } })}
+                                    className={`rounded-full px-2 py-0.5 text-[9px] ${agent.policy.activityWindow.enabled ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-400'}`}>
+                                    {agent.policy.activityWindow.enabled ? '限制中' : '全天'}
+                                </button>
+                            </div>
+                            {agent.policy.activityWindow.enabled && <div className="flex items-center gap-2">
+                                <input type="time" value={agent.policy.activityWindow.start} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { policy: { ...agent.policy, activityWindow: { ...agent.policy.activityWindow, start: event.target.value } } })}
+                                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600" />
+                                <span className="text-[9px] text-slate-400">至</span>
+                                <input type="time" value={agent.policy.activityWindow.end} disabled={agentBusyId === agent.characterId}
+                                    onChange={event => void saveAgentAutonomy(agent, { policy: { ...agent.policy, activityWindow: { ...agent.policy.activityWindow, end: event.target.value } } })}
+                                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600" />
+                            </div>}
+                            <p className="text-[8px] text-slate-400">按设备时区 {agent.timezone || 'UTC'} 判断，可跨午夜。</p>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-[9px] text-slate-500">触发概率</span>
+                            <div className="flex rounded-lg bg-slate-100 p-0.5">
+                                {(['low', 'mid', 'high'] as const).map(level => <button key={level} type="button"
+                                    disabled={agentBusyId === agent.characterId}
+                                    onClick={() => void saveAgentAutonomy(agent, { policy: { ...agent.policy, probabilityLevel: level } })}
+                                    className={`rounded-md px-2 py-1 text-[9px] font-semibold ${agent.policy.probabilityLevel === level ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-400'}`}>
+                                    {level === 'low' ? '低' : level === 'mid' ? '中' : '高'}
+                                </button>)}
+                            </div>
+                        </div>
+
+                        <div className="border-t border-violet-100/80 pt-2">
+                            <p className="mb-1.5 text-[9px] font-bold text-slate-500">允许自主使用的能力</p>
+                            <div className="grid grid-cols-2 gap-1.5">
+                                {agents.capabilities.filter(capability => capability.id !== 'memory.reflect').map(capability => {
+                                    const checked = agent.policy.allowedCapabilityIds.includes(capability.id);
+                                    return <button key={capability.id} type="button" title={capability.description}
+                                        disabled={agentBusyId === agent.characterId}
+                                        onClick={() => {
+                                            const allowedCapabilityIds = checked
+                                                ? agent.policy.allowedCapabilityIds.filter(id => id !== capability.id)
+                                                : [...agent.policy.allowedCapabilityIds, capability.id];
+                                            void saveAgentAutonomy(agent, { policy: { ...agent.policy, allowedCapabilityIds } });
+                                        }}
+                                        className={`rounded-lg border px-2 py-1.5 text-left transition-colors ${checked ? 'border-violet-300 bg-white text-violet-700' : 'border-slate-200 bg-white/50 text-slate-400'}`}>
+                                        <span className="block text-[9px] font-semibold">{checked ? '✓ ' : ''}{capability.label}</span>
+                                        <span className="mt-0.5 block text-[8px] opacity-70">{capability.available ? '已接通' : '连接后生效'}</span>
+                                    </button>;
+                                })}
+                            </div>
+                        </div>
+                    </div>)}
+                </div> : !config.token.trim() ? <div className="space-y-2 rounded-2xl bg-violet-50/60 p-3">
                     <div className="text-xs font-bold text-violet-700">角色 heartbeat</div>
-                    {agents.agents.map(agent => <div key={agent.characterId} className="flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2">
-                        <div className="min-w-0 flex-1"><div className="truncate text-xs font-bold text-slate-700">{agent.name}</div><div className="text-[9px] text-slate-400">每 {agent.intervalMinutes} 分钟检查 · {agent.nextWakeAt ? new Date(agent.nextWakeAt).toLocaleString() : '等待调度'}</div></div>
-                        <button disabled={agentBusyId === agent.characterId} onClick={() => void toggleAgent(agent)} className={`rounded-full px-3 py-1.5 text-[10px] font-bold ${agent.enabled ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{agent.enabled ? '已开启' : '已关闭'}</button>
+                    {characters.map(character => <div key={character.id} className="flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2">
+                        <div className="min-w-0 flex-1"><div className="truncate text-xs font-bold text-slate-700">{character.name}</div><div className="text-[9px] text-slate-400">完成后端配对后加载开关与唤醒时间</div></div>
+                        <button disabled className="rounded-full bg-slate-100 px-3 py-1.5 text-[10px] font-bold text-slate-400">待配对</button>
                     </div>)}
                 </div> : null}
 
-                {config.token.trim() && <BackendToolSettings config={config} characters={characters.map(character => ({ id: character.id, name: character.name }))} onStatus={setStatus} onSaved={() => refreshRemoteState(config)} />}
+                <BackendToolSettings config={config} characters={characters.map(character => ({ id: character.id, name: character.name }))} onStatus={setStatus} onSaved={() => refreshRemoteState(config)} />
             </div>}
         </section>
     );

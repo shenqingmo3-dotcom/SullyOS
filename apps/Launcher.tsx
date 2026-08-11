@@ -4,6 +4,7 @@ import { INSTALLED_APPS, DOCK_APPS } from '../constants';
 import { isDevDebugAvailable, subscribeDevDebugAvailability } from '../utils/devDebug';
 import AppIcon from '../components/os/AppIcon';
 import { DB } from '../utils/db';
+import { getCharacterAnniversaries } from '../utils/scheduleRelationshipScope';
 import { CharacterProfile, Anniversary, AppID, DailySchedule } from '../types';
 import { ScheduleHomeWidget, ScheduleFullscreenViewer } from '../components/schedule/ScheduleHomeWidget';
 import NowPlayingSquareWidget from '../components/os/NowPlayingSquareWidget';
@@ -629,7 +630,7 @@ const Launcher: React.FC = () => {
               } else {
                   setLastMessage(targetChar.description || "System Ready.");
               }
-              setAnniversaries(annis);
+              setAnniversaries(getCharacterAnniversaries(annis, targetChar.id));
           } catch (e) {
               console.error(e);
           }

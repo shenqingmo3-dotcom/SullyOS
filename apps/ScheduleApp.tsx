@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
+import { getCharacterAnniversaries } from '../utils/scheduleRelationshipScope';
 import { Anniversary, DailySchedule, Task } from '../types';
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -93,8 +94,10 @@ const ScheduleApp: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        if (!selectedCharId && characters[0]?.id) setSelectedCharId(characters[0].id);
-    }, [characters, selectedCharId]);
+        if (characters.some(character => character.id === selectedCharId)) return;
+        const nextCharacter = characters.find(character => character.id === activeCharacterId) || characters[0];
+        if (nextCharacter) setSelectedCharId(nextCharacter.id);
+    }, [activeCharacterId, characters, selectedCharId]);
 
     const monthDays = useMemo(() => {
         const first = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
@@ -169,7 +172,12 @@ const ScheduleApp: React.FC = () => {
         [...userEventsForDate(selectedDate), ...characterEventsForDate(selectedDate)]
             .sort((left, right) => minuteOf(left.startTime) - minuteOf(right.startTime))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    ), [selectedDate, tasks, dailySchedules, selectedCharId, userProfile.weeklySchedule]);
+    ), [selectedDate, tasks, dailySchedules, selectedCharId, characters, userProfile.weeklySchedule]);
+
+    const selectedAnniversaries = useMemo(
+        () => getCharacterAnniversaries(anniversaries, selectedCharacter?.id || ''),
+        [anniversaries, selectedCharacter?.id],
+    );
 
     const shiftMonth = (delta: number) => {
         setVisibleMonth(current => new Date(current.getFullYear(), current.getMonth() + delta, 1));
@@ -269,6 +277,40 @@ const ScheduleApp: React.FC = () => {
                 <button onClick={() => setActiveView('anniversary')} className={`h-9 rounded-full text-[13px] font-semibold tracking-wider transition ${activeView === 'anniversary' ? 'bg-[#c9bd99] text-[#504a3c] shadow-sm' : 'text-[#77746b]'}`}>纪念日</button>
             </nav>
 
+            {selectedCharacter && (
+                <section className="relative z-20 mx-5 mb-3 overflow-hidden rounded-[22px] border border-[#d7d1c1] bg-[#fffdf8]/90 px-3 py-3 shadow-[0_6px_20px_rgba(89,77,45,0.07)]">
+                    <span aria-hidden="true" className="pointer-events-none absolute -right-2 -top-3 rotate-[10deg] text-[20px] opacity-55">🌱</span>
+                    <div className="relative flex items-center justify-between gap-3 px-1">
+                        <div>
+                            <p className="text-[9px] font-semibold uppercase tracking-[0.22em] text-[#7ba99c]">和谁一起记录</p>
+                            <p className="mt-1 text-[11px] text-[#777267]">你的生活日程 + {selectedCharacter.name} 的日程与纪念</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1 rounded-full bg-[#f1ecdf] px-2 py-1 text-[9px] font-semibold text-[#73694f]">
+                            <Heart size={11} weight="fill" />共同日历
+                        </div>
+                    </div>
+                    <div className="relative mt-3 flex gap-2 overflow-x-auto pb-0.5">
+                        {characters.map(character => {
+                            const selected = character.id === selectedCharacter.id;
+                            return (
+                                <button
+                                    key={character.id}
+                                    onClick={() => setSelectedCharId(character.id)}
+                                    aria-pressed={selected}
+                                    aria-label={`和 ${character.name} 一起记录`}
+                                    className={`flex shrink-0 items-center gap-2 rounded-full border py-1.5 pl-1.5 pr-3 text-[11px] font-semibold transition active:scale-95 ${selected ? 'border-[#b7aa85] bg-[#eee7d6] text-[#5f5745] shadow-sm' : 'border-[#c9ded7] bg-[#edf7f3] text-[#5c786f]'}`}
+                                >
+                                    {character.avatar
+                                        ? <img src={character.avatar} alt="" className="h-7 w-7 rounded-full border-2 border-white object-cover shadow-sm" />
+                                        : <span className="grid h-7 w-7 place-items-center rounded-full bg-[#c9bd99] text-[10px] text-[#504a3c]">{character.name.slice(0, 1)}</span>}
+                                    {character.name}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </section>
+            )}
+
             <main className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[calc(2rem+env(safe-area-inset-bottom))]">
                 {activeView === 'calendar' ? (
                     <>
@@ -315,17 +357,6 @@ const ScheduleApp: React.FC = () => {
                                 <button onClick={() => selectDay(new Date())} className="rounded-full border border-[#d9d3c3] px-3 py-1.5 font-semibold">今天</button>
                             </div>
                         </section>
-
-                        {characters.length > 1 && (
-                            <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                                {characters.map(character => (
-                                    <button key={character.id} onClick={() => setSelectedCharId(character.id)} className={`flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold ${character.id === selectedCharacter?.id ? 'border-[#c9bd99] bg-[#f1ecdf] text-[#655c46]' : 'border-[#dcd6c7] bg-white/70 text-[#77746b]'}`}>
-                                        <img src={character.avatar} alt="" className="h-6 w-6 rounded-full object-cover" />
-                                        {character.name}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
 
                         <section className="relative mt-5 rounded-[26px] border border-[#d8d2c3] bg-[#fffdf9] px-4 pb-5 pt-5 shadow-[0_12px_32px_rgba(80,69,39,0.08)]">
                             <div className="absolute left-1/2 top-0 h-5 w-24 -translate-x-1/2 -translate-y-2 rotate-[-2deg] bg-[#e8d49b]/55 shadow-sm" />
@@ -384,13 +415,13 @@ const ScheduleApp: React.FC = () => {
                         </div>
 
                         <div className="relative mt-5 space-y-4">
-                            {anniversaries.length ? anniversaries
+                            {selectedAnniversaries.length ? selectedAnniversaries
                                 .slice()
                                 .sort((a, b) => a.date.localeCompare(b.date))
                                 .map((anniversary, index) => {
                                     const dayDifference = Math.round((fromDateKey(anniversary.date).getTime() - fromDateKey(todayKey).getTime()) / 86400000);
                                     const isFuture = anniversary.countMode === 'countdown' || (anniversary.countMode !== 'countup' && dayDifference >= 0);
-                                    const character = characters.find(item => item.id === anniversary.charId) || selectedCharacter;
+                                    const character = selectedCharacter;
                                     return (
                                         <article key={anniversary.id} className={`relative overflow-hidden rounded-[22px] border p-4 shadow-[0_7px_18px_rgba(76,65,36,0.08)] ${index % 2 === 0 ? 'rotate-[-0.4deg] border-[#ddd4bb] bg-[#f3efe3]' : 'rotate-[0.35deg] border-[#badbd1] bg-[#e2f3ed]'}`}>
                                             <span className="absolute right-4 top-0 h-6 w-16 -translate-y-2 rotate-[4deg] bg-white/45" />
@@ -414,8 +445,8 @@ const ScheduleApp: React.FC = () => {
                                 }) : (
                                     <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
                                         <Heart size={34} weight="thin" className="text-[#a99d7c]" />
-                                        <p className="mt-4 font-serif text-[18px]">第一张纪念卡还在等你</p>
-                                        <p className="mt-2 text-[10px] leading-5 text-[#928d80]">可以记相遇、生日、约定，<br />或任何想一起等待的日子。</p>
+                                        <p className="mt-4 font-serif text-[18px]">你和 {selectedCharacter?.name} 的第一张纪念卡</p>
+                                        <p className="mt-2 text-[10px] leading-5 text-[#928d80]">可以记相遇、生日、约定，<br />或任何想和 TA 一起等待的日子。</p>
                                         <button onClick={() => setComposer('anniversary')} className="mt-5 rounded-full bg-[#c9bd99] px-5 py-2.5 text-[11px] font-semibold text-[#504a3c] shadow-[0_7px_17px_rgba(105,94,66,0.18)]">写下一个日子</button>
                                     </div>
                                 )}
@@ -430,8 +461,8 @@ const ScheduleApp: React.FC = () => {
                         <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-[#d5d0c2]" />
                         <div className="flex items-center justify-between">
                             <div>
-                                <p className="text-[9px] font-semibold uppercase tracking-[0.25em] text-[#7ca99d]">{composer === 'schedule' ? 'my schedule' : 'our memory'}</p>
-                                <h2 className="mt-1 font-serif text-[23px] font-semibold">{composer === 'schedule' ? '添加我的日程' : '添加纪念日'}</h2>
+                                <p className="text-[9px] font-semibold uppercase tracking-[0.25em] text-[#7ca99d]">{composer === 'schedule' ? 'my schedule' : `with ${selectedCharacter?.name || 'character'}`}</p>
+                                <h2 className="mt-1 font-serif text-[23px] font-semibold">{composer === 'schedule' ? '添加我的日程' : `添加与 ${selectedCharacter?.name || '角色'} 的纪念日`}</h2>
                             </div>
                             <button onClick={resetComposer} className="grid h-9 w-9 place-items-center rounded-full bg-[#f0ece2] text-[#777268]"><X size={16} /></button>
                         </div>

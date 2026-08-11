@@ -3600,6 +3600,12 @@ export interface FullBackupData {
     apiPresets?: ApiPreset[];
     availableModels?: string[];
     realtimeConfig?: RealtimeConfig;  // 实时感知配置（天气/新闻/Notion）
+    backendChatConfig?: {
+        enabled: boolean;
+        serverContextEnabled: boolean;
+        baseUrl: string;
+        token: string;
+    };
     memoryPalaceConfig?: MemoryPalaceBackupConfig;
     customIcons?: Record<string, string>;
     appearancePresets?: AppearancePreset[];

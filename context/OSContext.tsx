@@ -3724,6 +3724,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               apiPresets: (mode === 'text_only' || mode === 'full') ? apiPresets : undefined,
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
               realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
+              backendChatConfig: (mode === 'text_only' || mode === 'full') ? (() => {
+                  try {
+                      const raw = localStorage.getItem('sullyos_backend_chat_v1');
+                      return raw ? JSON.parse(raw) : undefined;
+                  } catch {
+                      return undefined;
+                  }
+              })() : undefined,
               memoryPalaceConfig: (mode === 'text_only' || mode === 'full') ? memoryPalaceConfig : undefined,
               theme: cloneForInPlace(theme), // Include theme in all modes (text/media)
               customIcons: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
@@ -4541,6 +4549,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.availableModels) saveModels(data.availableModels);
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
+          if (data.backendChatConfig) localStorage.setItem('sullyos_backend_chat_v1', JSON.stringify(data.backendChatConfig));
           if (data.memoryPalaceConfig) updateMemoryPalaceConfig(data.memoryPalaceConfig); // 恢复记忆宫殿全局配置
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
