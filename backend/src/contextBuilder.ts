@@ -119,7 +119,8 @@ export async function buildAgentContextMessages(input: {
   const targetResult = await pool.query<ContextTarget>(
     `SELECT a.id AS agent_id, c.id AS conversation_id, a.name, a.description,
             a.system_prompt, a.worldview, a.writer_persona, a.legacy_memories,
-            a.refined_memories, a.metadata, u.display_name AS user_name, u.bio AS user_bio
+            a.refined_memories, a.profile_metadata AS metadata,
+            u.display_name AS user_name, u.bio AS user_bio
      FROM characters a
      JOIN conversations c ON c.agent_id=a.id AND c.external_id=CONCAT('private:', a.external_id)
      JOIN app_users u ON u.id=a.owner_user_id

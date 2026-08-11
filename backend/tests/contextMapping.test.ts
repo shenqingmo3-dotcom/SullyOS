@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { contextSyncSchema } from '../src/contextSchemas.js';
 import { memoryToKind, messageRoleToEventType, millisToDate } from '../src/contextMapping.js';
 
@@ -33,5 +34,12 @@ describe('context sync mapping', () => {
     });
 
     expect('apiConfig' in parsed).toBe(false);
+  });
+
+  it('reads character metadata from the synchronized profile column', () => {
+    const source = readFileSync(new URL('../src/contextBuilder.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('a.profile_metadata AS metadata');
+    expect(source).not.toContain('a.metadata');
   });
 });
