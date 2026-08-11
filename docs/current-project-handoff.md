@@ -440,3 +440,13 @@
 - 日记最终采用二改独立作者结构与薄荷便签 UI；一起读、日程与纪念日、开屏、线上/线下统一状态和 MCP 卡片等本轮修改与该结构一起进入同一发布候选。
 - 自动验证结果：根项目 223 个测试文件、3155 项测试全部通过；酒馆预设专项 40/40；后端 11 个测试文件、37 项测试全部通过；后端 typecheck/build、6 个 Worker bundle 与 Vite 生产构建全部通过。
 - `goldenbite.icu` 的实际 VPS 覆盖必须以服务器命令、容器状态和 `/health` 结果为准；仅 Git push 不等于已发布。
+
+## 19. SharkOS 首次正式测试已部署（2026-08-11）
+
+- 线上与远端 `sharkos` 分支最终版本为 `94fa4ffd88c4546b1d8269e5fc2b14b17d20c4e1`；VPS 后端镜像标识为 `sharkos-94fa4ffd`，正式前端主资源为 `assets/index-DsRV8KfH.js`。
+- 部署前已生成 PostgreSQL dump 与 SHA-256 校验文件；同时保留 `/opt/sullyos-backend.rollback-4aec9394` 和 `/opt/sullyos-frontend.rollback-4aec9394` 两套文件级回滚副本。没有执行 `docker compose down -v`，数据库卷和证书卷均未删除。
+- 后端迁移、HTTPS、API 鉴权和 PostgreSQL 生产健康检查均通过；`https://www.goldenbite.icu/` 以 301 跳转至主域名，`https://goldenbite.icu/health` 返回正常。
+- 正式网页已实际打开验收：SharkOS 桌面可加载，见面页显示“玩法与预设改为酒馆式楼层”“Tavern compatible”，并明确支持直接导入 SillyTavern Chat Completion 预设；浏览器控制台无 error。
+- 首次启动 Worker 后发现 heartbeat 上下文查询误读不存在的 `characters.metadata`。实际二改同步字段是 `profile_metadata`，已改为 `a.profile_metadata AS metadata`，增加回归测试并重新发布为 `94fa4ffd`。
+- 修复后后端 11 个测试文件、38 项测试全部通过，typecheck/build 通过；Worker 已重新开启并观察超过一个轮询周期，近期日志显示 `HEARTBEAT_LOGS_CLEAN`。
+- 手机 PWA 首次进入若仍显示旧缓存，完全关闭后重新打开或刷新一次即可取得新哈希资源；不需要重新安装，也不需要重新创建服务器。
