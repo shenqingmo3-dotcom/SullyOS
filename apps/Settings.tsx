@@ -4157,7 +4157,7 @@ const Settings: React.FC = () => {
                   <button
                       type="button"
                       onClick={async () => {
-                          const text = `请阅读这份教程，然后一步一步教我把 MCP 工具服务器接入 SullyOS。先问清楚我想接什么工具、准备部署在哪（云端/本地电脑/本地+内网穿透），再给对应路线的步骤：\n${MCP_USER_GUIDE_URL}`;
+                          const text = `请阅读这份教程，然后一步一步教我把 MCP 工具服务器接入 SharkOS（基于 SullyOS 的二改）。先问清楚我想接什么工具、准备部署在哪（云端/本地电脑/本地+内网穿透），再给对应路线的步骤：\n${MCP_USER_GUIDE_URL}`;
                           try { await navigator.clipboard.writeText(text); addToast('已复制，去粘贴给你的 AI 吧', 'success'); }
                           catch { addToast('复制失败，请手动复制教程链接', 'error'); }
                       }}

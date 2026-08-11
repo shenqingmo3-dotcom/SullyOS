@@ -1,4 +1,4 @@
-# SullyOS // 手抓糯米机
+# SharkOS
 <div align="center">
 <img width="800" alt="banner" src="https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/sDN.png" />
 </div>
@@ -9,7 +9,7 @@
 
 ## 这是什么鬼东西？
 
-**SullyOS** 是一个装在你浏览器里的虚拟手机系统。
+**SharkOS** 是基于 **SullyOS // 手抓糯米机** 的个人二改版本，是一个装在你浏览器里的虚拟手机系统。原项目署名、许可证与兼容格式均予以保留。
 
 不是那种普通的聊天机器人——这里面有**桌面**、**APP**、**消息通知**、**相册**、**甚至电话功能**。你可以创造角色，给他们装进去，然后像真用手机一样跟他们互动。
 

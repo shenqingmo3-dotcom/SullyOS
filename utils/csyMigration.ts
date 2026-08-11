@@ -233,7 +233,7 @@ export function inspectCsyBackup(input: unknown): CsyMigrationReport {
     const models = [...new Set(valid.map(memory => modelKey(memory.modelId, memory.vector.length)))].sort();
     const warnings: string[] = [];
     if (rawMemories.length !== valid.length) warnings.push(`${rawMemories.length - valid.length} 条损坏或空向量记忆将跳过。`);
-    if (choice.provider === 'cohere' && valid.length > 0) warnings.push('CSY 使用 Cohere 文档/查询双模式；正文会保留，但向量需在 SullyOS 重新生成。');
+    if (choice.provider === 'cohere' && valid.length > 0) warnings.push('CSY 使用 Cohere 文档/查询双模式；正文会保留，但向量需在 SharkOS 重新生成。');
     if (models.length > 1) warnings.push('备份包含多种向量模型或维度；仅与当前主模型一致的向量会直接复用。');
     if (valid.length === 0) warnings.push('备份中没有可转换的本地向量记忆；角色和聊天仍可迁移。');
     warnings.push('CSY 备份中的后端 token 与额外 API 密钥不会写入全局 localStorage。');

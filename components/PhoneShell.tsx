@@ -306,7 +306,7 @@ const DisclaimerPopup: React.FC<{ onAccept: () => void }> = ({ onAccept }) => (
       <div className="pt-7 pb-3 px-6 text-center">
         <img src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f4e2.png" alt="announcement" className="w-8 h-8 mb-2" />
         <h2 className="text-lg font-extrabold text-slate-800">免责声明</h2>
-        <p className="text-[11px] text-slate-400 mt-1">Disclaimer · 手抓糯米机 (SullyOS)</p>
+        <p className="text-[11px] text-slate-400 mt-1">Disclaimer · SharkOS（基于 SullyOS）</p>
       </div>
 
       {/* Content */}
@@ -767,7 +767,7 @@ const PhoneShell: React.FC = () => {
                    <span>🍃</span><span>无人岛生活</span><span>🍃</span>
                </div>
            ) : (
-               <div className="text-lg tracking-widest opacity-90 mt-2 uppercase text-xs font-bold">SullyOS Simulation</div>
+               <div className="text-lg tracking-widest opacity-90 mt-2 uppercase text-xs font-bold">SharkOS Simulation</div>
            )}
         </div>
 

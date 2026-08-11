@@ -154,7 +154,7 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
   {
     id: 'default',
     name: '默认风格',
-    desc: '经典 SullyOS 玻璃拟物界面',
+    desc: '经典 SharkOS 玻璃拟物界面',
     swatch: 'linear-gradient(135deg,#FFDEE9 0%,#B5FFFC 100%)',
     config: {
       skin: 'default',

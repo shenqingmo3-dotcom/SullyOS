@@ -1,9 +1,9 @@
 {
-  "short_name": "SullyOS",
-  "name": "SullyOS",
+  "short_name": "SharkOS",
+  "name": "SharkOS",
   "display": "standalone",
-  "theme_color": "#0f1115",
-  "background_color": "#0f1115",
+  "theme_color": "#d98d05",
+  "background_color": "#d98d05",
   "start_url": "./",
   "scope": "./",
   "icons": [

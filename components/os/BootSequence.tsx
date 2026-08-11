@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-// SullyOS 冷启动「世界入场」电影化序列 —— 取代传统黑屏 spinner。
+// SharkOS 冷启动「世界入场」电影化序列 —— 取代传统黑屏 spinner。
 // 目标：让人觉得「进入了一个小世界」，而不是「在等一个 App 加载完」。
 //   · 深空大气场景 + 相机缓慢前推 + 漂浮尘埃/闪烁星点 + 核心柔光（呼吸）
 //   · logo 从景深中浮现（远→近对焦），随后 tagline 与一道光线（UI 萌芽）
@@ -16,7 +16,7 @@ const BOOT_SEEN_KEY = 'sullyos_boot_seen_session';
 interface Props {
   /** 数据是否已就绪（IndexedDB 加载完）。未就绪时场景持续呼吸等待，不退场。 */
   dataReady: boolean;
-  /** 当前壁纸（url / data / blob / 渐变或颜色字符串 / 空）。开机场景以它为底「活过来」。 */
+  /** 保留现有调用接口；SharkOS 开屏使用固定品牌背景，不受壁纸影响。 */
   wallpaper?: string;
   /** 退场动画播完后回调，交还控制权给 PhoneShell。 */
   onDone: () => void;
@@ -27,11 +27,7 @@ const prefersReducedMotion = () =>
   !!window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
-  // 壁纸解析：url/data/blob 走 url() 并虚化压暗；渐变/颜色字符串直接当背景；空则回退深空渐变。
-  const wp = wallpaper?.trim() || '';
-  const wpIsImage = /^(https?:|data:|blob:)/.test(wp);
-  const wpBackground = wp ? (wpIsImage ? `url(${wp})` : wp) : '';
+const BootSequence: React.FC<Props> = ({ dataReady, onDone }) => {
   // 本会话是否首次看到开场：刷新页面仍属同 session → 走极短版。
   const firstThisSession = useMemo(() => {
     try { return !sessionStorage.getItem(BOOT_SEEN_KEY); } catch { return true; }
@@ -100,10 +96,10 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
   return (
     <div
       onClick={skip}
-      aria-label="SullyOS"
+      aria-label="SharkOS"
       className="fixed inset-0 z-[9999] overflow-hidden select-none cursor-pointer"
       style={{
-        background: '#05060f',
+        background: '#d98d05',
         opacity: exiting ? 0 : 1,
         transition: `opacity ${EXIT}ms ease-in`,
       }}
@@ -134,36 +130,21 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
           className="absolute inset-0"
           style={{ animation: cinematic ? 'bootCamera 6s ease-out forwards' : undefined, willChange: 'transform' }}
         >
-          {/* 深空大气底（无壁纸时的回退；有壁纸时也垫底，让暗部仍有紫调景深） */}
+          {/* 向日葵金色底：暖黄花心、金色花瓣与焦糖色边缘。 */}
           <div className="absolute inset-0" style={{
             animation: cinematic ? 'bootSceneIn 700ms ease-out both' : 'bootSceneIn 300ms ease-out both',
-            background: 'radial-gradient(130% 120% at 50% 118%, #3a2766 0%, #1d1740 34%, #0c0b22 66%, #05060f 100%)',
+            background: 'radial-gradient(circle at 50% 42%, #fff7b0 0%, #ffdc55 16%, #f6b91c 40%, #df9208 72%, #8f4d00 100%)',
           }} />
-          {/* 壁纸层：以用户壁纸为底「活过来」。图片虚化压暗 + 预放大遮住虚化边；相机层再缓推。 */}
-          {wpBackground && (
-            <>
-              <div className="absolute inset-0 bg-cover bg-center" style={{
-                background: wpBackground,
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
-                filter: wpIsImage ? 'blur(10px)' : 'none',
-                transform: wpIsImage ? 'scale(1.14)' : undefined,
-                animation: cinematic ? 'bootSceneIn 700ms ease-out both' : 'bootSceneIn 300ms ease-out both',
-              }} />
-              {/* 压暗 scrim：保证柔光/尘埃/logo 在任意壁纸上都清晰可读 */}
-              <div className="absolute inset-0" style={{ background: 'rgba(6,7,18,0.5)' }} />
-            </>
-          )}
-          {/* 星云叠加：紫 + 青双光源（screen 混合，轻轻晕染壁纸，与整套世界观统一） */}
+          {/* 放射花瓣纹理：保持抽象，不引入额外图片资源。 */}
           <div className="absolute inset-0" style={{
-            mixBlendMode: 'screen',
-            background: 'radial-gradient(70% 55% at 72% 22%, rgba(139,108,232,0.30), transparent 60%), radial-gradient(64% 48% at 22% 32%, rgba(64,150,210,0.20), transparent 62%)',
+            mixBlendMode: 'soft-light',
+            background: 'repeating-conic-gradient(from -4deg at 50% 42%, rgba(255,249,186,0.58) 0deg 7deg, rgba(211,123,0,0.12) 7deg 14deg)',
           }} />
           {/* 核心柔光（呼吸）—— logo 所在处的光源 */}
           <div className="absolute" style={{
             left: '50%', top: '42%', width: '120vw', height: '120vw', maxWidth: 900, maxHeight: 900,
             transform: 'translate(-50%,-50%)',
-            background: 'radial-gradient(circle, rgba(168,150,255,0.45) 0%, rgba(120,110,220,0.16) 32%, transparent 60%)',
+            background: 'radial-gradient(circle, rgba(255,252,207,0.72) 0%, rgba(255,216,68,0.22) 32%, transparent 62%)',
             animation: cinematic ? 'bootBloom 5.5s ease-in-out infinite' : undefined,
             opacity: cinematic ? undefined : 0.6,
           }} />
@@ -173,7 +154,7 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
             <span key={`m${i}`} className="absolute rounded-full" style={{
               left: `${p.left}%`, bottom: 0, width: p.size, height: p.size,
               ['--sway' as any]: `${p.sway}px`,
-              background: 'radial-gradient(circle, rgba(214,205,255,0.95), rgba(214,205,255,0) 70%)',
+              background: 'radial-gradient(circle, rgba(255,251,210,0.98), rgba(255,224,104,0) 70%)',
               opacity: p.op,
               animation: `bootRise ${p.dur}s linear ${p.delay}s infinite`,
               willChange: 'transform',
@@ -183,8 +164,8 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
           {stars.map((s, i) => (
             <span key={`s${i}`} className="absolute rounded-full" style={{
               left: `${s.left}%`, top: `${s.top}%`, width: s.size, height: s.size,
-              background: 'rgba(255,255,255,0.95)',
-              boxShadow: '0 0 6px rgba(190,200,255,0.8)',
+              background: 'rgba(255,252,218,0.98)',
+              boxShadow: '0 0 7px rgba(255,237,139,0.9)',
               opacity: s.op,
               animation: `bootTwinkle ${s.dur}s ease-in-out ${s.delay}s infinite`,
             }} />
@@ -192,28 +173,30 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
 
           {/* 暗角，聚焦中心 */}
           <div className="absolute inset-0" style={{
-            background: 'radial-gradient(125% 100% at 50% 44%, transparent 52%, rgba(0,0,0,0.6) 100%)',
+            background: 'radial-gradient(125% 100% at 50% 44%, transparent 48%, rgba(92,45,0,0.52) 100%)',
           }} />
         </div>
 
         {/* 前景：logo 自景深浮现 + 光线 + tagline（UI 从场景中生长出来） */}
         <div className="absolute inset-0 flex flex-col items-center justify-center px-8 pointer-events-none">
-          <div className="text-white font-light" style={{
+          <div className="font-light" style={{
+            color: '#633700',
             fontSize: 'clamp(38px, 12vw, 64px)',
             letterSpacing: '0.04em',
-            textShadow: '0 0 36px rgba(170,150,255,0.55), 0 2px 14px rgba(0,0,0,0.4)',
+            textShadow: '0 1px 0 rgba(255,249,207,0.55), 0 5px 22px rgba(108,54,0,0.28)',
             animation: cinematic ? 'bootLogoIn 1400ms cubic-bezier(0.22,1,0.36,1) 250ms both' : 'bootLogoIn 600ms ease-out both',
           }}>
-            Sully<span style={{ fontWeight: 500 }}>OS</span>
+            Shark<span style={{ fontWeight: 500 }}>OS</span>
           </div>
           <div className="mt-3 h-px w-28" style={{
-            background: 'linear-gradient(90deg, transparent, rgba(200,190,255,0.85), transparent)',
+            background: 'linear-gradient(90deg, transparent, rgba(99,55,0,0.72), transparent)',
             transformOrigin: 'center',
-            animation: cinematic ? 'bootLineIn 900ms ease-out 1100ms both' : 'bootLineIn 400ms ease-out 200ms both',
+            animation: cinematic ? 'bootLineIn 700ms ease-out 700ms both' : 'bootLineIn 400ms ease-out 200ms both',
           }} />
-          <div className="mt-3 text-[12px] text-white/85" style={{
+          <div className="mt-3 text-[12px]" style={{
+            color: 'rgba(99,55,0,0.86)',
             letterSpacing: '0.3em',
-            animation: cinematic ? 'bootSoftIn 1200ms ease-out 1250ms both' : 'bootSoftIn 500ms ease-out 250ms both',
+            animation: cinematic ? 'bootSoftIn 800ms ease-out 850ms both' : 'bootSoftIn 500ms ease-out 250ms both',
           }}>
             欢迎回家！
           </div>
@@ -222,8 +205,8 @@ const BootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
 
       {/* 轻触跳过提示（仅完整版、过 1.8s 后；极淡，不打扰） */}
       {cinematic && !exiting && (
-        <div className="absolute bottom-10 left-0 right-0 text-center text-[10px] tracking-[0.3em] text-white/40"
-             style={{ animation: 'bootHintIn 800ms ease-out 1800ms both' }}>
+        <div className="absolute bottom-10 left-0 right-0 text-center text-[10px] tracking-[0.3em]"
+             style={{ color: 'rgba(99,55,0,0.48)', animation: 'bootHintIn 800ms ease-out 1800ms both' }}>
           轻触进入
         </div>
       )}

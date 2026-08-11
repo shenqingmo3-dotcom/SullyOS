@@ -72,7 +72,7 @@ const AppIconEditor: React.FC = () => {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-bold text-slate-700">桌面 PWA 图标</h2>
-          <p className="text-[10px] text-slate-400 mt-1">设置手机桌面上的 SullyOS 图标</p>
+          <p className="text-[10px] text-slate-400 mt-1">设置手机桌面上的 SharkOS 图标</p>
         </div>
         <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-sm bg-slate-100 shrink-0">
           {previewUrl

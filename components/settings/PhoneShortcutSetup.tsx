@@ -142,7 +142,7 @@ const PhoneShortcutSetup: React.FC<{
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white/80 p-2 space-y-2">
-        <p className="text-[10px] font-bold text-slate-700">2. 在 iPhone 建立“SullyOS 屏幕查看”</p>
+        <p className="text-[10px] font-bold text-slate-700">2. 在 iPhone 建立“SharkOS 屏幕查看”</p>
         <div className="grid grid-cols-2 gap-2">
           <button type="button" onClick={() => { window.location.href = 'shortcuts://create-shortcut'; }}
             className="rounded-lg bg-cyan-600 py-2 text-[9px] font-bold text-white">打开快捷指令新建页</button>
@@ -175,7 +175,7 @@ const PhoneShortcutSetup: React.FC<{
         <p className="text-[10px] font-bold text-slate-700">3. 建立邮件个人自动化</p>
         <p className="text-[9px] leading-relaxed text-slate-600">
           快捷指令 → 自动化 → 新建个人自动化 → 邮件。发件人选择上面配置的 SMTP 账号，主题包含
-          <b> SullyOS 屏幕查看请求</b>，动作选择“运行快捷指令”并运行“SullyOS 屏幕查看”，设为立即运行。
+          <b> SullyOS 屏幕查看请求</b>（为兼容旧自动化保留该邮件主题），动作选择“运行快捷指令”并运行“SharkOS 屏幕查看”，设为立即运行。
         </p>
         <p className="text-[9px] text-amber-700">截屏时 iPhone 必须处于已解锁、可截图状态；锁屏、受保护视频或部分银行 App 可能只返回空白画面。</p>
       </div>

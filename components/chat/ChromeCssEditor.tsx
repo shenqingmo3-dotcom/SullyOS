@@ -12,7 +12,7 @@ import { Share } from '@capacitor/share';
 const PRESET_STORE_KEY = 'sully_chrome_css_presets_v1';
 
 // 丢给别的 AI 的提示词（让它按想要的风格生成整段 CSS）。
-const AI_PROMPT = `你是一个 CSS 设计师。我在用一个叫 SullyOS 的「浏览器里的虚拟手机」聊天 App，
+const AI_PROMPT = `你是一个 CSS 设计师。我在用一个叫 SharkOS 的「浏览器里的虚拟手机」聊天 App，
 它允许我用一段自定义 CSS 来完全重新设计「聊天顶栏 + 输入栏」这块外壳。
 这段 CSS 会被注入到聊天界面里，通过下面这些固定类名生效。请帮我写一整段 CSS，
 实现我想要的风格——你有很高的自由度，不要只改颜色，可以大胆重构整个顶栏的视觉。
@@ -323,7 +323,7 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
         }
         const date = new Date();
         const dateKey = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
-        const fileName = `sullyos-whitebox-${dateKey}.txt`;
+        const fileName = `sharkos-whitebox-${dateKey}.txt`;
         try {
             if (Capacitor.isNativePlatform()) {
                 await Filesystem.writeFile({
@@ -333,7 +333,7 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                     encoding: Encoding.UTF8,
                 });
                 const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-                await Share.share({ title: 'SullyOS 白框样式', files: [uri.uri] });
+                await Share.share({ title: 'SharkOS 白框样式', files: [uri.uri] });
                 return;
             }
 

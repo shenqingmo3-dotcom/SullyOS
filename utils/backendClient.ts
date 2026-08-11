@@ -690,7 +690,7 @@ export async function syncBackendContext(input: {
         body: JSON.stringify({
             clientId: getClientId(),
             ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
-            clientName: 'SullyOS Web',
+            clientName: 'SharkOS Web',
             user: {
                 name: boundedText(user.name, 200, '用户') || '用户',
                 bio: boundedText(user.bio || '', 100_000),

@@ -1681,7 +1681,7 @@ export default function MemoryPalaceApp() {
             const text = await fileObj.text();
             const data = JSON.parse(text);
             if (!isMemoryPalaceExportFile(data)) {
-                setImportResult('[err]这不是 SullyOS 记忆宫殿导出文件');
+                setImportResult('[err]这不是 SharkOS / SullyOS 兼容的记忆宫殿导出文件');
                 return;
             }
             const totalNodes = data.characters.reduce((s, c) => s + (c.nodes?.length || 0), 0);
