@@ -3,6 +3,10 @@
 	admin off
 }
 
+www.{$SULLYOS_DOMAIN} {
+	redir https://{$SULLYOS_DOMAIN}{uri} permanent
+}
+
 {$SULLYOS_DOMAIN} {
 	encode zstd gzip
 
