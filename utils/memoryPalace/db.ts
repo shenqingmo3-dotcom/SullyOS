@@ -221,6 +221,7 @@ export const MemoryNodeDB = {
         node.accessCount += 1;
         await put<MemoryNode>(STORE_MEMORY_NODES, node);
         syncNodeMetadataToRemote(node);
+        await queueUpsert('memory_node', node.charId, node.id, node);
     },
 };
 
@@ -792,7 +793,11 @@ export const AnticipationDB = {
 
     getById: (id: string) => getByKey<Anticipation>(STORE_ANTICIPATIONS, id),
 
-    delete: (id: string) => deleteByKey(STORE_ANTICIPATIONS, id),
+    delete: async (id: string) => {
+        const existing = await getByKey<Anticipation>(STORE_ANTICIPATIONS, id);
+        await deleteByKey(STORE_ANTICIPATIONS, id);
+        if (existing) await queueDelete('anticipation', existing.charId, id);
+    },
 
     getByCharId: (charId: string) =>
         getAllByIndex<Anticipation>(STORE_ANTICIPATIONS, 'charId', charId),

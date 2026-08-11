@@ -39,6 +39,7 @@ import {
     TopicBoxDB,
 } from '../../utils/memoryPalace/db';
 import BackendToolSettings from './BackendToolSettings';
+import { resolveCharTimeZone } from '../../utils/timezone';
 
 const panelStatusClass = (text: string) => {
     if (text.startsWith('✅')) return 'border-emerald-100 bg-emerald-50 text-emerald-700';
@@ -270,6 +271,9 @@ const SharkBackendSettings: React.FC = () => {
                 enabled: patch.enabled ?? agent.enabled,
                 intervalMinutes: patch.intervalMinutes ?? agent.intervalMinutes,
                 policy: patch.policy ?? agent.policy,
+                timezone: resolveCharTimeZone(characters.find(character => character.id === agent.characterId))
+                    || Intl.DateTimeFormat().resolvedOptions().timeZone
+                    || 'UTC',
             });
             setAgents(current => current ? {
                 ...current,

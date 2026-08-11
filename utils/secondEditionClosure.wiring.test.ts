@@ -14,11 +14,23 @@ describe('SharkOS second-edition feature closure wiring', () => {
 
     it('keeps chat deletion, mode and schedule changes synchronized with the backend', () => {
         const source = read('../apps/Chat.tsx');
-        expect(source).toContain('enqueueBackendChatMessageDeletes(char.id, targets)');
+        expect(source).toContain('await DB.deleteMessages(targets.map(message => message.id))');
+        const db = read('../utils/db.ts');
+        expect(db).toContain('queueBackendMessageDeletion(queue, request.result as Message | undefined)');
         expect(source).toContain('flushBackendMemorySyncQueue({');
         expect(source).toContain("console.warn('[interaction-mode] backend sync failed'");
         expect(source).toContain("console.warn('[Schedule] backend snapshot sync failed'");
+        expect(source.match(/syncScheduleSnapshot\(targetChar\)/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+        expect(source).toContain('syncScheduleSnapshot(updatedChar)');
         expect(source.match(/deleteMessagesEverywhere\(/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
+    });
+
+    it('keeps the first chat tool page at eight items on small screens', () => {
+        const source = read('../components/chat/ChatInputArea.tsx');
+        const firstPage = source.slice(source.indexOf("actionsPage === 0"), source.indexOf('Page 1: 外部服务'));
+        const secondPage = source.slice(source.indexOf('Page 1: 外部服务'), source.indexOf('Page 2: 更多'));
+        expect(firstPage).not.toContain("onPanelAction('schedule')");
+        expect(secondPage).toContain("onPanelAction('schedule')");
     });
 
     it('keeps memory-palace destructive actions synchronized with the backend', () => {
@@ -44,6 +56,15 @@ describe('SharkOS second-edition feature closure wiring', () => {
         expect(source).toContain('volatileTail += await buildActiveCinemaContext(char.id, char.name)');
     });
 
+    it('syncs the same timezone-aware daily schedule used by the app', () => {
+        const source = read('./backendClient.ts');
+        expect(source).toContain("import { getDailyScheduleForChar } from './dailySchedule'");
+        expect(source).toContain("import { resolveCharTimeZone } from './timezone'");
+        expect(source).toContain('await getDailyScheduleForChar(character)');
+        expect(source).toContain('timezone: resolveCharTimeZone(character)');
+        expect(source).not.toContain("new Date().toISOString().split('T')[0]");
+    });
+
     it('keeps the diary, reading, NPC and backend tool feature entrances connected', () => {
         const journal = read('../apps/JournalApp.tsx');
         expect(journal).toContain('syncBackendDiary(config');
@@ -59,7 +80,7 @@ describe('SharkOS second-edition feature closure wiring', () => {
         expect(character).toContain('syncBackendContext({');
 
         const tools = read('../components/settings/BackendToolSettings.tsx');
-        expect(tools).toContain("['x.read', 'xhs.read', 'mcp.read', 'phone.read']");
+        expect(tools).toContain("['x.read', 'xhs.read', 'web.read', 'mcp.read', 'phone.read']");
     });
 
     it('does not render developer overlays in production', () => {

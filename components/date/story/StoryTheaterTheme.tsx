@@ -20,7 +20,7 @@ interface StoryThemeContextValue {
 
 const STORAGE_KEY = STORY_THEATER_APPEARANCE_STORAGE_KEY;
 const STORY_APPEARANCE_HISTORY_KEY = '__sullyStoryAppearance';
-const DEFAULT_APPEARANCE: StoryAppearance = { color: 'light', decor: 'plain' };
+const DEFAULT_APPEARANCE: StoryAppearance = { color: 'dark', decor: 'cinema' };
 const StoryThemeContext = createContext<StoryThemeContextValue | null>(null);
 
 function readAppearance(): StoryAppearance {
@@ -39,17 +39,20 @@ function readAppearance(): StoryAppearance {
 
 const STORY_THEME_CSS = `
 .story-theme {
-  --story-bg: #f6f4ef;
-  --story-surface: #fffdfa;
-  --story-raised: #ffffff;
-  --story-ink: #243047;
-  --story-muted: #728097;
-  --story-faint: #aeb7c6;
-  --story-line: #dce1e8;
-  --story-soft: #e9edf2;
-  --story-accent: #7c3aed;
-  --story-accent-soft: #ede9fe;
-  --story-accent-ink: #6d28d9;
+  --story-bg: #dff4f5;
+  --story-surface: rgba(238, 252, 252, .72);
+  --story-raised: rgba(248, 255, 255, .66);
+  --story-ink: #123e50;
+  --story-muted: #477487;
+  --story-faint: #7fa5b3;
+  --story-line: rgba(33, 112, 139, .20);
+  --story-soft: rgba(184, 226, 230, .48);
+  --story-accent: #168bad;
+  --story-accent-soft: rgba(102, 202, 216, .18);
+  --story-accent-ink: #096986;
+  --story-glass: rgba(246, 255, 255, .58);
+  --story-glass-strong: rgba(238, 253, 253, .76);
+  --story-shadow: rgba(12, 75, 97, .16);
   position: relative;
   isolation: isolate;
   overflow: hidden;
@@ -58,36 +61,32 @@ const STORY_THEME_CSS = `
   color-scheme: light;
 }
 .story-theme-dark {
-  --story-bg: #111519;
-  --story-surface: #181e24;
-  --story-raised: #202831;
-  --story-ink: #edf1f5;
-  --story-muted: #a3afbe;
-  --story-faint: #6f7b89;
-  --story-line: #303a45;
-  --story-soft: #252e37;
-  --story-accent: #ad8bff;
-  --story-accent-soft: #2e2548;
-  --story-accent-ink: #c8b4ff;
+  --story-bg: #041d2b;
+  --story-surface: rgba(8, 42, 57, .74);
+  --story-raised: rgba(16, 57, 73, .66);
+  --story-ink: #e5f7f7;
+  --story-muted: #9ec7cf;
+  --story-faint: #668f9a;
+  --story-line: rgba(133, 211, 221, .18);
+  --story-soft: rgba(48, 105, 120, .40);
+  --story-accent: #62c9d7;
+  --story-accent-soft: rgba(70, 178, 196, .20);
+  --story-accent-ink: #9be8ee;
+  --story-glass: rgba(7, 40, 55, .56);
+  --story-glass-strong: rgba(12, 51, 67, .78);
+  --story-shadow: rgba(0, 12, 22, .38);
   color-scheme: dark;
 }
 .story-theme.story-decor-cinema {
-  --story-bg: #faf4f0;
-  --story-surface: #fffaf4;
-  --story-raised: #fffdf9;
-  --story-line: #eadbd5;
-  --story-accent: #8b5cf6;
-  --story-accent-soft: #f0e7ff;
-  --story-accent-ink: #7c3aed;
+  --story-accent: #0f9fbd;
+  --story-accent-soft: rgba(85, 202, 216, .20);
+  --story-accent-ink: #087590;
 }
 .story-theme-dark.story-decor-cinema {
-  --story-bg: #0d1020;
-  --story-surface: #15182b;
-  --story-raised: #1d2037;
-  --story-line: #343854;
-  --story-accent: #bd9cff;
-  --story-accent-soft: #30264d;
-  --story-accent-ink: #d5c3ff;
+  --story-bg: #031824;
+  --story-accent: #6bd6e0;
+  --story-accent-soft: rgba(70, 183, 199, .22);
+  --story-accent-ink: #a2edf1;
 }
 .story-theme::before {
   content: '';
@@ -101,14 +100,31 @@ const STORY_THEME_CSS = `
 .story-theme.story-decor-cinema::before {
   opacity: 1;
   background:
-    radial-gradient(circle at 10% 4%, color-mix(in srgb, var(--story-accent) 17%, transparent) 0, transparent 28%),
-    radial-gradient(circle at 92% 34%, rgba(251, 191, 36, .12) 0, transparent 25%),
-    linear-gradient(115deg, transparent 0 47%, rgba(255,255,255,.035) 48% 49%, transparent 50% 100%);
+    radial-gradient(ellipse at 12% -8%, rgba(178, 245, 245, .38) 0, transparent 33%),
+    radial-gradient(ellipse at 86% 18%, color-mix(in srgb, var(--story-accent) 20%, transparent) 0, transparent 35%),
+    linear-gradient(154deg, transparent 0 31%, rgba(199, 249, 246, .055) 35% 39%, transparent 43% 100%),
+    linear-gradient(180deg, rgba(130, 226, 232, .09), transparent 32%);
 }
+.story-theme::after {
+  content: '';
+  position: absolute;
+  inset: -12% -8%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  background-image:
+    radial-gradient(circle, rgba(207, 251, 249, .28) 0 1px, transparent 2px),
+    radial-gradient(circle, rgba(207, 251, 249, .18) 0 2px, transparent 3px),
+    radial-gradient(circle, rgba(207, 251, 249, .13) 0 3px, transparent 4px);
+  background-size: 83px 101px, 147px 179px, 211px 263px;
+  background-position: 7px 23px, 51px 79px, 119px 31px;
+}
+.story-theme.story-decor-cinema::after { opacity: 1; animation: story-bubble-drift 18s ease-in-out infinite alternate; }
+@keyframes story-bubble-drift { from { transform: translate3d(0, 2%, 0); } to { transform: translate3d(1.5%, -2%, 0); } }
 .story-theme > * { position: relative; z-index: 1; }
 .story-theme .bg-stone-100 { background-color: var(--story-bg) !important; }
 .story-theme .bg-stone-100\\/95 { background-color: var(--story-bg) !important; }
-.story-theme .bg-white { background-color: var(--story-raised) !important; }
+.story-theme .bg-white { background-color: var(--story-raised) !important; backdrop-filter: blur(16px) saturate(125%); -webkit-backdrop-filter: blur(16px) saturate(125%); }
 .story-theme .bg-slate-50, .story-theme .bg-slate-100 { background-color: var(--story-surface) !important; }
 .story-theme .bg-slate-200 { background-color: var(--story-soft) !important; }
 .story-theme .bg-slate-900 { background-color: var(--story-ink) !important; color: var(--story-bg) !important; }
@@ -129,24 +145,60 @@ const STORY_THEME_CSS = `
 .story-theme .story-safe-sheet { padding-bottom: calc(var(--safe-bottom) + 18px); }
 .story-theme .story-quick-preset { bottom: calc(var(--safe-bottom) + 112px); }
 .story-theme .story-page-scroll { overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
+.story-theme .story-glass-panel {
+  border: 1px solid var(--story-line);
+  background: var(--story-glass-strong);
+  box-shadow: inset 0 1px 0 rgba(231, 255, 255, .18), 0 18px 44px var(--story-shadow);
+  backdrop-filter: blur(22px) saturate(132%);
+  -webkit-backdrop-filter: blur(22px) saturate(132%);
+}
+.story-theme .story-dialog-row { display: flex; align-items: flex-start; gap: 10px; }
+.story-theme .story-dialog-row-user { flex-direction: row-reverse; }
+.story-theme .story-dialog-avatar {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(206, 250, 249, .42);
+  box-shadow: 0 8px 22px var(--story-shadow);
+}
+.story-theme .story-dialog-card {
+  min-width: 0;
+  max-width: calc(100% - 44px);
+  border: 1px solid var(--story-line);
+  background: var(--story-glass);
+  box-shadow: inset 0 1px 0 rgba(232, 255, 255, .16), 0 14px 32px var(--story-shadow);
+  backdrop-filter: blur(20px) saturate(128%);
+  -webkit-backdrop-filter: blur(20px) saturate(128%);
+  padding: 15px 16px;
+}
+.story-theme .story-dialog-user { border-radius: 20px 7px 20px 20px; }
+.story-theme .story-dialog-character { border-radius: 7px 20px 20px 20px; }
+.story-theme .story-dialog-cast { display: flex; flex: 0 0 34px; width: 34px; }
+.story-theme .story-dialog-cast img + img { margin-left: -18px; }
+.story-theme .story-dialog-cast img:nth-child(n+2) { margin-top: 16px; }
 .story-theme.story-decor-plain .shadow-sm { box-shadow: none !important; }
 .story-theme.story-decor-cinema .story-cinema-rule { position: relative; }
 .story-theme.story-decor-cinema .story-cinema-rule::after {
-  content: '✦  ·  ✦';
+  content: '水光缓慢移动';
   position: absolute;
   right: 0;
   bottom: -5px;
   padding-left: 10px;
   color: var(--story-accent);
   background: var(--story-bg);
-  font-size: 8px;
-  letter-spacing: .24em;
+  font-size: 7px;
+  letter-spacing: .18em;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .story-theme .bg-white, .story-theme .story-glass-panel, .story-theme .story-dialog-card { background: var(--story-surface) !important; backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 body.ios-keyboard-open .story-theme .story-safe-footer { padding-bottom: 12px !important; }
 body.ios-keyboard-open .story-theme .story-safe-sheet { padding-bottom: 18px !important; }
 body.ios-keyboard-open .story-theme .story-quick-preset { bottom: 112px !important; }
 @media (prefers-reduced-motion: reduce) {
-  .story-theme *, .story-theme *::before, .story-theme *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+  .story-theme *, .story-theme *::before, .story-theme *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
 `;
 
@@ -231,12 +283,12 @@ export const StoryAppearanceButton: React.FC<{ className?: string }> = ({ classN
                 aria-labelledby='story-appearance-title'
             >
                 <div className='shrink-0 flex items-start gap-4'>
-                    <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>Story appearance</div><h2 id='story-appearance-title' className='mt-1 text-lg font-semibold'>剧情放映厅外观</h2><p className='mt-1 text-[10px] leading-5 text-slate-500'>只影响剧情模式，普通聊天与记忆宫殿保持原样。</p></div>
+                    <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>Aquarium appearance</div><h2 id='story-appearance-title' className='mt-1 text-lg font-semibold'>见面水族馆外观</h2><p className='mt-1 text-[10px] leading-5 text-slate-500'>只影响见面模式，普通聊天与记忆宫殿保持原样。</p></div>
                     <button type='button' onClick={closePanel} className='w-10 h-10 shrink-0 rounded-full bg-white border border-slate-200 grid place-items-center' aria-label='关闭剧情外观'><X size={17} /></button>
                 </div>
                 <div className='mt-5 min-h-0 overflow-y-auto overscroll-contain border-t border-slate-200'>
-                    <div className='py-4 flex items-center gap-3'><span className='text-xs font-semibold w-16'>明暗</span><div className='min-w-0 flex-1 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button onClick={() => setColor('light')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.color === 'light' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Sun size={14} />浅色</button><button onClick={() => setColor('dark')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.color === 'dark' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Moon size={14} />深色</button></div></div>
-                    <div className='py-4 border-t border-slate-200 flex items-center gap-3'><span className='text-xs font-semibold w-16'>装饰</span><div className='min-w-0 flex-1 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button onClick={() => setDecor('plain')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.decor === 'plain' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><SquaresFour size={14} />素雅</button><button onClick={() => setDecor('cinema')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.decor === 'cinema' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Sparkle size={14} />花里胡哨</button></div></div>
+                    <div className='py-4 flex items-center gap-3'><span className='text-xs font-semibold w-16'>水深</span><div className='min-w-0 flex-1 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button onClick={() => setColor('light')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.color === 'light' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Sun size={14} />浅海</button><button onClick={() => setColor('dark')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.color === 'dark' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Moon size={14} />深海</button></div></div>
+                    <div className='py-4 border-t border-slate-200 flex items-center gap-3'><span className='text-xs font-semibold w-16'>水光</span><div className='min-w-0 flex-1 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button onClick={() => setDecor('plain')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.decor === 'plain' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><SquaresFour size={14} />静水</button><button onClick={() => setDecor('cinema')} className={`py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 ${appearance.decor === 'cinema' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500'}`}><Sparkle size={14} />浮光</button></div></div>
                 </div>
             </div>
         </div>, document.body)}

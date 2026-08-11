@@ -9,7 +9,6 @@ import {
   ModelRequestError,
   type ModelMessage,
 } from './modelClient.js';
-import { registerModelProfileRoutes } from './modelProfiles.js';
 import { buildAgentContextMessages } from './contextBuilder.js';
 import {
   appendRuntimeInstruction,
@@ -67,7 +66,6 @@ function completionFromStoredEvent(event: ExistingAssistantRow): Record<string, 
 
 export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/model/status', async () => ({ data: await getModelStatus() }));
-  await registerModelProfileRoutes(app);
 
   app.post('/v1/chat/turn', async (request, reply) => {
     const input = chatTurnSchema.parse(request.body);

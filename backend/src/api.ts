@@ -11,6 +11,7 @@ import { processDueHeartbeats } from './heartbeat.js';
 import { registerMemoryPalaceRoutes } from './memoryPalaceSync.js';
 import { registerDiaryRoutes } from './diaries.js';
 import { ModelConfigurationError, ModelRequestError } from './modelClient.js';
+import { registerModelProfileRoutes } from './modelProfiles.js';
 import { registerPushRoutes } from './push.js';
 import { registerPairingRoutes } from './pairing.js';
 import { registerPhonePeekRoutes } from './phonePeek.js';
@@ -173,6 +174,7 @@ app.post('/v1/heartbeats/run', async (request) => {
 
 await registerContextRoutes(app);
 await registerChatRoutes(app);
+await registerModelProfileRoutes(app);
 await registerMemoryPalaceRoutes(app);
 await registerAgentSettingsRoutes(app);
 await registerDiaryRoutes(app);

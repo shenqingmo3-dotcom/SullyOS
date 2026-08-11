@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CharacterProfile, Message, Task, UserProfile } from '../types';
-import { formatChatHistoryForSchedule, formatUserScheduleForDate } from './scheduleGenerator';
+import { formatChatHistoryForSchedule, formatUserScheduleForDate, resolveScheduleApiConfig } from './scheduleGenerator';
 
 const char = {
     id: 'char-1',
@@ -119,5 +119,24 @@ describe('用户日历约束', () => {
         expect(block).toContain('十二点一起吃饭');
         expect(block).not.toContain('取消的课');
         expect(block).toContain('只调整受影响时段');
+    });
+});
+
+describe('日程副 API 路由', () => {
+    const primary = { baseUrl: 'https://primary.example/v1', apiKey: 'primary', model: 'main' };
+
+    it('优先使用角色的情绪/日程副 API', () => {
+        const withSecondary = {
+            ...char,
+            emotionConfig: {
+                enabled: true,
+                api: { baseUrl: 'https://secondary.example/v1', apiKey: 'secondary', model: 'scheduler' },
+            },
+        } as CharacterProfile;
+        expect(resolveScheduleApiConfig(withSecondary, primary)).toEqual(withSecondary.emotionConfig?.api);
+    });
+
+    it('副 API 未配置完整时回落主 API', () => {
+        expect(resolveScheduleApiConfig(char, primary)).toBe(primary);
     });
 });

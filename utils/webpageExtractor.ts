@@ -64,6 +64,10 @@ export interface ExtractedWebpage {
   fetchedAt: number;
   /** 视频平台分享时的附加信息（走 videoParser 解析路径才有）。 */
   video?: VideoShareInfo;
+  /** 平台专用卡片提示。X 分享即使抓不到登录墙后的正文，也能先落一张基础卡。 */
+  platform?: 'x';
+  author?: string;
+  likes?: number;
 }
 
 /** 卡片 metadata 里正文的存储上限：太长既占 IndexedDB 也没必要全留。 */
@@ -87,6 +91,57 @@ export function detectFirstUrl(text: string): string | null {
   if (!m) return null;
   // 去掉尾部可能误吞的英文标点
   return m[0].replace(/[.,;:!?'")\]]+$/, '');
+}
+
+const X_STATUS_PATH_RE = /^\/([^/]+)\/status\/(\d+)(?:[/?#]|$)/i;
+
+/** 只接受 x.com / twitter.com 的具体帖子链接，避免相似恶意域名与主页链接误触发。 */
+export function parseXStatusUrl(url: string): { url: string; author: string; statusId: string } | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    if (host !== 'x.com' && host !== 'twitter.com') return null;
+    const match = parsed.pathname.match(X_STATUS_PATH_RE);
+    if (!match) return null;
+    return {
+      url: parsed.toString(),
+      author: `@${decodeURIComponent(match[1])}`,
+      statusId: match[2],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从手机或桌面的 X 分享文案生成不依赖抓取服务的基础卡片。
+ * X 常返回登录墙，所以正文抓取只能是增强，不能成为“是否有卡片”的前置条件。
+ */
+export function createXShareCard(text: string, url: string): ExtractedWebpage | null {
+  const parsed = parseXStatusUrl(url);
+  if (!parsed) return null;
+  const sharedText = text
+    .replace(url, ' ')
+    .replace(/https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s，。！？；、"'《》()（）【】]+/ig, ' ')
+    .replace(/(?:在\s*)?[Xx](?:\s*上)?(?:查看|阅读|打开)(?:这条)?(?:帖子|推文)?/g, ' ')
+    .replace(/(?:来自|from)\s+X\b/ig, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const fallbackTitle = `${parsed.author} 的 X 帖子`;
+  const excerpt = sharedText.slice(0, 1_500);
+  return {
+    url: parsed.url,
+    finalUrl: parsed.url,
+    title: excerpt.slice(0, 100) || fallbackTitle,
+    siteName: 'X',
+    content: excerpt,
+    excerpt,
+    truncated: sharedText.length > 1_500,
+    fetchedAt: Date.now(),
+    platform: 'x',
+    author: parsed.author,
+    likes: 0,
+  };
 }
 
 const XHS_NOTE_PATH_RE = /^\/(?:discovery\/item|explore|item)\/([a-f0-9]{24})(?:[/?#]|$)/i;

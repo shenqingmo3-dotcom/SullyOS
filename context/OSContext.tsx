@@ -74,7 +74,7 @@ import { exportMcpLocal } from '../utils/mcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { startBackendEventRuntime } from '../utils/backendEventRuntime';
-import { deleteBackendCharacter, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { deleteBackendCharacter, flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
 import { startCinemaAgentRuntime } from '../utils/cinemaAgentRuntime';
 
 interface ProactiveQueueEntry {
@@ -882,6 +882,33 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!isDataLoaded) return;
       return startCinemaAgentRuntime({ characters, user: userProfile, groups, apiConfig, realtimeConfig });
   }, [isDataLoaded, characters, userProfile, groups, apiConfig, realtimeConfig]);
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      let stopped = false;
+      let flushing = false;
+      const flush = async () => {
+          if (stopped || flushing) return;
+          const config = loadBackendChatConfig();
+          if (!config.enabled) return;
+          flushing = true;
+          try {
+              for (const character of characters) {
+                  if (stopped) break;
+                  await flushBackendMemorySyncQueue({ config, character, user: userProfile });
+              }
+          } catch (error) {
+              console.debug('[BackendSyncQueue] background flush deferred', error);
+          } finally {
+              flushing = false;
+          }
+      };
+      void flush();
+      const timer = window.setInterval(() => void flush(), 30_000);
+      return () => {
+          stopped = true;
+          window.clearInterval(timer);
+      };
+  }, [isDataLoaded, characters, userProfile]);
   const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
     try { const s = localStorage.getItem('os_memory_palace_config'); return s ? { ...defaultMemoryPalaceConfig, ...JSON.parse(s) } : defaultMemoryPalaceConfig; } catch { return defaultMemoryPalaceConfig; }
   });
@@ -3749,6 +3776,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
               'room_plates', 'digest_reports',
               'daily_schedule', 'memory_batches',
+              'together_items', 'together_sessions', 'backend_sync_queue', 'backend_events',
               'pixel_home_assets', 'pixel_home_layouts',
               // 「彼方」虚拟世界各房间 store —— 早期导出清单漏了，导致备份不含房间数据
               // 剧院的 vr_scripts(投稿剧本) / vr_plays(角色演过的话剧) / vr_presets(写作风格预设)
@@ -4261,6 +4289,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'story_theaters': backupData.storyTheaters = processedData; break;
                   case 'story_theater_presets': backupData.storyTheaterPresets = processedData; break;
                   case 'story_theater_masks': backupData.storyTheaterMasks = processedData; break;
+                  case 'together_items': backupData.togetherItems = processedData; break;
+                  case 'together_sessions': backupData.togetherSessions = processedData; break;
+                  case 'backend_sync_queue': backupData.backendSyncQueue = processedData; break;
+                  case 'backend_events': backupData.backendEvents = processedData; break;
                   case 'novels': backupData.novels = processedData; break;
                   case 'songs': backupData.songs = processedData; break;
                   case 'bank_transactions': backupData.bankTransactions = processedData; break;

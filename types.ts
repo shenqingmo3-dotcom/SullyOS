@@ -701,6 +701,8 @@ export interface ScheduleSlot {
     location?: string;    // "河边"
     innerThought?: string; // 该时段的内心独白，生成时由AI写好，运行时直接注入
     theater?: SlotTheater; // 该时段的小剧场（窥视演出），按需生成并缓存
+    /** 本次刷新因近期对话或现实安排而发生变化；供共同日历明确标记。 */
+    adjusted?: boolean;
 }
 
 export interface DailySchedule {
@@ -716,6 +718,8 @@ export interface DailySchedule {
      * 注入时根据当前时间找到最近的 key，直接使用整段文本，不做拼接。
      */
     flowNarrative?: Record<string, string>;
+    /** 在已有日程基础上重新调度的时间；首次生成不填写。 */
+    adjustedAt?: number;
 }
 
 export interface UserScheduleEntry {
@@ -3469,6 +3473,9 @@ export type GameTheme = 'fantasy' | 'cyber' | 'horror' | 'modern';
 export interface GameActionOption {
     label: string;
     type: 'neutral' | 'chaotic' | 'evil';
+    skill?: string;
+    difficulty?: CoCDifficulty;
+    investigatorId?: string;
 }
 
 export interface GameLog {
@@ -3482,9 +3489,97 @@ export interface GameLog {
         max: number;
         check?: string;
         success?: boolean;
+        target?: number;
+        difficulty?: 'regular' | 'hard' | 'extreme';
+        successLevel?: 'critical' | 'extreme' | 'hard' | 'regular' | 'special' | 'failure' | 'fumble';
+        modifier?: -2 | -1 | 0 | 1 | 2;
+        pushed?: boolean;
     };
     // 自动总结后，被归档折叠的日志会标记为 archived（不删除，UI 灰显折叠）
     archived?: boolean;
+}
+
+export type CoCEdition = '6e' | '7e';
+export type CoCDifficulty = 'regular' | 'hard' | 'extreme';
+export type CoCSuccessLevel = 'critical' | 'extreme' | 'hard' | 'regular' | 'special' | 'failure' | 'fumble';
+
+export interface CoCInvestigatorSheet {
+    id: string;
+    ownerId: 'user' | string;
+    name: string;
+    occupation: string;
+    age?: number;
+    era?: string;
+    characteristics: Record<'STR' | 'CON' | 'SIZ' | 'DEX' | 'APP' | 'INT' | 'POW' | 'EDU', number>;
+    hp: number;
+    maxHp: number;
+    mp: number;
+    maxMp: number;
+    san: number;
+    luck: number;
+    skills: Record<string, number>;
+    inventory: string[];
+    backstory?: string;
+}
+
+export interface CoCModuleClue {
+    id: string;
+    name: string;
+    location: string;
+    revelation: string;
+    required: boolean;
+    fallback: string;
+}
+
+export interface CoCModuleCheck {
+    id: string;
+    scene: string;
+    skill: string;
+    difficulty: CoCDifficulty;
+    purpose: string;
+    success: string;
+    failure: string;
+    clueIds: string[];
+}
+
+export interface CoCModuleAnalysis {
+    title: string;
+    keeperSummary: string;
+    openingHook: string;
+    acts: Array<{ name: string; purpose: string; scenes: string[] }>;
+    clues: CoCModuleClue[];
+    checks: CoCModuleCheck[];
+    npcs: Array<{ name: string; role: string; motive: string; secret: string }>;
+    endings: string[];
+    safetyNotes: string[];
+}
+
+export interface CoCModuleSource {
+    fileName: string;
+    mimeType: string;
+    text: string;
+    analysis?: CoCModuleAnalysis;
+    analyzedAt?: number;
+}
+
+export interface CoCAftertalkMessage {
+    id: string;
+    role: 'user' | 'character';
+    speakerId?: string;
+    speakerName: string;
+    content: string;
+    timestamp: number;
+}
+
+export interface CoCPendingCheck {
+    id: string;
+    investigatorId: string;
+    skill: string;
+    difficulty: CoCDifficulty;
+    modifier: -2 | -1 | 0 | 1 | 2;
+    reason: string;
+    failureConsequence: string;
+    clueIds: string[];
 }
 
 // 自动总结产出的「前情提要」存档，像写小说一样记录起因经过结果与人物关系变化
@@ -3514,7 +3609,14 @@ export interface GameSession {
     diceDisabled?: boolean;      // 关闭骰子：行动不再自动骰 D20，默认直接成功
     // 归档模式：'auto' 满20条自动总结并送进角色 chatapp；'manual' 自动总结但不送，仅手动归档时送。
     // 旧存档无此字段，按 'manual' 处理（不污染旧角色的聊天上下文）。
-    archiveMode?: 'auto' | 'manual';
+    archiveMode?: 'auto' | 'manual' | 'none';
+    cocEdition?: CoCEdition;
+    investigators?: CoCInvestigatorSheet[];
+    moduleSource?: CoCModuleSource;
+    currentCheckId?: string;
+    discoveredClueIds?: string[];
+    aftertalk?: CoCAftertalkMessage[];
+    pendingCheck?: CoCPendingCheck;
     suggestedActions?: GameActionOption[];
     summaries?: GameSummary[];   // 自动总结归档的前情提要
     createdAt: number;
@@ -3637,6 +3739,8 @@ export interface FullBackupData {
     novels?: NovelBook[];
     togetherItems?: TogetherLibraryItem[];
     togetherSessions?: TogetherSession[];
+    backendSyncQueue?: Array<Record<string, unknown>>;
+    backendEvents?: BackendConversationEventRecord[];
     vrNovels?: VRWorldNovel[];          // 虚拟世界「彼方」全局小说库
     vrAnnotations?: VRNovelAnnotation[]; // 虚拟世界小说批注
     customCreatorParts?: CustomCreatorPart[]; // 捏脸系统自定义部件

@@ -8,7 +8,7 @@ import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
 import ChatFineTunePanel from '../components/chat/ChatFineTunePanel';
 import { FadersHorizontal } from '@phosphor-icons/react';
-import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
+import { generateDailyScheduleForChar, isScheduleFeatureOn, resolveScheduleApiConfig } from '../utils/scheduleGenerator';
 import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../utils/timezone';
@@ -17,7 +17,7 @@ import TheaterPlayer from '../components/schedule/TheaterPlayer';
 import { formatMessageWithTime, normalizeMessageContent } from '../utils/messageFormat';
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '../utils/xhsMcpClient';
-import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
+import { createXShareCard, extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
@@ -68,7 +68,6 @@ import {
     type ContextRangeMode,
 } from '../utils/chatContextRange';
 import { flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
-import { enqueueBackendChatMessageDeletes } from '../utils/backendSyncQueue';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 /** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
@@ -247,19 +246,23 @@ const Chat: React.FC = () => {
     charRef.current = char; // Keep ref in sync for async callbacks
     const deleteMessagesEverywhere = useCallback(async (targets: Message[]): Promise<boolean> => {
         if (!char || targets.length === 0) return false;
-        await enqueueBackendChatMessageDeletes(char.id, targets);
+        // DB.deleteMessages 会在同一个 IndexedDB transaction 里写入后端 tombstone；
+        // 这样离线或 VPS 临时不可用时，本地删除也能立即完成，队列随后自动补偿。
+        await DB.deleteMessages(targets.map(message => message.id));
         const backendConfig = loadBackendChatConfig();
-        let backendSynced = false;
         if (backendConfig.enabled) {
+          try {
             await flushBackendMemorySyncQueue({
                 config: backendConfig,
                 character: char,
                 user: userProfile,
             });
-            backendSynced = true;
+            return true;
+          } catch (error) {
+            console.warn('[Chat] backend deletion deferred:', error);
+          }
         }
-        await DB.deleteMessages(targets.map(message => message.id));
-        return backendSynced;
+        return false;
     }, [char, userProfile]);
     const historyContextRange = useMemo(() => {
         if (!char) return undefined;
@@ -929,11 +932,13 @@ const Chat: React.FC = () => {
     // Auto-generate daily schedule (fire-and-forget on chat load)
     // 总开关关闭时完全跳过：不查询 DB、不调用副 API、不跑兜底
     useEffect(() => {
-        if (!char || !apiConfig.apiKey) return;
+        if (!char) return;
         if (!isScheduleFeatureOn(char)) {
             setScheduleData(null);
             return;
         }
+        const scheduleApi = resolveScheduleApiConfig(char, apiConfig);
+        if (!scheduleApi.baseUrl.trim() || !scheduleApi.model.trim()) return;
         getDailyScheduleForChar(char).then(existing => {
             if (!existing) {
                 // Generate in background, don't block chat
@@ -1242,8 +1247,10 @@ const Chat: React.FC = () => {
             // 优先走 apizero 视频解析拿标题/作者/封面/热度；失败降级回通用网页抓取。
             const sharedUrl = detectFirstUrl(text);
             if (sharedUrl && !isXhsUrl(sharedUrl) && !(xhsFullNoteId || xhsShortUrl)) {
-                let webpage: ExtractedWebpage | null = null;
-                if (isVideoShareUrl(sharedUrl)) {
+                // X 页面经常只返回登录墙。和小红书一样，先从分享文案与 status URL
+                // 生成平台卡片，不把远端正文抓取当作成功前提。
+                let webpage: ExtractedWebpage | null = createXShareCard(text, sharedUrl);
+                if (!webpage && isVideoShareUrl(sharedUrl)) {
                     try {
                         addToast('正在解析视频链接…', 'info');
                         webpage = await parseVideoShareUrl(sharedUrl);
@@ -1852,9 +1859,15 @@ const Chat: React.FC = () => {
         if (!targetChar || isScheduleGenerating) return;
         setIsScheduleGenerating(true);
         try {
-            const result = await generateDailyScheduleForChar(targetChar, userProfile, apiConfig, forceRegenerate);
+            const result = await generateDailyScheduleForChar(
+                targetChar,
+                userProfile,
+                resolveScheduleApiConfig(targetChar, apiConfig),
+                forceRegenerate,
+            );
             if (result) {
                 setScheduleData(result);
+                syncScheduleSnapshot(targetChar);
                 // 跨天后台重新生成也要刷云端：不刷的话角色到点照着昨天的作息表说话
                 markAmsgStateDirty({ char: targetChar, userProfile, groups, realtimeConfig });
             }
@@ -1876,8 +1889,16 @@ const Chat: React.FC = () => {
         if (!isScheduleFeatureOn(updatedChar)) return;
         setIsScheduleGenerating(true);
         try {
-            const result = await generateDailyScheduleForChar(updatedChar, userProfile, apiConfig, true);
-            if (result) setScheduleData(result);
+            const result = await generateDailyScheduleForChar(
+                updatedChar,
+                userProfile,
+                resolveScheduleApiConfig(updatedChar, apiConfig),
+                true,
+            );
+            if (result) {
+                setScheduleData(result);
+                syncScheduleSnapshot(updatedChar);
+            }
         } catch (e) {
             console.error('[Schedule] Regeneration after style change failed:', e);
         } finally {

@@ -5,7 +5,7 @@ import { CAPABILITY_REGISTRY } from './capabilities.js';
 import { pool } from './db.js';
 import { decryptSecret, encryptSecret } from './modelVault.js';
 
-export type ToolConnectionId = 'x.read' | 'xhs.read' | 'mcp.read' | 'phone.read';
+export type ToolConnectionId = 'x.read' | 'xhs.read' | 'web.read' | 'mcp.read' | 'phone.read';
 
 export interface ToolConnection {
   id: ToolConnectionId;
@@ -19,7 +19,7 @@ export interface ToolConnection {
   lastHealthAt: Date | null;
 }
 
-const connectionIdSchema = z.enum(['x.read', 'xhs.read', 'mcp.read', 'phone.read']);
+const connectionIdSchema = z.enum(['x.read', 'xhs.read', 'web.read', 'mcp.read', 'phone.read']);
 const patchSchema = z.object({
   label: z.string().max(100).default(''),
   enabled: z.boolean(),

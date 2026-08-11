@@ -66,7 +66,7 @@ function diarySceneCards(event: BackendConversationEventRecord): StickerData[] {
         }));
 }
 
-function platformShareMessage(
+export function buildPlatformShareMessage(
     event: BackendConversationEventRecord,
 ): (Omit<Message, 'id' | 'timestamp'> & { timestamp?: number }) | undefined {
     const share = event.metadata?.share;
@@ -259,7 +259,7 @@ async function persistEvent(
     let activityCard = isActivityCard
         ? buildActivityCardPayload(event, event.charName || character.name)
         : null;
-    const sharedLinkCard = isPlatformShare ? platformShareMessage(event) : undefined;
+    const sharedLinkCard = isPlatformShare ? buildPlatformShareMessage(event) : undefined;
     const imagePath = metadataString(event, 'imagePath');
     const phoneScreenshotMessage = isPhoneScreenshot ? {
         charId: event.charId,

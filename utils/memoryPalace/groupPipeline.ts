@@ -19,7 +19,7 @@ import type { Message, CharacterProfile, GroupProfile } from '../../types';
 import type { EmbeddingConfig, MemoryNode, RemoteVectorConfig, MemoryVector } from './types';
 import type { LightLLMConfig } from './pipeline';
 import { DB } from '../db';
-import { MemoryNodeDB, MemoryVectorDB, ensureFloat32 } from './db';
+import { MemoryLinkDB, MemoryNodeDB, MemoryVectorDB, ensureFloat32 } from './db';
 import { getEmbeddings, cosineSimilarity } from './embedding';
 import { extractGroupMemoriesFromBuffer } from './groupExtraction';
 import { isMessageSemanticallyRelevant } from '../messageFormat';
@@ -109,7 +109,7 @@ const processingLocks = new Set<string>();
 /**
  * 删除某个群的所有群记忆（成员各自存的副本一并清掉）
  *
- * 群被删除时调用：扫描全表，删除 groupId 匹配的 MemoryNode + 对应 MemoryVector。
+ * 群被删除时调用：扫描全表，删除 groupId 匹配的 MemoryNode、对应关系链接与 MemoryVector。
  * 全表扫不快但删群是低频操作，可接受。
  */
 export async function deleteGroupMemoriesByGroupId(groupId: string): Promise<{ deleted: number }> {
@@ -129,6 +129,10 @@ export async function deleteGroupMemoriesByGroupId(groupId: string): Promise<{ d
         if (targets.length === 0) return { deleted: 0 };
         for (const node of targets) {
             try {
+                // 链接必须先删：MemoryLinkDB.delete 需要从尚存的 source 节点读取 charId，
+                // 才能把删除同步到独立后端。先删节点会留下本地孤儿链接，也会漏掉后端删除队列。
+                const links = await MemoryLinkDB.getByNodeId(node.id);
+                for (const link of links) await MemoryLinkDB.delete(link.id);
                 await MemoryNodeDB.delete(node.id);
                 // 对应向量也删掉
                 await MemoryVectorDB.delete(node.id);

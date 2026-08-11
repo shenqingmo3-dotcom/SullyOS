@@ -6,9 +6,10 @@ const read = (relativePath: string) => readFileSync(new URL(relativePath, import
 describe('SharkOS backend autonomy settings wiring', () => {
     it('keeps every second-edition backend tool visible', () => {
         const source = read('../components/settings/BackendToolSettings.tsx');
-        expect(source).toContain("['x.read', 'xhs.read', 'mcp.read', 'phone.read']");
+        expect(source).toContain("['x.read', 'xhs.read', 'web.read', 'mcp.read', 'phone.read']");
         expect(source).toContain('导入前端已保存的小红书 Lite 配置');
         expect(source).toContain('导入前端已启用的 MCP 服务器');
+        expect(source).toContain('导入浏览器 App 的 Brave Search 配置');
     });
 
     it('does not hide heartbeat and tool settings before pairing', () => {

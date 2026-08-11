@@ -13,10 +13,21 @@ import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
 
 export { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
 
-interface ApiConfig {
+export interface ScheduleApiConfig {
     baseUrl: string;
     apiKey: string;
     model: string;
+}
+
+/** 日程属于情绪/意识流副 API 的职责；未配置时才回落主 API。 */
+export function resolveScheduleApiConfig(
+    char: CharacterProfile,
+    primary: ScheduleApiConfig,
+): ScheduleApiConfig {
+    const secondary = char.emotionConfig?.api;
+    return secondary?.baseUrl?.trim() && secondary.model?.trim()
+        ? secondary
+        : primary;
 }
 
 /**
@@ -258,7 +269,7 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
 export async function generateDailyScheduleForChar(
     char: CharacterProfile,
     userProfile: UserProfile,
-    apiConfig: ApiConfig,
+    apiConfig: ScheduleApiConfig,
     forceRegenerate: boolean = false
 ): Promise<DailySchedule | null> {
     // 总开关关闭时直接短路，避免副 API / 兜底调用
@@ -351,14 +362,25 @@ export async function generateDailyScheduleForChar(
             console.error('[Schedule] Generation failed: 无法从模型输出解析出JSON:', content.slice(0, 200));
             return null;
         }
-        const slots: ScheduleSlot[] = (parsed.slots || []).map((s: any) => ({
-            startTime: s.startTime || '00:00',
-            activity: s.activity || '',
-            description: s.description,
-            emoji: s.emoji,
-            location: s.location,
-            innerThought: s.innerThought,
-        })).filter((s: ScheduleSlot) => s.activity);
+        const slots: ScheduleSlot[] = (parsed.slots || []).map((s: any, index: number) => {
+            const normalized: ScheduleSlot = {
+                startTime: s.startTime || '00:00',
+                activity: s.activity || '',
+                description: s.description,
+                emoji: s.emoji,
+                location: s.location,
+                innerThought: s.innerThought,
+            };
+            const previous = existing?.slots.find(slot => slot.startTime === normalized.startTime)
+                || existing?.slots[index];
+            if (forceRegenerate && previous && (
+                previous.startTime !== normalized.startTime
+                || previous.activity !== normalized.activity
+                || previous.location !== normalized.location
+                || previous.description !== normalized.description
+            )) normalized.adjusted = true;
+            return normalized;
+        }).filter((s: ScheduleSlot) => s.activity);
 
         if (slots.length === 0) return null;
 
@@ -377,14 +399,16 @@ export async function generateDailyScheduleForChar(
             if (Object.keys(flowNarrative).length === 0) flowNarrative = undefined;
         }
 
+        const generatedAt = Date.now();
         const schedule: DailySchedule = {
             id: `${char.id}_${today}`,
             charId: char.id,
             date: today,
             slots,
-            generatedAt: Date.now(),
+            generatedAt,
             coverImage,
             flowNarrative,
+            ...(forceRegenerate && existing ? { adjustedAt: generatedAt } : {}),
         };
 
         await DB.saveDailySchedule(schedule);
@@ -405,7 +429,7 @@ export async function evolveFlowNarrative(
     schedule: DailySchedule,
     recentMessages: Message[],
     currentNarrative: string,
-    apiConfig: ApiConfig,
+    apiConfig: ScheduleApiConfig,
 ): Promise<string | null> {
     // 总开关关闭时直接短路
     if (!isScheduleFeatureOn(char)) return null;

@@ -15,11 +15,12 @@ import { loadMcpServers } from '../../utils/mcpClient';
 const TOOL_META: Record<BackendToolConnectionId, { name: string; hint: string; defaultMode: string }> = {
   'x.read': { name: '黑 X', hint: '持久登录 Chrome；浏览、分享与平台内动作统一配置', defaultMode: 'mcp' },
   'xhs.read': { name: '小红书', hint: '现有 Cookie/MCP 服务的 HTTP 地址', defaultMode: 'mcp' },
+  'web.read': { name: '网页探索', hint: 'Brave Search 搜索结果可由角色阅读并分享', defaultMode: 'brave' },
   'mcp.read': { name: '通用 MCP', hint: '支持 Streamable HTTP 的 MCP 地址', defaultMode: 'mcp' },
   'phone.read': { name: 'iPhone 屏幕查看', hint: '邮件触发快捷指令；每次请求十分钟内有效', defaultMode: 'phone' },
 };
 
-const TOOL_IDS: BackendToolConnectionId[] = ['x.read', 'xhs.read', 'mcp.read', 'phone.read'];
+const TOOL_IDS: BackendToolConnectionId[] = ['x.read', 'xhs.read', 'web.read', 'mcp.read', 'phone.read'];
 
 const EMPTY_CONNECTIONS = TOOL_IDS.map((id): BackendToolConnection => ({
   id, label: TOOL_META[id].name, enabled: false, endpoint: '', settings: { mode: TOOL_META[id].defaultMode },
@@ -148,6 +149,22 @@ const BackendToolSettings: React.FC<{
     onStatus(`✅ 已读取前端 ${servers.length} 个 MCP 服务器；点击“保存”后才会加密同步到 VPS`);
   };
 
+  const importLocalWebSearch = () => {
+    const apiKey = localStorage.getItem('browser_brave_key') || '';
+    if (!apiKey.trim()) {
+      onStatus('❌ 浏览器 App 里还没有保存 Brave Search API Key');
+      return;
+    }
+    patchConnection('web.read', {
+      enabled: true,
+      endpoint: 'https://api.search.brave.com/res/v1/web/search',
+      settings: { ...(byId.get('web.read')?.settings || {}), mode: 'brave' },
+    });
+    setSecrets(current => ({ ...current, 'web.read:token': apiKey.trim() }));
+    setExpanded('web.read');
+    onStatus('✅ 已读取浏览器 App 的 Brave Search Key；点击“保存”后才会加密同步到 VPS');
+  };
+
   const save = async (id: BackendToolConnectionId) => {
     const connection = byId.get(id);
     if (!connection) return;
@@ -208,7 +225,7 @@ const BackendToolSettings: React.FC<{
         <p className="text-xs font-bold text-slate-600">自主工具连接</p>
         <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">黑 X、手机截图可直接配置；小红书与通用 MCP 可从前端原设置导入，再加密同步给 VPS 自主活动。</p>
       </div>
-      {!canConnect && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] leading-relaxed text-amber-700">四项能力都还在。请先在上方完成后端配对；配对后即可保存、测试并交给角色 heartbeat 使用。</p>}
+      {!canConnect && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] leading-relaxed text-amber-700">五项能力都还在。请先在上方完成后端配对；配对后即可保存、测试并交给角色 heartbeat 使用。</p>}
       {connections.map((connection) => {
         const meta = TOOL_META[connection.id];
         const isPhone = connection.id === 'phone.read';
@@ -261,6 +278,10 @@ const BackendToolSettings: React.FC<{
                 {connection.id === 'mcp.read' && <button type="button" onClick={importLocalMcp}
                   className="w-full rounded-lg border border-cyan-200 bg-cyan-50 py-2 text-[10px] font-bold text-cyan-700">
                   导入前端已启用的 MCP 服务器
+                </button>}
+                {connection.id === 'web.read' && <button type="button" onClick={importLocalWebSearch}
+                  className="w-full rounded-lg border border-sky-200 bg-sky-50 py-2 text-[10px] font-bold text-sky-700">
+                  导入浏览器 App 的 Brave Search 配置
                 </button>}
                 {connection.id === 'xhs.read' && <select value={String(connection.settings.mode || 'mcp')}
                   onChange={(event) => patchSetting(connection.id, 'mode', event.target.value)}

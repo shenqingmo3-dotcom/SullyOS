@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, parseWebpageHtml, extractWebpageContent } from './webpageExtractor';
+import { createXShareCard, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, parseWebpageHtml, extractWebpageContent, parseXStatusUrl } from './webpageExtractor';
 
 describe('detectFirstUrl', () => {
   it('从一句话里揪出 http(s) 链接', () => {
@@ -19,6 +19,36 @@ describe('detectFirstUrl', () => {
     expect(detectFirstUrl('就是普通聊天没有网址')).toBeNull();
     expect(detectFirstUrl('')).toBeNull();
     expect(detectFirstUrl('ftp://nope.com')).toBeNull();
+  });
+});
+
+describe('X share cards', () => {
+  it('把 x.com 与旧 twitter.com 的具体帖子链接识别成同一种卡片来源', () => {
+    expect(parseXStatusUrl('https://x.com/shark/status/1234567890?s=20')).toMatchObject({
+      author: '@shark',
+      statusId: '1234567890',
+    });
+    expect(parseXStatusUrl('https://twitter.com/fox/status/9988')).toMatchObject({
+      author: '@fox',
+      statusId: '9988',
+    });
+  });
+
+  it('即使没有网页抓取结果，也从分享文案生成可读的 X 卡片', () => {
+    const url = 'https://x.com/shark/status/1234567890';
+    expect(createXShareCard(`今天看到的海很蓝 ${url} 在 X 上查看这条帖子`, url)).toMatchObject({
+      platform: 'x',
+      siteName: 'X',
+      author: '@shark',
+      title: '今天看到的海很蓝',
+      excerpt: '今天看到的海很蓝',
+    });
+  });
+
+  it('不接受主页、普通网页或相似恶意域名', () => {
+    expect(parseXStatusUrl('https://x.com/shark')).toBeNull();
+    expect(parseXStatusUrl('https://x.com.example.com/shark/status/123')).toBeNull();
+    expect(createXShareCard('看看这个', 'https://example.com/status/123')).toBeNull();
   });
 });
 

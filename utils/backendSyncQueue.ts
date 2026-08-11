@@ -90,14 +90,22 @@ export async function getBackendMemoryChanges(charId: string, limit = 2_000): Pr
     });
 }
 
-export async function acknowledgeBackendMemoryChanges(keys: string[]): Promise<void> {
-    if (keys.length === 0) return;
+export async function acknowledgeBackendMemoryChanges(
+    acknowledged: Array<Pick<BackendMemoryChange, 'key' | 'updatedAt'>>,
+): Promise<void> {
+    if (acknowledged.length === 0) return;
     const db = await openDB();
     if (!db.objectStoreNames.contains(STORE)) return;
     await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE, 'readwrite');
         const store = tx.objectStore(STORE);
-        for (const key of keys) store.delete(key);
+        for (const item of acknowledged) {
+            const request = store.get(item.key);
+            request.onsuccess = () => {
+                const current = request.result as BackendMemoryChange | undefined;
+                if (current && current.updatedAt <= item.updatedAt) store.delete(item.key);
+            };
+        }
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error);

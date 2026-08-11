@@ -409,6 +409,7 @@ const GroupChat: React.FC = () => {
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
     const [activeEmojiCategory, setActiveEmojiCategory] = useState('default');
     const [modalType, setModalType] = useState<'none' | 'create' | 'settings' | 'transfer' | 'member_select' | 'message-options' | 'edit-message' | 'packet-detail' | 'chrome-css' | 'chrome-sound' | 'html-prompt' | 'help'>('none');
+    const [deleteGroupTargetId, setDeleteGroupTargetId] = useState<string | null>(null);
     const [tempHtmlPrompt, setTempHtmlPrompt] = useState('');
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
@@ -719,28 +720,33 @@ const GroupChat: React.FC = () => {
         setSelectedMembers(next);
     };
 
-    const handleDeleteGroup = async (id: string) => {
-        // 清理旧版本可能留下的群记忆副本，以及公共话题盒投递到成员私聊的卡片。
-        try {
-            const result = await deleteGroupMemoriesByGroupId(id);
-            if (result.deleted > 0) {
-                console.log(`🗑️ [GroupChat] 解散群同时清理群记忆 ${result.deleted} 条`);
+    const handleDeleteGroup = async (id: string, deleteSharedMemories: boolean) => {
+        // 默认只解散群聊，保留群聊形成的共同记忆。只有用户在二次选择中明确要求时，
+        // 才清理群记忆节点、向量、关系链接和投递到成员私聊的公共话题卡。
+        if (deleteSharedMemories) {
+            try {
+                const result = await deleteGroupMemoriesByGroupId(id);
+                if (result.deleted > 0) {
+                    console.log(`🗑️ [GroupChat] 解散群同时清理群记忆 ${result.deleted} 条`);
+                }
+            } catch (err) {
+                console.warn('🗑️ [GroupChat] 清理群记忆失败（不影响解散）:', err);
             }
-        } catch (err) {
-            console.warn('🗑️ [GroupChat] 清理群记忆失败（不影响解散）:', err);
-        }
-        const targetGroup = groups.find(g => g.id === id);
-        if (targetGroup) {
-            // 扫全部角色而非只扫当前成员：已经退群的人也可能留有早期成盒卡片。
-            await Promise.all(characters.map(async ({ id: memberId }) => {
-                const msgs = await DB.getMessagesByCharId(memberId, true);
-                const ids = msgs.filter(m => m.type === 'group_topic_card' && m.metadata?.groupTopicBox?.groupId === id).map(m => m.id);
-                if (ids.length) await DB.deleteMessages(ids);
-            }));
+            const targetGroup = groups.find(g => g.id === id);
+            if (targetGroup) {
+                // 扫全部角色而非只扫当前成员：已经退群的人也可能留有早期成盒卡片。
+                await Promise.all(characters.map(async ({ id: memberId }) => {
+                    const msgs = await DB.getMessagesByCharId(memberId, true);
+                    const ids = msgs.filter(m => m.type === 'group_topic_card' && m.metadata?.groupTopicBox?.groupId === id).map(m => m.id);
+                    if (ids.length) await DB.deleteMessages(ids);
+                }));
+            }
         }
         await deleteGroup(id);
         if (activeGroup?.id === id) setView('list');
-        addToast('群聊已解散', 'success');
+        setDeleteGroupTargetId(null);
+        setModalType('none');
+        addToast(deleteSharedMemories ? '群聊与共同记忆已删除' : '群聊已解散，共同记忆已保留', 'success');
     };
 
     const handleClearHistory = async () => {
@@ -1968,9 +1974,30 @@ ${memberTimeline || '(暂无互动记录)'}
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
                                 清空聊天
                             </button>
-                            <button onClick={() => { if(activeGroup) handleDeleteGroup(activeGroup.id); }} className="flex-1 py-3 text-white bg-red-500 hover:bg-red-600 rounded-2xl text-xs font-bold transition-colors shadow-lg shadow-red-200">解散群聊</button>
+                            <button onClick={() => { if(activeGroup) setDeleteGroupTargetId(activeGroup.id); }} className="flex-1 py-3 text-white bg-red-500 hover:bg-red-600 rounded-2xl text-xs font-bold transition-colors shadow-lg shadow-red-200">解散群聊</button>
                         </div>
                     </div>
+                </div>
+            </Modal>
+
+            <Modal isOpen={!!deleteGroupTargetId} title="解散群聊" onClose={() => setDeleteGroupTargetId(null)}>
+                <div className="space-y-3">
+                    <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-4 text-xs leading-relaxed text-emerald-800">
+                        默认只解散群聊，角色们已经形成的共同记忆仍会留在各自的记忆宫殿中。
+                    </div>
+                    <button
+                        onClick={() => deleteGroupTargetId && void handleDeleteGroup(deleteGroupTargetId, false)}
+                        className="w-full rounded-2xl bg-slate-900 py-3.5 text-sm font-bold text-white"
+                    >
+                        保留共同记忆并解散
+                    </button>
+                    <button
+                        onClick={() => deleteGroupTargetId && void handleDeleteGroup(deleteGroupTargetId, true)}
+                        className="w-full rounded-2xl border border-red-200 bg-red-50 py-3 text-xs font-bold text-red-500"
+                    >
+                        同时删除这段共同记忆
+                    </button>
+                    <button onClick={() => setDeleteGroupTargetId(null)} className="w-full py-2 text-xs text-slate-400">取消</button>
                 </div>
             </Modal>
 

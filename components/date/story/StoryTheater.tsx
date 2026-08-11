@@ -233,8 +233,8 @@ const StoryTheaterContent: React.FC<Props> = ({ onClose }) => {
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-6 pb-24'>
             <div className='max-w-2xl mx-auto'>
                 <section className='story-cinema-rule pb-6 border-b border-slate-200'>
-                    <div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Your meetings</div>
-                    <div className='mt-2 flex items-end justify-between gap-5'><div><h2 className='text-3xl font-serif font-semibold'>每次见面，<br />都是一条正在发生的故事。</h2><p className='mt-3 text-[11px] leading-5 text-slate-500'>角色、世界书与原版记忆方式照旧；玩法与预设改为酒馆式楼层。</p></div><FilmSlate size={48} weight='duotone' className='shrink-0 text-violet-300' /></div>
+                    <div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Aquarium meetings</div>
+                    <div className='mt-2 flex items-end justify-between gap-5'><div><h2 className='text-3xl font-serif font-semibold'>隔着一层水光，<br />和角色真正见面。</h2><p className='mt-3 text-[11px] leading-5 text-slate-500'>角色、世界书与原版记忆方式照旧；酒馆预设、楼层与现场关系都在同一片水域里继续。</p></div><FilmSlate size={48} weight='duotone' className='shrink-0 text-violet-300' /></div>
                 </section>
 
                 <section className='py-6'>

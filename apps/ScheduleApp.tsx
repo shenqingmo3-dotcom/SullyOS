@@ -163,7 +163,7 @@ const ScheduleApp: React.FC = () => {
             endTime: schedule.slots[index + 1]?.startTime,
             location: slot.location,
             note: slot.description,
-            adjusted: Boolean((slot as any).adjusted || (schedule as any).adjustedAt),
+            adjusted: Boolean(slot.adjusted),
             avatar: selectedCharacter.avatar,
         }));
     };

@@ -2,14 +2,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { GameSession, GameTheme, CharacterProfile, GameLog, GameActionOption, GameSummary } from '../types';
+import { CoCEdition, CoCInvestigatorSheet, CoCModuleSource, CoCPendingCheck, GameSession, GameTheme, CharacterProfile, GameLog, GameActionOption, GameSummary } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { extractContent, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
-import { Planet, RocketLaunch, Lightning, LockSimple, DiceFive, Toolbox, FloppyDisk, ArrowsClockwise, DoorOpen } from '@phosphor-icons/react';
+import { Planet, RocketLaunch, Lightning, LockSimple, DiceFive, Toolbox, FloppyDisk, ArrowsClockwise, DoorOpen, BookOpenText, ChatCircleDots, FilePdf, IdentificationCard, SpinnerGap, X } from '@phosphor-icons/react';
+import { cocRulePrompt, cocSuccessLabel, createBlankInvestigator, formatInvestigatorForKeeper, normalizeInvestigator, rollPercentile, type CoCRollResult } from '../utils/cocRules';
+import { moduleAnalysisPrompt, normalizeCoCModuleAnalysis, readCoCModuleFile } from '../utils/cocModule';
 
 // --- Themes Configuration (Enhanced) ---
 const GAME_THEMES: Record<GameTheme, { bg: string, text: string, accent: string, font: string, border: string, cardBg: string, gradient: string, optionNormal: string, optionChaotic: string, optionEvil: string }> = {
@@ -120,17 +122,6 @@ const parseWorldGen = (raw: string): { title: string; worldSetting: string } => 
     return { title: title.trim(), worldSetting: worldSetting.trim() };
 };
 
-// 投掷一颗 D20
-const rollD20 = () => Math.floor(Math.random() * 20) + 1;
-// 把骰点结果翻译成成功度描述，供 GM 判定
-const rollFlavor = (n: number) => {
-    if (n === 20) return '大成功(Critical Success)';
-    if (n === 1) return '大失败(Critical Failure)';
-    if (n >= 15) return '成功(Success)';
-    if (n >= 8) return '勉强(Partial)';
-    return '失败(Failure)';
-};
-
 // --- Markdown Renderer Component ---
 const GameMarkdown: React.FC<{ content: string, theme: any, customStyle?: { fontSize: number, color: string } }> = ({ content, theme, customStyle }) => {
     // Helper: Parse Inline Styles (**bold**, *italic*, `code`)
@@ -216,7 +207,14 @@ const GameApp: React.FC = () => {
     const [isGeneratingWorld, setIsGeneratingWorld] = useState(false);
     // 新游戏玩法设置
     const [newDiceDisabled, setNewDiceDisabled] = useState(false);            // 关闭骰子（默认每次直接成功）
-    const [newArchiveMode, setNewArchiveMode] = useState<'auto' | 'manual'>('auto');
+    const [newArchiveMode, setNewArchiveMode] = useState<'auto' | 'manual' | 'none'>('auto');
+    const [newEdition, setNewEdition] = useState<CoCEdition>('7e');
+    const [newInvestigators, setNewInvestigators] = useState<CoCInvestigatorSheet[]>([]);
+    const [editingInvestigatorId, setEditingInvestigatorId] = useState<string | null>(null);
+    const [moduleSource, setModuleSource] = useState<CoCModuleSource | null>(null);
+    const [isAnalyzingModule, setIsAnalyzingModule] = useState(false);
+    const [generatingInvestigatorId, setGeneratingInvestigatorId] = useState<string | null>(null);
+    const moduleFileInput = useRef<HTMLInputElement>(null);
     const [showArchiveHelp, setShowArchiveHelp] = useState(false);            // 归档模式问号说明
 
     // Play State
@@ -229,7 +227,11 @@ const GameApp: React.FC = () => {
     const [selectMode, setSelectMode] = useState(false);
     const [selectedLogIds, setSelectedLogIds] = useState<Set<string>>(new Set());
     const [isForwarding, setIsForwarding] = useState(false);
-    const [lastRoll, setLastRoll] = useState<number | null>(null); // 最近一次自动骰点结果（瞬时展示）
+    const [lastRoll, setLastRoll] = useState<number | null>(null);
+    const [stagedRoll, setStagedRoll] = useState<{ check: CoCPendingCheck; result: CoCRollResult; pushed: boolean } | null>(null);
+    const [showAftertalk, setShowAftertalk] = useState(false);
+    const [aftertalkInput, setAftertalkInput] = useState('');
+    const [isAftertalkTyping, setIsAftertalkTyping] = useState(false);
     const [lastTokenUsage, setLastTokenUsage] = useState<{prompt?: number, completion?: number, total: number} | null>(null);
     const [totalTokensUsed, setTotalTokensUsed] = useState(0);
     
@@ -259,6 +261,19 @@ const GameApp: React.FC = () => {
     useEffect(() => {
         loadGames();
     }, []);
+
+    useEffect(() => {
+        const owners = [
+            { id: 'user', name: userProfile.name || '你' },
+            ...characters.filter(char => selectedPlayers.has(char.id)).map(char => ({ id: char.id, name: char.name })),
+        ];
+        setNewInvestigators(current => owners.map(owner => {
+            const existing = current.find(sheet => sheet.ownerId === owner.id);
+            return existing
+                ? normalizeInvestigator({ ...existing, name: existing.name || owner.name }, newEdition)
+                : createBlankInvestigator(owner.id, owner.name, newEdition);
+        }));
+    }, [characters, newEdition, selectedPlayers, userProfile.name]);
 
     // 删除/新增存档后，把页码钳制在有效范围内
     const LOBBY_PAGE_SIZE = 5;
@@ -332,6 +347,109 @@ const GameApp: React.FC = () => {
         }
 
         return json;
+    };
+
+    const patchNewInvestigator = (id: string, patch: Partial<CoCInvestigatorSheet>) => {
+        setNewInvestigators(current => current.map(sheet => sheet.id === id
+            ? normalizeInvestigator({ ...sheet, ...patch }, newEdition)
+            : sheet));
+    };
+
+    const changeNewEdition = (edition: CoCEdition) => {
+        if (edition === newEdition) return;
+        setNewInvestigators(current => current.map(sheet => {
+            const characteristics = Object.fromEntries(Object.entries(sheet.characteristics).map(([key, value]) => [
+                key,
+                edition === '7e' ? Math.max(5, Math.min(100, Math.round(value * 5))) : Math.max(1, Math.min(20, Math.round(value / 5))),
+            ])) as CoCInvestigatorSheet['characteristics'];
+            return normalizeInvestigator({ ...sheet, characteristics }, edition);
+        }));
+        setNewEdition(edition);
+    };
+
+    const handleGenerateInvestigator = async (sheet: CoCInvestigatorSheet) => {
+        if (!apiConfig.apiKey) {
+            addToast('请先配置 API Key', 'error');
+            return;
+        }
+        setGeneratingInvestigatorId(sheet.id);
+        try {
+            const character = sheet.ownerId === 'user' ? null : characters.find(item => item.id === sheet.ownerId);
+            const identity = character
+                ? `角色姓名：${character.name}\n角色设定：${character.description || ''}\n核心指令：${character.systemPrompt || ''}`
+                : `用户姓名：${userProfile.name}\n用户简介：${userProfile.bio || ''}`;
+            const scale = newEdition === '7e'
+                ? '八项属性使用百分制，通常 15-90；HP=(CON+SIZ)/10 向下取整，MP=POW/5，SAN 初值通常等于 POW。'
+                : '八项属性使用第6版 3-18 左右量级；HP=(CON+SIZ)/2，MP=POW，SAN 与 Luck 通常为 POW×5。';
+            const prompt = `你是 CoC ${newEdition === '7e' ? '第7版' : '第6版'}调查员卡制作助手。根据人物设定生成一张可玩的 PC 卡。角色和用户都是调查员，不要生成 KP。\n${identity}\n${scale}\n只输出 JSON：{"name":"","occupation":"","age":28,"era":"1920s","characteristics":{"STR":0,"CON":0,"SIZ":0,"DEX":0,"APP":0,"INT":0,"POW":0,"EDU":0},"hp":0,"mp":0,"san":0,"luck":0,"skills":{"侦查":0,"聆听":0,"图书馆使用":0,"心理学":0,"说服":0,"话术":0,"潜行":0,"急救":0,"闪避":0,"斗殴":0},"inventory":[""],"backstory":""}`;
+            const data = await fetchGameAPI(prompt, 2600);
+            const parsed = extractJson(extractContent(data) || '');
+            if (!parsed) throw new Error('AI 没有返回可读取的调查员卡');
+            const generated = normalizeInvestigator({
+                ...sheet,
+                ...parsed,
+                id: sheet.id,
+                ownerId: sheet.ownerId,
+                characteristics: { ...sheet.characteristics, ...(parsed.characteristics || {}) },
+                skills: { ...sheet.skills, ...(parsed.skills || {}) },
+                inventory: Array.isArray(parsed.inventory) ? parsed.inventory.filter((item: unknown) => typeof item === 'string') : sheet.inventory,
+            }, newEdition);
+            setNewInvestigators(current => current.map(item => item.id === sheet.id ? generated : item));
+            addToast(`${generated.name} 的调查员卡已生成，可继续手动修改`, 'success');
+        } catch (error: any) {
+            addToast(`调查员卡生成失败：${error?.message || error}`, 'error');
+        } finally {
+            setGeneratingInvestigatorId(null);
+        }
+    };
+
+    const analyzeImportedModule = async (source: CoCModuleSource): Promise<CoCModuleSource> => {
+        const editionLabel = `Call of Cthulhu ${newEdition === '7e' ? '第7版' : '第6版'}`;
+        const chunkSize = 42_000;
+        const chunks: string[] = [];
+        for (let offset = 0; offset < source.text.length; offset += chunkSize) {
+            chunks.push(source.text.slice(offset, offset + chunkSize));
+        }
+        const partials: unknown[] = [];
+        for (let index = 0; index < chunks.length; index += 1) {
+            addToast(`KP 正在拆解模组 ${index + 1}/${chunks.length}`, 'info');
+            const data = await fetchGameAPI(moduleAnalysisPrompt(chunks[index], editionLabel, `模组第 ${index + 1}/${chunks.length} 部分`), 6500);
+            const parsed = extractJson(extractContent(data) || '');
+            if (parsed) partials.push(parsed);
+        }
+        if (partials.length === 0) throw new Error('没有从模组中读出有效结构');
+        let analysis = normalizeCoCModuleAnalysis(partials[0], source.fileName.replace(/\.[^.]+$/, ''));
+        if (partials.length > 1) {
+            const synthesis = `你是 CoC 守秘人备团助手。下面是同一模组按顺序拆分后的分析结果。请合并成一份覆盖完整故事走向的 KP 总表，去重但不得遗漏关键线索、检定、NPC、秘密与结局。关键线索必须写失败兜底。\n\n${JSON.stringify(partials)}\n\n${moduleAnalysisPrompt('', editionLabel, '合并结果').split('\n\n').slice(-1)[0]}`;
+            const data = await fetchGameAPI(synthesis, 10_000);
+            const parsed = extractJson(extractContent(data) || '');
+            if (parsed) analysis = normalizeCoCModuleAnalysis(parsed, analysis.title);
+        }
+        return { ...source, analysis, analyzedAt: Date.now() };
+    };
+
+    const handleModuleImport = async (file: File) => {
+        if (!apiConfig.apiKey) {
+            addToast('请先配置 API Key，再导入并分析模组', 'error');
+            return;
+        }
+        setIsAnalyzingModule(true);
+        try {
+            const text = await readCoCModuleFile(file);
+            if (!text) throw new Error('模组文件没有可读取文字；扫描版 PDF 请先做 OCR');
+            const analyzed = await analyzeImportedModule({ fileName: file.name, mimeType: file.type || 'text/plain', text });
+            setModuleSource(analyzed);
+            if (analyzed.analysis) {
+                if (!newTitle.trim()) setNewTitle(analyzed.analysis.title);
+                setNewWorld([analyzed.analysis.openingHook, analyzed.analysis.keeperSummary].filter(Boolean).join('\n\n'));
+            }
+            addToast(`模组已读完：${analyzed.analysis?.clues.length || 0} 条线索，${analyzed.analysis?.checks.length || 0} 个检定点`, 'success');
+        } catch (error: any) {
+            addToast(`模组导入失败：${error?.message || error}`, 'error');
+        } finally {
+            setIsAnalyzingModule(false);
+            if (moduleFileInput.current) moduleFileInput.current.value = '';
+        }
     };
 
     // --- Helper: Build Synchronized Context (Neural Link) ---
@@ -434,7 +552,7 @@ ${recentLog}
         try {
             // [鲁棒性] 改用带分隔符的纯文本格式而非 JSON——即使被截断也能干净解析；
             // 不再限制字数，给足 token 防止半路砍断。
-            const prompt = `你是一位资深的 TRPG（桌面跑团）剧本设计师。请按照指定风格，原创一个适合开团的世界观设定。
+            const prompt = `你是一位资深的 Call of Cthulhu 守秘人备团助手。请按照指定风格，原创一个适合 ${newEdition === '7e' ? 'CoC 7版' : 'CoC 6版'} 开团的调查模组设定。
 **风格基调**: ${worldStyle}
 ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: ${worldIdea.trim()}` : ''}
 
@@ -442,7 +560,7 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
 
 标题：<一个有吸引力的剧本标题>
 ===
-<世界观正文。请写充分、生动，篇幅自由不设上限，包含：时代/地点背景与基调氛围、当前世界的核心矛盾或危机、玩家小队的处境与初始目标钩子、一两个可探索的悬念或势力。留足玩家发挥空间，不要写死结局。>`;
+<世界观正文。请写充分、生动，篇幅自由不设上限，包含：时代/地点背景与恐怖基调、表层事件、隐藏真相、调查员小队的初始钩子、关键 NPC 与至少三条可交叉验证的线索。不要让唯一关键线索被一次检定失败锁死，也不要替调查员写死结局。>`;
 
             const data = await fetchGameAPI(prompt, 6000);
             const raw = (extractContent(data) || '').trim();
@@ -481,27 +599,37 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
             const playerContext = await buildSyncContext(players);
 
             // Generate Prologue Prompt
-            const prompt = `### TRPG 序章生成 (Game Start)
+            const normalizedInvestigators = newInvestigators.map(sheet => normalizeInvestigator(sheet, newEdition));
+            const userInvestigator = normalizedInvestigators.find(sheet => sheet.ownerId === 'user') || createBlankInvestigator('user', userProfile.name || '你', newEdition);
+            const prompt = `### CoC 开团序章
 **剧本标题**: ${newTitle}
 **世界观设定**: ${newWorld}
+**规则**: ${cocRulePrompt(newEdition)}
 **玩家**: ${userProfile.name}
 **队友**: ${players.map(p => p.name).join(', ')}
+
+### 调查员卡
+${normalizedInvestigators.map(formatInvestigatorForKeeper).join('\n')}
+
+### 导入模组的 KP 专用结构
+${moduleSource?.analysis ? JSON.stringify(moduleSource.analysis) : '没有导入模组，按原创设定主持。'}
 
 ### 角色数据 (包含私聊记忆)
 ${playerContext}
 
 ### 任务
-你现在是 **Game Master (GM)**。请为这个冒险故事生成一个**精彩的开场 (Prologue)**。
+你是这场游戏唯一的 **Keeper (KP)**。你没有角色人格，也不是第三位玩家。用户与所选角色都是 PC；角色 PC 的行动与台词必须依据各自档案和调查员卡。
+请生成一个不泄露幕后真相的开场。
 1. **剧情描述**: 描述这个世界正在发生什么、小队所处的环境与正在逼近的事件。**先有世界，再有人**——开场不要围着玩家转，而是把舞台和危机铺开。
 2. **角色反应**: 简要描述队友们的初始状态或第一句台词。请**务必**参考【神经链接】中的私聊状态来决定他们的态度；同时让每个角色展现**自己的性格与目的**，而不是一上来就众星捧月地讨好玩家。
-3. **初始选项**: 给出三个玩家可以采取的行动选项${newDiceDisabled ? '（本场未启用骰子，玩家行动默认顺利成功，选项可以是各种有趣的方向）' : '（每个选项玩家执行时都会自动骰 D20 判定，因此选项应是"有成败风险的尝试"而非必然成功的动作）'}。
+3. **初始选项**: 给出三个调查方向。不要提前投骰；只有结果不确定且失败有意义时，之后再由 KP 请求一次明确的 CoC 检定。
 
 ### 一致性自检 (Consistency Check)
 输出前，请在心里核对：每个角色的台词/行为是否**只**来自 TA 自己的"角色档案"（性格、记忆、印象）？严禁把某个角色的记忆、口癖或人设安到另一个角色身上（防止"串台"）。
 
 ### 输出格式 (Strict JSON)
 {
-  "gm_narrative": "序章剧情描述...",
+  "gm_narrative": "KP的序章剧情描述...",
   "characters": [
     { "charId": "角色ID", "action": "初始动作", "dialogue": "第一句台词" }
   ],
@@ -565,14 +693,19 @@ ${playerContext}
                 logs: initialLogs,
                 status: {
                     location: res?.startLocation || 'Unknown',
-                    health: 100,
-                    sanity: 100,
+                    health: userInvestigator.hp,
+                    sanity: userInvestigator.san,
                     gold: 0,
-                    inventory: []
+                    inventory: userInvestigator.inventory
                 },
                 suggestedActions: res?.suggested_actions || [],
                 diceDisabled: newDiceDisabled,
                 archiveMode: newArchiveMode,
+                cocEdition: newEdition,
+                investigators: normalizedInvestigators,
+                moduleSource: moduleSource || undefined,
+                discoveredClueIds: [],
+                aftertalk: [],
                 createdAt: Date.now(),
                 lastPlayedAt: Date.now()
             };
@@ -583,7 +716,8 @@ ${playerContext}
             setView('play');
             trackEvent('创建冒险开团', {
                 theme: newTheme,
-                dice: newDiceDisabled ? '关' : '开',
+                edition: newEdition,
+                module: moduleSource ? 'imported' : 'original',
                 archiveMode: newArchiveMode,
             });
 
@@ -593,6 +727,9 @@ ${playerContext}
             setWorldIdea('');
             setNewDiceDisabled(false);
             setNewArchiveMode('auto');
+            setNewEdition('7e');
+            setModuleSource(null);
+            setNewInvestigators([]);
             setSelectedPlayers(new Set());
 
         } catch (e: any) {
@@ -615,7 +752,7 @@ ${playerContext}
         trackEvent('切换 SAN 值锁定', { state: newVal ? '锁定' : '解锁' });
     };
 
-    // --- Dice Toggle (关闭后行动不再自动骰 D20) ---
+    // --- Dice Toggle (关闭后由 KP 直接裁定，不提出 D100 检定) ---
     const toggleDice = async () => {
         if (!activeGame) return;
         const newDisabled = !activeGame.diceDisabled;
@@ -627,35 +764,45 @@ ${playerContext}
     };
 
     // --- Gameplay Logic ---
-    const handleAction = async (actionText: string, isReroll: boolean = false) => {
+    const handleAction = async (
+        actionText: string,
+        isReroll: boolean = false,
+        resolvedCheck?: { check: CoCPendingCheck; result: CoCRollResult; pushed: boolean },
+    ) => {
         if (!activeGame || !apiConfig.apiKey) return;
+        if (!isReroll && !resolvedCheck && !actionText.trim()) return;
 
         let contextLogs = activeGame.logs;
         let updatedGame = activeGame;
-        let currentRoll: number | null = null;
+        const currentRoll = resolvedCheck?.result || null;
 
         if (!isReroll) {
-            const isSystemAction = actionText.startsWith('[System');
-            // [优化] 每个玩家行动默认自动骰一颗 D20（不再需要主动点骰子）。
-            // 系统消息不骰点；用户在设置里关闭骰子时也不骰点。
-            if (!isSystemAction && actionText.trim() && !activeGame.diceDisabled) {
-                currentRoll = rollD20();
-                setLastRoll(currentRoll);
-                addToast(`D20 = ${currentRoll} · ${rollFlavor(currentRoll)}`, 'info');
-            }
+            const isSystemAction = Boolean(resolvedCheck) || actionText.startsWith('[System');
+            const logContent = resolvedCheck
+                ? `[CoC 检定结果] ${resolvedCheck.check.skill} ${resolvedCheck.result.roll}/${resolvedCheck.result.target}，${cocSuccessLabel(resolvedCheck.result.successLevel)}${resolvedCheck.pushed ? '（孤注一掷）' : ''}。检定原因：${resolvedCheck.check.reason}`
+                : actionText;
 
-            // Standard Action: Append user log
             const userLog: GameLog = {
                 id: `log-${Date.now()}`,
                 role: isSystemAction ? 'system' : 'player',
                 speakerName: userProfile.name,
-                content: actionText,
+                content: logContent,
                 timestamp: Date.now(),
-                diceRoll: currentRoll ? { result: currentRoll, max: 20 } : undefined
+                diceRoll: currentRoll ? {
+                    result: currentRoll.roll,
+                    max: 100,
+                    check: resolvedCheck?.check.skill,
+                    success: currentRoll.success,
+                    target: currentRoll.target,
+                    difficulty: currentRoll.difficulty,
+                    successLevel: currentRoll.successLevel,
+                    modifier: currentRoll.modifier,
+                    pushed: resolvedCheck?.pushed,
+                } : undefined,
             };
 
             const updatedLogs = [...activeGame.logs, userLog];
-            updatedGame = { ...activeGame, logs: updatedLogs, lastPlayedAt: Date.now(), suggestedActions: [] }; // Clear options while thinking
+            updatedGame = { ...activeGame, logs: updatedLogs, lastPlayedAt: Date.now(), suggestedActions: [], pendingCheck: undefined };
             setActiveGame(updatedGame);
             await DB.saveGame(updatedGame);
             contextLogs = updatedLogs;
@@ -664,7 +811,7 @@ ${playerContext}
         setUserInput('');
         setIsTyping(true);
         setLastTokenUsage(null);
-        addToast('GM 正在推演...', 'info'); // Feedback for Sync
+        addToast('KP 正在推演...', 'info'); // Feedback for Sync
 
         try {
             // 2. Build Context WITH RELATIONSHIP SYNC
@@ -684,8 +831,8 @@ ${playerContext}
             // [优化] 历史记录：已归档的旧剧情用「前情提要」总结代替，未归档日志保留原文，
             //   并把每条玩家行动的骰点结果一并喂给 GM 用于判定（之前 GM 根本看不到骰点）。
             const serializeLog = (l: GameLog) => {
-                const who = l.role === 'gm' ? 'GM' : (l.speakerName || 'System');
-                const dice = l.diceRoll ? ` 〔D20=${l.diceRoll.result}/${rollFlavor(l.diceRoll.result)}〕` : '';
+                const who = l.role === 'gm' ? 'KP' : (l.speakerName || 'System');
+                const dice = l.diceRoll ? ` 〔D100=${l.diceRoll.result}/${l.diceRoll.target ?? '?'}，${l.diceRoll.successLevel ? cocSuccessLabel(l.diceRoll.successLevel) : l.diceRoll.success ? '成功' : '失败'}${l.diceRoll.pushed ? '，孤注一掷' : ''}〕` : '';
                 return `[${who}]${dice}: ${l.content}`;
             };
             const summaries = activeGame.summaries || [];
@@ -694,21 +841,24 @@ ${playerContext}
                 : '';
             const activeLogText = contextLogs.filter(l => !l.archived).map(serializeLog).join('\n');
 
-            // 当前这步行动的判定提示：开了骰子按 D20 裁定；关了骰子默认直接成功
+            const edition = activeGame.cocEdition || '7e';
             const rollInstruction = currentRoll
-                ? `\n### 本回合判定\n玩家这次行动掷出了 **D20 = ${currentRoll}（${rollFlavor(currentRoll)}）**。请据此裁定行动的成败与代价：20=出乎意料的大成功，1=灾难性大失败，高分顺利、低分受挫。让结果自然融入叙事，不要直接复述数字。\n`
+                ? `\n### 本回合已完成的规则检定\n${resolvedCheck?.check.skill}：D100=${currentRoll.roll}/${currentRoll.target}，难度 ${currentRoll.difficulty}，结果为${cocSuccessLabel(currentRoll.successLevel)}${resolvedCheck?.pushed ? '，这是孤注一掷结果，失败必须兑现事先声明的严重后果' : ''}。请严格按该结果推进，不得偷偷重投，也不得再次要求同一个检定。\n`
                 : (activeGame.diceDisabled
-                    ? `\n### 判定模式\n本场冒险未启用骰子，玩家的行动默认视为顺利成功（除非剧情逻辑上明显不可能）。请直接推进正向结果，不要用随机失败打断节奏。\n`
-                    : '');
+                    ? `\n### 判定模式\n本场关闭了检定。除非行动明显不可能，否则直接给出合理结果，不得暗骰。\n`
+                    : `\n### 判定模式\n本回合尚未投骰。若行动结果不确定且失败有实际意义，请在 requested_check 中提出一次明确检定，并停在结果发生前；若不需要检定则直接推进。关键线索不能因一次失败永久消失。\n`);
 
-            const prompt = `### TRPG 跑团模式: ${activeGame.title}
+            const prompt = `### Call of Cthulhu ${edition === '7e' ? '第7版' : '第6版'}跑团: ${activeGame.title}
 **当前剧本**: ${activeGame.worldSetting}
 **当前场景**: ${activeGame.status.location}
-**队伍资源**:
-- HP: ${activeGame.status.health}%
-- SAN: ${activeGame.status.sanity || 100}%
-- GOLD: ${activeGame.status.gold || 0}
-- 物品: ${activeGame.status.inventory.join(', ') || '空'}
+**规则摘要**: ${cocRulePrompt(edition)}
+
+### 调查员卡（用户与角色都是 PC）
+${(activeGame.investigators || []).map(formatInvestigatorForKeeper).join('\n') || '旧存档尚未建立调查员卡'}
+
+### KP 模组地图（只供 KP，严禁向玩家直接泄露）
+${activeGame.moduleSource?.analysis ? JSON.stringify(activeGame.moduleSource.analysis) : '原创局，没有导入模组。'}
+已发现线索 ID：${(activeGame.discoveredClueIds || []).join('、') || '无'}
 
 ${statusWarning}
 ${gameOverTrigger}
@@ -723,8 +873,8 @@ ${playerContext}
 ${recapBlock}### 冒险记录 (Recent Log)
 ${activeLogText}
 ${rollInstruction}
-### GM 指令 (Game Master Instructions)
-你现在是这场跑团游戏的 **主持人 (GM)**。
+### KP 指令 (Keeper Instructions)
+你现在是这场跑团游戏唯一的 **守秘人 (KP)**。KP 是中立旁白和 NPC 控制者，不是用户、不是任何角色 PC，也没有神经链接人格。
 **现在的状态**：这是一群真实的朋友（基于神经链接中的私聊关系）在一起玩跑团游戏。
 
 **请遵循以下法则**：
@@ -740,14 +890,16 @@ ${rollInstruction}
    - **因地制宜**: 同一个角色在战斗、社交、独处、危机等不同环境下应表现出**不同侧面**，而非一套反应走到底。
    - **剧情自驱**: 世界有自己的节奏——即使玩家什么都不做，也会有事件发生、势力推进、NPC 行动。主动推动主线。
 
-3. **硬核 GM 风格**:
+3. **CoC 守秘原则**:
    - **制造冲突**: 不要让旅途一帆风顺。安排陷阱、突发战斗、尴尬的社交场面、或者道德困境。
    - **环境描写**: 描述光影、气味、声音，营造沉浸感。
-   - **骰点判定**: 严格依据【本回合判定】的 D20 结果裁定成败，骰得低就要有真实代价。
+   - **骰点判定**: 只使用上方指定版本的 D100 规则。不得用 D20，不得把高点视为成功。
+   - **检定节制**: 没有风险或失败无意义时不投骰。关键线索即使失败也用代价、延迟或残缺信息交付，不能卡死剧情。
+   - **模组保密**: 依据导入模组掌握完整走向、线索和检定点，但只按调查进度释放信息，不照抄 KP 秘密。
    - **Markdown 排版**: 请在 \`gm_narrative\` 和 \`dialogue\` 中**积极使用 Markdown**。例如：使用 **加粗** 强调重点，使用 *斜体* 描述动作。
 
-4. **生成选项 (Action Options)**:
-   - 请根据当前局势，为玩家提供 3 个可选的行动建议（玩家选择后都会自动骰 D20，因此选项应是有成败风险的尝试）。
+4. **生成调查方向**:
+   - 提供 3 个合理方向。选项只是建议，不代表自动投骰；需要检定时由 requested_check 明确提出。
 
 ### 一致性自检 (Consistency Check)
 输出前请最后核对一遍：每个角色的台词、记忆、口癖、性格是否**严格来自 TA 各自的"角色档案"**？绝不能把一个角色的记忆/人设/经历安到另一个角色身上（防止"串台"）。如发现串台，请改正后再输出。
@@ -768,8 +920,11 @@ ${rollInstruction}
   "sanityChange": 0,
   "goldChange": 0,
   "newItem": "获得物品 (可选)",
+  "investigator_updates": [{"investigatorId":"user或角色ID","hpChange":0,"sanChange":0,"mpChange":0,"luckChange":0,"itemsAdd":[""],"itemsRemove":[""]}],
+  "discovered_clue_ids": ["本轮实际获得的线索ID"],
+  "requested_check": {"id":"check-id","investigatorId":"user或角色ID","skill":"侦查或STR等","difficulty":"regular|hard|extreme","modifier":0,"reason":"为什么现在要检定","failureConsequence":"失败会发生什么","clueIds":["相关线索ID"]},
   "suggested_actions": [
-    { "label": "选项1文本", "type": "neutral" },
+    { "label": "选项1文本", "type": "neutral", "skill": "可能用到的技能或空", "difficulty": "regular" },
     { "label": "选项2文本", "type": "chaotic" },
     { "label": "选项3文本", "type": "evil" }
   ]
@@ -784,6 +939,7 @@ ${rollInstruction}
 
             const newLogs: GameLog[] = [];
             const newStatus = { ...updatedGame.status };
+            let investigators = [...(updatedGame.investigators || [])];
 
             if (res) {
                 // Structured response - use parsed JSON
@@ -818,6 +974,28 @@ ${rollInstruction}
                 if (res.sanityChange && !sanityLocked) newStatus.sanity = Math.max(0, Math.min(100, (newStatus.sanity || 100) + res.sanityChange));
                 if (res.goldChange) newStatus.gold = Math.max(0, (newStatus.gold || 0) + res.goldChange);
                 if (res.newItem) newStatus.inventory = [...newStatus.inventory, res.newItem];
+                if (Array.isArray(res.investigator_updates)) {
+                    investigators = investigators.map(sheet => {
+                        const change = res.investigator_updates.find((item: any) => item?.investigatorId === sheet.ownerId || item?.investigatorId === sheet.id);
+                        if (!change) return sheet;
+                        const removed = new Set(Array.isArray(change.itemsRemove) ? change.itemsRemove : []);
+                        const added = Array.isArray(change.itemsAdd) ? change.itemsAdd.filter((item: unknown) => typeof item === 'string' && item.trim()) : [];
+                        return normalizeInvestigator({
+                            ...sheet,
+                            hp: sheet.hp + (Number(change.hpChange) || 0),
+                            san: sanityLocked ? sheet.san : sheet.san + (Number(change.sanChange) || 0),
+                            mp: sheet.mp + (Number(change.mpChange) || 0),
+                            luck: sheet.luck + (Number(change.luckChange) || 0),
+                            inventory: [...sheet.inventory.filter(item => !removed.has(item)), ...added],
+                        }, edition);
+                    });
+                    const userSheet = investigators.find(sheet => sheet.ownerId === 'user');
+                    if (userSheet) {
+                        newStatus.health = userSheet.hp;
+                        newStatus.sanity = userSheet.san;
+                        newStatus.inventory = userSheet.inventory;
+                    }
+                }
             } else {
                 // JSON parse completely failed - still show the raw text as GM narrative
                 console.warn('[GameApp] JSON extraction failed, using raw text as narrative');
@@ -833,6 +1011,18 @@ ${rollInstruction}
                 ...updatedGame,
                 logs: [...contextLogs, ...newLogs],
                 status: newStatus,
+                investigators,
+                discoveredClueIds: Array.from(new Set([...(updatedGame.discoveredClueIds || []), ...(Array.isArray(res?.discovered_clue_ids) ? res.discovered_clue_ids : [])])),
+                pendingCheck: res?.requested_check && !activeGame.diceDisabled ? {
+                    id: String(res.requested_check.id || `check-${Date.now()}`),
+                    investigatorId: String(res.requested_check.investigatorId || 'user'),
+                    skill: String(res.requested_check.skill || '侦查'),
+                    difficulty: edition === '6e' ? 'regular' : (['hard', 'extreme'].includes(res.requested_check.difficulty) ? res.requested_check.difficulty : 'regular'),
+                    modifier: edition === '6e' ? 0 : Math.max(-2, Math.min(2, Number(res.requested_check.modifier) || 0)) as -2 | -1 | 0 | 1 | 2,
+                    reason: String(res.requested_check.reason || 'KP 请求检定'),
+                    failureConsequence: String(res.requested_check.failureConsequence || '失败会带来新的代价'),
+                    clueIds: Array.isArray(res.requested_check.clueIds) ? res.requested_check.clueIds.map(String) : [],
+                } : undefined,
                 suggestedActions: res?.suggested_actions || []
             };
             
@@ -844,10 +1034,49 @@ ${rollInstruction}
             await runAutoSummaryIfNeeded(finalGame);
 
         } catch (e: any) {
-            addToast(`GM 掉线了: ${e.message}`, 'error');
+            addToast(`KP 掉线了: ${e.message}`, 'error');
         } finally {
             setIsTyping(false);
         }
+    };
+
+    const pendingCheckTarget = (game: GameSession, check: CoCPendingCheck): { sheet: CoCInvestigatorSheet; target: number } | null => {
+        const sheet = (game.investigators || []).find(item => item.ownerId === check.investigatorId || item.id === check.investigatorId);
+        if (!sheet) return null;
+        const key = check.skill.trim();
+        const upper = key.toUpperCase() as keyof CoCInvestigatorSheet['characteristics'];
+        let target = sheet.skills[key];
+        if (upper in sheet.characteristics) {
+            target = sheet.characteristics[upper] * ((game.cocEdition || '7e') === '6e' ? 5 : 1);
+        } else if (/^(LUCK|幸运)$/i.test(key)) target = sheet.luck;
+        else if (/^(SAN|理智)$/i.test(key)) target = sheet.san;
+        return { sheet, target: Number.isFinite(target) ? target : 0 };
+    };
+
+    const stagePendingCheckRoll = (pushed = false) => {
+        if (!activeGame?.pendingCheck) return;
+        const resolved = pendingCheckTarget(activeGame, activeGame.pendingCheck);
+        if (!resolved || resolved.target <= 0) {
+            addToast(`调查员卡没有填写「${activeGame.pendingCheck.skill}」`, 'error');
+            return;
+        }
+        const edition = activeGame.cocEdition || '7e';
+        const result = rollPercentile(
+            edition,
+            resolved.target,
+            edition === '6e' ? 'regular' : activeGame.pendingCheck.difficulty,
+            edition === '6e' ? 0 : activeGame.pendingCheck.modifier,
+        );
+        setLastRoll(result.roll);
+        setStagedRoll({ check: activeGame.pendingCheck, result, pushed });
+        addToast(`D100 = ${result.roll}/${result.target} · ${cocSuccessLabel(result.successLevel)}`, result.success ? 'success' : 'info');
+    };
+
+    const commitStagedRoll = async () => {
+        if (!stagedRoll) return;
+        const committed = stagedRoll;
+        setStagedRoll(null);
+        await handleAction('', false, committed);
     };
 
     // --- 自动总结 (每累积 AUTO_SUMMARY_THRESHOLD 条未归档日志触发一次) ---
@@ -868,7 +1097,7 @@ ${rollInstruction}
             const prevRecap = (game.summaries || []).map((s, i) => `【第${i + 1}段】${s.content}`).join('\n');
 
             const logText = toArchive.map(l => {
-                const who = l.role === 'gm' ? 'GM' : (l.speakerName || 'System');
+                const who = l.role === 'gm' ? 'KP' : (l.speakerName || 'System');
                 return `[${who}]: ${l.content}`;
             }).join('\n');
 
@@ -1007,6 +1236,15 @@ ${logText}
                 inventory: []
             },
             suggestedActions: [],
+            investigators: (activeGame.investigators || []).map(sheet => normalizeInvestigator({
+                ...sheet,
+                hp: sheet.maxHp,
+                mp: sheet.maxMp,
+                san: Math.min(99, (activeGame.cocEdition || '7e') === '6e' ? sheet.characteristics.POW * 5 : sheet.characteristics.POW),
+            }, activeGame.cocEdition || '7e')),
+            discoveredClueIds: [],
+            pendingCheck: undefined,
+            aftertalk: [],
             lastPlayedAt: Date.now()
         };
 
@@ -1028,6 +1266,12 @@ ${logText}
 
     const handleArchiveAndQuit = async () => {
         if (!activeGame) return;
+        if (activeGame.archiveMode === 'none') {
+            setView('lobby');
+            setActiveGame(null);
+            addToast('本局保留在 CoC 存档中，没有写入角色记忆', 'info');
+            return;
+        }
         setIsArchiving(true);
         setShowSystemMenu(false);
         
@@ -1035,7 +1279,8 @@ ${logText}
             const players = characters.filter(c => activeGame.playerCharIds.includes(c.id));
             const playerNames = players.map(p => p.name).join('、');
             // Increase log context for summary
-            const logText = activeGame.logs.slice(-30).map(l => `${l.role}: ${l.content}`).join('\n');
+            const aftertalkText = (activeGame.aftertalk || []).slice(-20).map(message => `[皮下·${message.speakerName}] ${message.content}`).join('\n');
+            const logText = [activeGame.logs.slice(-30).map(l => `${l.role}: ${l.content}`).join('\n'), aftertalkText].filter(Boolean).join('\n');
             
             const prompt = `Task: Summarize the key events of this TRPG session into a short clause (what happened).
 Game: ${activeGame.title}
@@ -1084,6 +1329,57 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
         }
     };
 
+    const handleSendAftertalk = async () => {
+        if (!activeGame || !aftertalkInput.trim() || isAftertalkTyping) return;
+        if (!apiConfig.apiKey) {
+            addToast('请先配置 API Key', 'error');
+            return;
+        }
+        const content = aftertalkInput.trim();
+        const userMessage = {
+            id: `aftertalk-user-${Date.now()}`,
+            role: 'user' as const,
+            speakerName: userProfile.name || '你',
+            content,
+            timestamp: Date.now(),
+        };
+        const withUser = { ...activeGame, aftertalk: [...(activeGame.aftertalk || []), userMessage] };
+        setActiveGame(withUser);
+        setAftertalkInput('');
+        setIsAftertalkTyping(true);
+        await DB.saveGame(withUser);
+        try {
+            const players = characters.filter(char => activeGame.playerCharIds.includes(char.id));
+            const roleContext = await buildSyncContext(players);
+            const recentPlay = activeGame.logs.slice(-14).map(log => `[${log.role === 'gm' ? 'KP' : log.speakerName || '系统'}] ${log.content}`).join('\n');
+            const aftertalk = withUser.aftertalk!.slice(-24).map(message => `[${message.speakerName}] ${message.content}`).join('\n');
+            const prompt = `### CoC 皮下日后谈\n这里是跑团桌外的杂谈抽屉，不是游戏场景。KP 已经闭麦，不得出现 KP、旁白或 NPC 回复。用户正在和参与跑团的角色本人聊天；角色知道大家刚才是在共同跑团，可以吐槽骰运、剧情选择和彼此表现，但不能把模组秘密或尚未发现的线索说漏。\n\n角色资料与关系：\n${roleContext}\n\n最近游戏片段：\n${recentPlay}\n\n杂谈记录：\n${aftertalk}\n\n请让真正想接话的角色自然回应，不要求每个人都说话，也不要写动作旁白。只输出 JSON：{"responses":[{"charId":"角色ID","content":"自然聊天内容"}]}`;
+            const data = await fetchGameAPI(prompt, 2400);
+            const parsed = extractJson(extractContent(data) || '');
+            const responses = Array.isArray(parsed?.responses) ? parsed.responses : [];
+            const timestamp = Date.now();
+            const messages = responses.flatMap((response: any, index: number) => {
+                const character = players.find(item => item.id === response?.charId || item.name === response?.charId);
+                const reply = typeof response?.content === 'string' ? response.content.trim() : '';
+                return character && reply ? [{
+                    id: `aftertalk-char-${timestamp}-${index}`,
+                    role: 'character' as const,
+                    speakerId: character.id,
+                    speakerName: character.name,
+                    content: reply,
+                    timestamp: timestamp + index,
+                }] : [];
+            });
+            const finalGame = { ...withUser, aftertalk: [...withUser.aftertalk!, ...messages] };
+            setActiveGame(finalGame);
+            await DB.saveGame(finalGame);
+        } catch (error: any) {
+            addToast(`皮下频道暂时没接通：${error?.message || error}`, 'error');
+        } finally {
+            setIsAftertalkTyping(false);
+        }
+    };
+
     // --- 长按多选日志 → 转发到聊天 ---
     const startLogPress = (logId: string) => {
         if (selectMode) return;
@@ -1119,7 +1415,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
             const selected = activeGame.logs.filter(l => selectedLogIds.has(l.id) && l.role !== 'system');
             const excerpt = selected.map(l => ({
                 role: l.role,
-                speaker: l.role === 'gm' ? 'GM' : (l.speakerName || (l.role === 'player' ? userProfile.name : '')),
+                speaker: l.role === 'gm' ? 'KP' : (l.speakerName || (l.role === 'player' ? userProfile.name : '')),
                 text: l.content,
             }));
             const trpg = {
@@ -1172,9 +1468,34 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
     };
     const handleCardOpen = (g: GameSession) => {
         if (longPressFired.current) { longPressFired.current = false; return; } // 长按已触发删除，忽略点击
-        setActiveGame(g);
+        const edition = g.cocEdition || '7e';
+        const owners = [
+            { id: 'user', name: userProfile.name || '你' },
+            ...characters.filter(character => g.playerCharIds.includes(character.id)).map(character => ({ id: character.id, name: character.name })),
+        ];
+        const investigators = owners.map(owner => {
+            const existing = (g.investigators || []).find(sheet => sheet.ownerId === owner.id);
+            if (existing) return normalizeInvestigator(existing, edition);
+            const created = createBlankInvestigator(owner.id, owner.name, edition);
+            return owner.id === 'user' ? normalizeInvestigator({
+                ...created,
+                hp: g.status.health || created.hp,
+                san: g.status.sanity || created.san,
+                inventory: g.status.inventory || [],
+            }, edition) : created;
+        });
+        const migrated: GameSession = {
+            ...g,
+            cocEdition: edition,
+            archiveMode: g.archiveMode || 'manual',
+            investigators,
+            discoveredClueIds: g.discoveredClueIds || [],
+            aftertalk: g.aftertalk || [],
+        };
+        setActiveGame(migrated);
+        void DB.saveGame(migrated);
         setView('play');
-        trackEvent('打开存档继续冒险');
+        trackEvent('打开存档继续调查', { migratedToCoc: !g.cocEdition || !g.investigators?.length });
     };
 
     const confirmDeleteGame = async () => {
@@ -1202,7 +1523,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         <button onClick={closeApp} className="p-2 -ml-2 hover:bg-white/10 rounded-full text-white/70 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                         </button>
-                        <span className="font-black tracking-[0.2em] text-xl text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">TRPG ADVENTURE</span>
+                        <span className="font-black tracking-[0.2em] text-xl text-transparent bg-clip-text bg-gradient-to-r from-red-200 to-amber-200">COC KEEPER DESK</span>
                         <button onClick={() => setView('create')} className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-white border border-white/10 shadow-lg active:scale-95 transition-all hover:bg-white/20">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                         </button>
@@ -1321,8 +1642,15 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
             horror: { label: '恐怖', en: 'HORROR', gradient: 'from-red-800 to-black' },
             modern: { label: '现代', en: 'MODERN', gradient: 'from-sky-500 to-slate-700' },
         };
-        const canStart = newTitle.trim() && newWorld.trim() && selectedPlayers.size > 0;
+        const canStart = Boolean(
+            newTitle.trim()
+            && newWorld.trim()
+            && selectedPlayers.size > 0
+            && newInvestigators.length === selectedPlayers.size + 1
+            && !isAnalyzingModule
+        );
         const playerChars = filterCharactersByGroup(characters, characterGroups, playerGroupId); // 邀请队友：按分组筛选后的候选
+        const editingInvestigator = newInvestigators.find(sheet => sheet.id === editingInvestigatorId) || null;
         return (
             <div className="h-full w-full bg-[#0a0a0a] text-white flex flex-col font-sans relative overflow-hidden">
                 {/* Ambient Background */}
@@ -1333,15 +1661,68 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                 <div className="shrink-0 z-10" style={{ paddingTop: 'var(--safe-top)' }}>
                     <div className="flex items-center px-5 py-3">
                         <button onClick={() => setView('lobby')} className="p-2 -ml-2 rounded-full text-white/70 hover:bg-white/10 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg></button>
-                        <span className="font-black tracking-[0.15em] text-base ml-1 mb-1 text-transparent bg-clip-text bg-gradient-to-r from-purple-300 to-pink-500">创建新世界</span>
+                        <span className="font-black tracking-[0.15em] text-base ml-1 mb-1 text-transparent bg-clip-text bg-gradient-to-r from-red-200 to-amber-200">COC KEEPER TABLE</span>
                     </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-5 pb-6 space-y-5 z-10 no-scrollbar">
+                    <div>
+                        <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2">规则版本</label>
+                        <div className="grid grid-cols-2 gap-2 rounded-2xl bg-white/5 border border-white/10 p-1.5">
+                            {(['7e', '6e'] as CoCEdition[]).map(edition => (
+                                <button
+                                    key={edition}
+                                    onClick={() => changeNewEdition(edition)}
+                                    className={`rounded-xl px-3 py-3 text-left border transition-all ${newEdition === edition ? 'bg-red-950/70 border-red-300/50 text-white' : 'border-transparent text-white/45'}`}
+                                >
+                                    <span className="block text-sm font-black">CoC {edition === '7e' ? '第 7 版' : '第 6 版'}</span>
+                                    <span className="block text-[9px] mt-1 opacity-65">{edition === '7e' ? '困难/极难、奖励惩罚骰、孤注一掷' : '传统属性值、特殊成功，不使用孤注一掷'}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div>
+                        <div className="flex items-end justify-between mb-2">
+                            <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider">导入模组</label>
+                            <span className="text-[9px] text-white/30">PDF / TXT / MD / JSON</span>
+                        </div>
+                        <input
+                            ref={moduleFileInput}
+                            type="file"
+                            accept=".pdf,.txt,.md,.json,text/plain,application/pdf,application/json"
+                            className="hidden"
+                            onChange={event => {
+                                const file = event.target.files?.[0];
+                                if (file) void handleModuleImport(file);
+                            }}
+                        />
+                        <button
+                            onClick={() => moduleFileInput.current?.click()}
+                            disabled={isAnalyzingModule}
+                            className="w-full rounded-2xl border border-dashed border-red-200/30 bg-red-950/20 px-4 py-4 text-left disabled:opacity-60"
+                        >
+                            <span className="flex items-center gap-3">
+                                {isAnalyzingModule ? <SpinnerGap size={24} className="animate-spin text-red-200" /> : <FilePdf size={24} className="text-red-200" />}
+                                <span className="min-w-0 flex-1">
+                                    <span className="block text-sm font-bold truncate">{isAnalyzingModule ? 'KP 正在通读并拆解整个模组…' : moduleSource?.fileName || '选择本地模组文件'}</span>
+                                    <span className="block text-[10px] text-white/40 mt-1">
+                                        {moduleSource?.analysis
+                                            ? `${moduleSource.analysis.clues.length} 条线索 · ${moduleSource.analysis.checks.length} 个检定点 · ${moduleSource.analysis.endings.length} 个结局`
+                                            : '正文留在本局存档；结构分析只供 KP 使用，不向 PC 泄密'}
+                                    </span>
+                                </span>
+                            </span>
+                        </button>
+                        {moduleSource && !isAnalyzingModule && (
+                            <button onClick={() => setModuleSource(null)} className="mt-2 text-[10px] text-red-200/70 underline underline-offset-4">移除已导入模组</button>
+                        )}
+                    </div>
+
                     {/* 剧本标题 */}
                     <div>
                         <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2">剧本标题</label>
-                        <input value={newTitle} onChange={e => setNewTitle(e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3.5 text-sm text-white placeholder-white/25 focus:border-purple-400/60 focus:bg-white/10 outline-none transition-all" placeholder="例如：勇者斗恶龙" />
+                        <input value={newTitle} onChange={e => setNewTitle(e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3.5 text-sm text-white placeholder-white/25 focus:border-purple-400/60 focus:bg-white/10 outline-none transition-all" placeholder="例如：雾港失踪案" />
                     </div>
 
                     {/* 世界观设定 */}
@@ -1410,8 +1791,8 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                             {/* 骰子开关 */}
                             <div className="flex items-center justify-between p-4">
                                 <div className="flex flex-col">
-                                    <span className="text-sm font-medium flex items-center gap-1.5"><DiceFive size={16} weight="fill" /> 骰子判定 (D20)</span>
-                                    <span className="text-[10px] text-white/40 mt-0.5">{newDiceDisabled ? '已关闭：行动默认直接成功' : '开启：每次行动自动骰点定成败'}</span>
+                                    <span className="text-sm font-medium flex items-center gap-1.5"><DiceFive size={16} weight="fill" /> KP 请求 D100 检定</span>
+                                    <span className="text-[10px] text-white/40 mt-0.5">{newDiceDisabled ? '已关闭：KP 直接按叙事与能力裁定' : '开启：只有结果不确定且失败有意义时才检定'}</span>
                                 </div>
                                 <button
                                     onClick={() => setNewDiceDisabled(v => !v)}
@@ -1429,7 +1810,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                     <span className="text-sm font-medium">归档模式</span>
                                     <button onClick={() => setShowArchiveHelp(v => !v)} className="w-4 h-4 rounded-full border border-white/30 text-white/50 text-[10px] leading-none flex items-center justify-center hover:bg-white/10 transition-colors">?</button>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2">
+                                <div className="grid grid-cols-3 gap-2">
                                     <button
                                         onClick={() => setNewArchiveMode('auto')}
                                         className={`rounded-xl p-2.5 text-left border transition-all active:scale-95 ${newArchiveMode === 'auto' ? 'border-purple-400 bg-purple-500/15' : 'border-white/10 bg-white/5'}`}
@@ -1444,12 +1825,20 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                         <div className="text-xs font-bold">手动归档</div>
                                         <div className="text-[9px] text-white/40 mt-0.5 leading-snug">满20条总结，但不进角色聊天</div>
                                     </button>
+                                    <button
+                                        onClick={() => setNewArchiveMode('none')}
+                                        className={`rounded-xl p-2.5 text-left border transition-all active:scale-95 ${newArchiveMode === 'none' ? 'border-purple-400 bg-purple-500/15' : 'border-white/10 bg-white/5'}`}
+                                    >
+                                        <div className="text-xs font-bold">仅本局</div>
+                                        <div className="text-[9px] text-white/40 mt-0.5 leading-snug">不写入角色记忆与聊天</div>
+                                    </button>
                                 </div>
                                 {showArchiveHelp && (
                                     <div className="mt-2.5 text-[10px] text-white/50 leading-relaxed bg-black/30 rounded-xl p-3 space-y-1.5 border border-white/10">
-                                        <p>两种模式都会<b className="text-white/70">每满 20 条剧情自动总结一次</b>，总结会一直保留在游戏的前情提要里，GM 也会一直记得。区别只在于：</p>
+                                        <p>三种模式都会<b className="text-white/70">每满 20 条剧情自动总结一次</b>，总结会一直保留在游戏的前情提要里，KP 也会一直记得。区别只在于：</p>
                                         <p><b className="text-purple-300">自动归档</b>：每次总结会<b className="text-white/70">立即同步到参与角色的聊天 App</b>（角色会"记得"和你跑过团）。</p>
                                         <p><b className="text-purple-300">手动归档</b>：自动总结<b className="text-white/70">不会</b>打扰角色的聊天，只有你在菜单里点「归档记忆并退出」时，才把整段经历送进角色聊天。</p>
+                                        <p><b className="text-purple-300">仅本局</b>：剧情、模组和皮下聊天只留在 CoC 存档，退出时也不进入角色的长期记忆。</p>
                                     </div>
                                 )}
                             </div>
@@ -1489,6 +1878,36 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                             </>
                         )}
                     </div>
+
+                    <div>
+                        <div className="flex items-end justify-between mb-2">
+                            <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider">调查员卡</label>
+                            <span className="text-[9px] text-white/30">用户与角色都是 PC · KP 独立主持</span>
+                        </div>
+                        <div className="space-y-2">
+                            {newInvestigators.map(sheet => {
+                                const character = sheet.ownerId === 'user' ? null : characters.find(item => item.id === sheet.ownerId);
+                                return (
+                                    <div key={sheet.id} className="rounded-2xl border border-white/10 bg-white/5 p-3 flex items-center gap-3">
+                                        <img src={character?.avatar || userProfile.avatar} className="w-11 h-11 rounded-full object-cover border border-white/20" />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm font-bold truncate">{sheet.name}</span>
+                                                <span className="text-[8px] px-1.5 py-0.5 rounded bg-white/10 text-white/45">{sheet.ownerId === 'user' ? '你' : '角色 PC'}</span>
+                                            </div>
+                                            <div className="text-[9px] text-white/40 mt-1 truncate">{sheet.occupation || '未填写职业'} · HP {sheet.hp}/{sheet.maxHp} · SAN {sheet.san} · Luck {sheet.luck}</div>
+                                        </div>
+                                        <div className="flex flex-col gap-1.5 shrink-0">
+                                            <button onClick={() => setEditingInvestigatorId(sheet.id)} className="px-2.5 py-1.5 rounded-lg bg-white/10 text-[10px] font-bold flex items-center gap-1"><IdentificationCard size={13} /> 编辑</button>
+                                            <button onClick={() => void handleGenerateInvestigator(sheet)} disabled={generatingInvestigatorId === sheet.id} className="px-2.5 py-1.5 rounded-lg border border-red-200/20 text-red-100 text-[9px] disabled:opacity-50">
+                                                {generatingInvestigatorId === sheet.id ? '生成中…' : 'AI 生成'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
                 </div>
 
                 {/* 底部开始按钮 */}
@@ -1498,9 +1917,46 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         disabled={isCreating || !canStart}
                         className={`w-full py-3.5 font-bold rounded-2xl shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${canStart ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-purple-500/30' : 'bg-white/10 text-white/30'}`}
                     >
-                        {isCreating ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> 生成序章...</> : <><RocketLaunch size={18} /> 开始冒险</>}
+                        {isCreating ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> KP 正在准备开场...</> : <><RocketLaunch size={18} /> 开始调查</>}
                     </button>
                 </div>
+
+                <Modal isOpen={!!editingInvestigator} title="编辑调查员卡" onClose={() => setEditingInvestigatorId(null)}>
+                    {editingInvestigator && (
+                        <div className="space-y-4 text-slate-700 max-h-[68vh] overflow-y-auto pr-1">
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="text-[10px] text-slate-500">姓名<input value={editingInvestigator.name} onChange={event => patchNewInvestigator(editingInvestigator.id, { name: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /></label>
+                                <label className="text-[10px] text-slate-500">职业<input value={editingInvestigator.occupation} onChange={event => patchNewInvestigator(editingInvestigator.id, { occupation: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /></label>
+                                <label className="text-[10px] text-slate-500">年龄<input type="number" value={editingInvestigator.age} onChange={event => patchNewInvestigator(editingInvestigator.id, { age: Number(event.target.value) })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /></label>
+                                <label className="text-[10px] text-slate-500">时代<input value={editingInvestigator.era} onChange={event => patchNewInvestigator(editingInvestigator.id, { era: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /></label>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-500 mb-2">基础属性 · {newEdition === '7e' ? '百分制' : '3–18 量级'}</p>
+                                <div className="grid grid-cols-4 gap-2">
+                                    {(['STR', 'CON', 'SIZ', 'DEX', 'APP', 'INT', 'POW', 'EDU'] as const).map(key => (
+                                        <label key={key} className="text-[9px] text-slate-400">{key}<input type="number" value={editingInvestigator.characteristics[key]} onChange={event => patchNewInvestigator(editingInvestigator.id, { characteristics: { ...editingInvestigator.characteristics, [key]: Number(event.target.value) } })} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-sm" /></label>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-2">
+                                {(['hp', 'mp', 'san', 'luck'] as const).map(key => (
+                                    <label key={key} className="text-[9px] uppercase text-slate-400">{key}<input type="number" value={editingInvestigator[key]} onChange={event => patchNewInvestigator(editingInvestigator.id, { [key]: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-sm" /></label>
+                                ))}
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-500 mb-2">技能（可手动调整）</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                    {Object.entries(editingInvestigator.skills).map(([skill, value]) => (
+                                        <label key={skill} className="flex items-center gap-2 text-[10px] text-slate-500"><span className="flex-1 truncate">{skill}</span><input type="number" value={value} onChange={event => patchNewInvestigator(editingInvestigator.id, { skills: { ...editingInvestigator.skills, [skill]: Number(event.target.value) } })} className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-sm" /></label>
+                                    ))}
+                                </div>
+                            </div>
+                            <label className="block text-[10px] text-slate-500">随身物品（逗号分隔）<input value={editingInvestigator.inventory.join('，')} onChange={event => patchNewInvestigator(editingInvestigator.id, { inventory: event.target.value.split(/[，,]/).map(item => item.trim()).filter(Boolean) })} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" /></label>
+                            <label className="block text-[10px] text-slate-500">背景<textarea value={editingInvestigator.backstory} onChange={event => patchNewInvestigator(editingInvestigator.id, { backstory: event.target.value })} className="mt-1 w-full h-24 rounded-xl border border-slate-200 px-3 py-2 text-sm resize-none" /></label>
+                            <button onClick={() => setEditingInvestigatorId(null)} className="w-full rounded-xl bg-slate-900 text-white py-3 text-sm font-bold">保存并返回</button>
+                        </div>
+                    )}
+                </Modal>
             </div>
         );
     }
@@ -1509,6 +1965,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
     if (!activeGame) return null;
     const theme = GAME_THEMES[activeGame.theme];
     const activePlayers = characters.filter(c => activeGame.playerCharIds.includes(c.id));
+    const activeUserInvestigator = (activeGame.investigators || []).find(sheet => sheet.ownerId === 'user');
 
     // [FIX] Changed from absolute inset-0 to h-full relative to fix overscroll and height layout issues
     return (
@@ -1524,6 +1981,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         <div className="flex flex-col mb-0.5">
                             <span className="font-bold text-sm tracking-wide line-clamp-1 max-w-[150px]">{activeGame.title}</span>
                             <div className="flex items-center gap-2">
+                                <span className="text-[8px] px-1.5 py-0.5 rounded border border-current opacity-60">CoC {(activeGame.cocEdition || '7e').toUpperCase()}</span>
                                 <span className="text-[9px] opacity-60 flex items-center gap-1">
                                     <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
                                     {activeGame.status.location}
@@ -1534,6 +1992,9 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     </div>
 
                     <div className="flex gap-1 mb-1">
+                        <button onClick={() => setShowAftertalk(true)} className={`p-2 rounded hover:bg-white/10 active:scale-95 transition-transform ${showAftertalk ? theme.accent : 'opacity-65'}`} title="皮下日后谈">
+                            <ChatCircleDots size={23} />
+                        </button>
                         {/* Toggle Party HUD */}
                         <button onClick={() => setShowParty(!showParty)} className={`p-2 rounded hover:bg-white/10 active:scale-95 transition-transform ${showParty ? theme.accent : 'opacity-50'}`}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" /></svg>
@@ -1551,15 +2012,14 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     {/* User Avatar */}
                     <div className="relative group shrink-0">
                         <img src={userProfile.avatar} className="w-10 h-10 rounded-full border-2 border-white/20 object-cover shadow-sm" />
-                        <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-black/60 text-white text-[8px] px-1.5 rounded-full backdrop-blur-sm whitespace-nowrap">YOU</div>
+                        <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-black/70 text-white text-[8px] px-1.5 rounded-full backdrop-blur-sm whitespace-nowrap">HP {activeUserInvestigator?.hp ?? activeGame.status.health}</div>
                     </div>
                     {/* Teammates */}
                     {activePlayers.map(p => (
                         <div key={p.id} className="relative group shrink-0 cursor-pointer active:scale-95 transition-transform">
                             <img src={p.avatar} className="w-10 h-10 rounded-full border-2 border-white/20 object-cover shadow-sm group-hover:border-white/50 transition-colors" />
                             <div className="absolute inset-0 rounded-full ring-2 ring-transparent group-hover:ring-green-400/50 transition-all"></div>
-                            {/* Simple Status Indicator (Green Dot) */}
-                            <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-black/50 shadow-sm animate-pulse"></div>
+                            <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-black/70 text-white text-[8px] px-1.5 rounded-full backdrop-blur-sm whitespace-nowrap">HP {(activeGame.investigators || []).find(sheet => sheet.ownerId === p.id)?.hp ?? '?'}</div>
                         </div>
                     ))}
                 </div>
@@ -1570,7 +2030,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                 <div className="grid grid-cols-3 gap-2">
                     <div className="flex flex-col items-center bg-red-500/20 rounded p-1 border border-red-500/30">
                         <span className="text-[8px] text-red-300 font-bold uppercase">HP (生命)</span>
-                        <span className="text-xs font-mono font-bold text-red-100">{activeGame.status.health || 100}</span>
+                        <span className="text-xs font-mono font-bold text-red-100">{activeUserInvestigator?.hp ?? activeGame.status.health} / {activeUserInvestigator?.maxHp ?? '—'}</span>
                     </div>
                     <div
                         onClick={toggleSanityLock}
@@ -1579,11 +2039,11 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         <span className="text-[8px] text-blue-300 font-bold uppercase flex items-center gap-1">
                             SAN (理智) {sanityLocked && <LockSimple size={10} weight="fill" className="text-blue-400 inline" />}
                         </span>
-                        <span className="text-xs font-mono font-bold text-blue-100">{activeGame.status.sanity || 100}</span>
+                        <span className="text-xs font-mono font-bold text-blue-100">{activeUserInvestigator?.san ?? activeGame.status.sanity}</span>
                     </div>
                     <div className="flex flex-col items-center bg-yellow-500/20 rounded p-1 border border-yellow-500/30">
-                        <span className="text-[8px] text-yellow-300 font-bold uppercase">GOLD (金币)</span>
-                        <span className="text-xs font-mono font-bold text-yellow-100">{activeGame.status.gold || 0}</span>
+                        <span className="text-[8px] text-yellow-300 font-bold uppercase">LUCK (幸运)</span>
+                        <span className="text-xs font-mono font-bold text-yellow-100">{activeUserInvestigator?.luck ?? '—'}</span>
                     </div>
                 </div>
                 {/* Token Statistics */}
@@ -1624,7 +2084,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         <div className={`pl-3 border-l-2 ${theme.border} space-y-1.5 mt-2`}>
                             {logs.map((log, li) => (
                                 <div key={log.id || li} className="text-[11px] leading-snug">
-                                    <span className="font-bold opacity-70">{log.role === 'gm' ? 'GM' : (log.speakerName || 'System')}: </span>
+                                    <span className="font-bold opacity-70">{log.role === 'gm' ? 'KP' : (log.speakerName || 'System')}: </span>
                                     <span className="opacity-70">{log.content.replace(/\n+/g, ' ').slice(0, 140)}{log.content.length > 140 ? '…' : ''}</span>
                                 </div>
                             ))}
@@ -1691,7 +2151,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         inner = (
                             <div className="animate-fade-in my-4 group relative">
                                 <div className={`p-5 rounded-lg border-2 ${theme.border} ${theme.cardBg} shadow-sm relative mx-auto w-full text-sm`}>
-                                    <div className="absolute -top-3 left-4 bg-inherit px-2 text-[10px] font-bold uppercase tracking-widest opacity-80 border border-inherit rounded">Game Master</div>
+                                    <div className="absolute -top-3 left-4 bg-inherit px-2 text-[10px] font-bold uppercase tracking-widest opacity-80 border border-inherit rounded">KEEPER · KP</div>
                                     <GameMarkdown content={log.content} theme={theme} customStyle={uiSettings} />
                                 </div>
                                 <button onClick={() => handleRollbackLog(i)} className="absolute top-2 right-2 text-[9px] bg-red-900/50 text-red-200 px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-800">Rollback</button>
@@ -1753,7 +2213,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         </div>
                     );
                 })}
-                {isTyping && <div className="text-xs opacity-50 animate-pulse pl-2 font-mono">GM 正在计算结果...</div>}
+                {isTyping && <div className="text-xs opacity-50 animate-pulse pl-2 font-mono">KP 正在推演结果...</div>}
                 
                 {/* [FIX] Removed logsEndRef usage */}
             </div>
@@ -1776,9 +2236,48 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
             {/* Controls */}
             {/* 底部 pb-[calc(1rem+var(--safe-bottom,0px))] 让内容避开 home 条（--safe-bottom 见 index.html，iOS PWA 下有 JS probe 兜底）*/}
             <div className={`p-4 pb-[calc(1rem+var(--safe-bottom,0px))] border-t ${theme.border} bg-opacity-90 backdrop-blur shrink-0 z-20 transition-colors duration-500 ${selectMode ? 'hidden' : ''}`}>
+                {activeGame.pendingCheck && !isTyping && (() => {
+                    const resolved = pendingCheckTarget(activeGame, activeGame.pendingCheck!);
+                    const edition = activeGame.cocEdition || '7e';
+                    const difficultyLabel = edition === '6e' ? '通常成功' : activeGame.pendingCheck!.difficulty === 'extreme' ? '极难' : activeGame.pendingCheck!.difficulty === 'hard' ? '困难' : '常规';
+                    const modifierLabel = edition === '7e' && activeGame.pendingCheck!.modifier !== 0
+                        ? ` · ${activeGame.pendingCheck!.modifier > 0 ? `${activeGame.pendingCheck!.modifier} 奖励骰` : `${Math.abs(activeGame.pendingCheck!.modifier)} 惩罚骰`}`
+                        : '';
+                    return (
+                        <div className="mb-3 rounded-2xl border border-amber-400/35 bg-black/45 backdrop-blur p-3 shadow-lg">
+                            <div className="flex items-start gap-3">
+                                <DiceFive size={24} weight="fill" className="text-amber-300 shrink-0 mt-0.5" />
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-xs font-black text-amber-100">KP 请求 · {resolved?.sheet.name || '调查员'}进行「{activeGame.pendingCheck.skill}」检定</div>
+                                    <div className="text-[10px] opacity-60 mt-1">目标 {resolved?.target || '未填写'} · {difficultyLabel}{modifierLabel}</div>
+                                    <p className="text-[10px] opacity-75 mt-2 leading-relaxed">{activeGame.pendingCheck.reason}</p>
+                                    <p className="text-[9px] text-red-200/75 mt-1">失败代价：{activeGame.pendingCheck.failureConsequence}</p>
+                                </div>
+                            </div>
+                            {!stagedRoll ? (
+                                <button onClick={() => stagePendingCheckRoll(false)} className="mt-3 w-full py-2.5 rounded-xl bg-amber-300 text-slate-950 text-xs font-black active:scale-[0.98]">掷 D100</button>
+                            ) : (
+                                <div className="mt-3">
+                                    <div className={`rounded-xl p-3 text-center border ${stagedRoll.result.success ? 'bg-emerald-500/15 border-emerald-300/30' : 'bg-red-500/15 border-red-300/30'}`}>
+                                        <span className="block text-xl font-mono font-black">{stagedRoll.result.roll} / {stagedRoll.result.target}</span>
+                                        <span className="block text-[10px] mt-1">{cocSuccessLabel(stagedRoll.result.successLevel)}{stagedRoll.pushed ? ' · 孤注一掷' : ''}</span>
+                                    </div>
+                                    {stagedRoll.result.success || stagedRoll.pushed || edition === '6e' ? (
+                                        <button onClick={() => void commitStagedRoll()} className="mt-2 w-full py-2.5 rounded-xl bg-white/15 text-xs font-bold">交给 KP 结算</button>
+                                    ) : (
+                                        <div className="grid grid-cols-2 gap-2 mt-2">
+                                            <button onClick={() => void commitStagedRoll()} className="py-2.5 rounded-xl bg-white/10 text-xs font-bold">承担失败</button>
+                                            <button onClick={() => stagePendingCheckRoll(true)} className="py-2.5 rounded-xl bg-red-700 text-white text-xs font-black">孤注一掷</button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })()}
                 
                 {/* AI Suggested Options Area */}
-                {activeGame.suggestedActions && activeGame.suggestedActions.length > 0 && !isTyping && (
+                {activeGame.suggestedActions && activeGame.suggestedActions.length > 0 && !isTyping && !activeGame.pendingCheck && (
                     <div className="flex gap-2 mb-3 overflow-x-auto no-scrollbar pb-1">
                         {activeGame.suggestedActions.map((opt, idx) => {
                             let styleClass = theme.optionNormal;
@@ -1799,11 +2298,11 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     </div>
                 )}
 
-                {/* Collapsible Action Toolbar — 快捷动作 (执行时自动骰 D20) */}
-                {showTools && (
+                {/* Collapsible Action Toolbar — 快捷动作只提交意图，是否检定由 KP 判断 */}
+                {showTools && !activeGame.pendingCheck && (
                     <div className="flex gap-2 mb-3 animate-fade-in items-center">
                         <span className={`text-[10px] opacity-50 flex items-center gap-1 shrink-0 ${activeGame.diceDisabled ? 'opacity-30 line-through' : theme.accent}`}>
-                            <DiceFive size={16} weight="fill" /> {activeGame.diceDisabled ? '骰子已关' : '自动骰点'}
+                            <DiceFive size={16} weight="fill" /> {activeGame.diceDisabled ? 'KP 直接裁定' : 'KP 按需检定'}
                             {!activeGame.diceDisabled && lastRoll !== null && <span className="font-mono font-bold no-underline">上次 {lastRoll}</span>}
                         </span>
                         {['调查', '攻击', '交涉', '潜行', '逃跑'].map(action => (
@@ -1822,7 +2321,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     </button>
 
                     {/* Reroll Button (Context Sensitive) */}
-                    {!isTyping && activeGame.logs.length > 0 && (
+                    {!isTyping && !activeGame.pendingCheck && activeGame.logs.length > 0 && (
                         <button 
                             onClick={handleReroll}
                             className={`p-3 h-12 rounded-xl border ${theme.border} hover:bg-white/10 active:scale-95 transition-transform flex items-center justify-center`}
@@ -1835,15 +2334,63 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     <textarea 
                         value={userInput} 
                         onChange={e => setUserInput(e.target.value)} 
+                        disabled={!!activeGame.pendingCheck || isTyping}
                         // Removed onKeyDown Enter submission
-                        placeholder="你打算做什么..." 
+                        placeholder={activeGame.pendingCheck ? '请先完成 KP 请求的检定' : '你打算做什么...'}
                         className={`flex-1 bg-black/20 border ${theme.border} rounded-xl px-3 py-3 outline-none text-sm placeholder-opacity-30 placeholder-current resize-none h-12 leading-tight focus:bg-black/40 transition-colors`}
                     />
-                    <button onClick={() => handleAction(userInput)} className={`${theme.accent} font-bold text-sm px-4 h-12 bg-white/10 rounded-xl hover:bg-white/20 active:scale-95 transition-all flex items-center justify-center`}>
+                    <button disabled={!!activeGame.pendingCheck || isTyping} onClick={() => handleAction(userInput)} className={`${theme.accent} font-bold text-sm px-4 h-12 bg-white/10 rounded-xl hover:bg-white/20 active:scale-95 transition-all flex items-center justify-center disabled:opacity-35`}>
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" /></svg>
                     </button>
                 </div>
             </div>
+
+            {showAftertalk && (
+                <div className="absolute inset-0 z-40 bg-black/55 backdrop-blur-sm flex items-end" onClick={() => setShowAftertalk(false)}>
+                    <section
+                        className="w-full max-h-[78%] rounded-t-[28px] bg-[#f4f1e9] text-slate-800 shadow-2xl flex flex-col overflow-hidden animate-slide-up"
+                        onClick={event => event.stopPropagation()}
+                    >
+                        <header className="px-5 pt-4 pb-3 border-b border-slate-200/80 flex items-center gap-3 shrink-0">
+                            <div className="w-10 h-10 rounded-full bg-red-950 text-white flex items-center justify-center"><ChatCircleDots size={22} /></div>
+                            <div className="min-w-0 flex-1">
+                                <h3 className="font-black text-sm">皮下日后谈</h3>
+                                <p className="text-[10px] text-slate-400 mt-0.5">KP 已闭麦 · 这里只是你和参与跑团的角色本人</p>
+                            </div>
+                            <button onClick={() => setShowAftertalk(false)} className="w-9 h-9 rounded-full bg-slate-200/70 flex items-center justify-center"><X size={18} /></button>
+                        </header>
+                        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 min-h-[220px]">
+                            {(activeGame.aftertalk || []).length === 0 && (
+                                <div className="py-12 text-center text-slate-400">
+                                    <ChatCircleDots size={34} className="mx-auto mb-3 opacity-40" />
+                                    <p className="text-xs">可以从骰运、选项或刚才的演出聊起。</p>
+                                </div>
+                            )}
+                            {(activeGame.aftertalk || []).map(message => {
+                                const fromUser = message.role === 'user';
+                                const speaker = fromUser ? null : characters.find(character => character.id === message.speakerId);
+                                return (
+                                    <div key={message.id} className={`flex gap-2.5 ${fromUser ? 'flex-row-reverse' : ''}`}>
+                                        <img src={fromUser ? userProfile.avatar : speaker?.avatar} className="w-8 h-8 rounded-full object-cover bg-slate-200 shrink-0" />
+                                        <div className={`max-w-[78%] ${fromUser ? 'items-end' : 'items-start'} flex flex-col`}>
+                                            <span className="text-[9px] text-slate-400 mb-1 px-1">{message.speakerName}</span>
+                                            <div className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${fromUser ? 'bg-red-950 text-white rounded-tr-sm' : 'bg-white border border-slate-200 rounded-tl-sm'}`}>{message.content}</div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            {isAftertalkTyping && <p className="text-[10px] text-slate-400 animate-pulse">角色正在接话…</p>}
+                        </div>
+                        <footer className="p-3 pb-[calc(0.75rem+var(--safe-bottom,0px))] border-t border-slate-200 bg-white/80 shrink-0">
+                            <div className="flex items-end gap-2">
+                                <textarea value={aftertalkInput} onChange={event => setAftertalkInput(event.target.value)} disabled={isAftertalkTyping} placeholder="皮下说点什么…" className="flex-1 h-11 max-h-24 resize-none rounded-2xl bg-slate-100 border border-slate-200 px-4 py-3 text-sm outline-none" />
+                                <button onClick={() => void handleSendAftertalk()} disabled={!aftertalkInput.trim() || isAftertalkTyping} className="h-11 px-4 rounded-2xl bg-red-950 text-white text-xs font-bold disabled:opacity-35">发送</button>
+                            </div>
+                            <p className="text-[9px] text-slate-400 mt-2 px-1">是否写入角色长期记忆，严格跟随本局的归档模式。</p>
+                        </footer>
+                    </section>
+                </div>
+            )}
 
             {/* System Menu Modal */}
             <Modal isOpen={showSystemMenu} title="系统菜单" onClose={() => setShowSystemMenu(false)}>
@@ -1883,8 +2430,8 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         <label className="text-xs text-slate-500 font-bold mb-3 block border-b border-slate-200 pb-1">玩法设置 (Gameplay)</label>
                         <div className="flex items-center justify-between">
                             <div className="flex flex-col">
-                                <span className="text-sm text-slate-700 font-medium flex items-center gap-1.5"><DiceFive size={16} weight="fill" /> 骰子判定 (D20)</span>
-                                <span className="text-[10px] text-slate-400 mt-0.5">关闭后，每次行动不再自动骰点</span>
+                                <span className="text-sm text-slate-700 font-medium flex items-center gap-1.5"><DiceFive size={16} weight="fill" /> KP 请求 D100 检定</span>
+                                <span className="text-[10px] text-slate-400 mt-0.5">关闭后由 KP 直接裁定，不再请求检定</span>
                             </div>
                             <button
                                 onClick={toggleDice}
@@ -1897,8 +2444,11 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         </div>
                     </div>
 
+                    <div className="rounded-xl bg-slate-100 px-3 py-2.5 text-[10px] text-slate-500">
+                        当前记忆模式：<b className="text-slate-700">{activeGame.archiveMode === 'auto' ? '自动同步' : activeGame.archiveMode === 'none' ? '仅本局隔离' : '手动归档'}</b>
+                    </div>
                     <button onClick={handleArchiveAndQuit} className="w-full py-3 bg-emerald-500 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2">
-                        <FloppyDisk size={18} /> 归档记忆并退出
+                        <FloppyDisk size={18} /> {activeGame.archiveMode === 'none' ? '保留本局并退出' : '归档记忆并退出'}
                     </button>
                     <button onClick={handleRestart} className="w-full py-3 bg-orange-500 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2">
                         <ArrowsClockwise size={18} /> 重置当前游戏

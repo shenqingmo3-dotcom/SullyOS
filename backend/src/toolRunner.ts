@@ -51,6 +51,9 @@ function platformPermissions(connection: ToolConnection) {
   if (connection.id === 'x.read') {
     return { shareToChat: true, like: true, repost: true };
   }
+  if (connection.id === 'web.read') {
+    return { shareToChat: true, like: false, repost: false };
+  }
   return {
     shareToChat: settingEnabled(connection, 'allowShareToChat', true),
     like: settingEnabled(connection, 'allowLike', true),
@@ -179,7 +182,7 @@ function firstString(...values: unknown[]): string {
   return values.find((value) => typeof value === 'string' && value.trim())?.toString().trim() ?? '';
 }
 
-function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
+export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
   const objects: Record<string, any>[] = [];
   collectObjects(value, objects);
   const seen = new Set<string>();
@@ -202,7 +205,7 @@ function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
   return candidates;
 }
 
-function extractXhsShareCandidates(value: unknown): ToolShareCandidate[] {
+export function extractXhsShareCandidates(value: unknown): ToolShareCandidate[] {
   const objects: Record<string, any>[] = [];
   collectObjects(value, objects);
   const seen = new Set<string>();
@@ -448,6 +451,52 @@ async function runXhsLite(connection: ToolConnection, goal: string): Promise<Too
   };
 }
 
+export async function runWebSearch(connection: ToolConnection, goal: string): Promise<ToolRunResult> {
+  const endpoint = connection.endpoint || 'https://api.search.brave.com/res/v1/web/search';
+  const apiKey = connection.credentials.bearerToken || connection.credentials.apiKey;
+  if (!apiKey) throw new Error('网页探索还没有保存 Brave Search API Key。');
+  const url = new URL(endpoint);
+  url.searchParams.set('q', goal.trim() || '今天值得留意的新闻');
+  url.searchParams.set('count', '10');
+  const response = await fetchWithTimeout(url.toString(), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'X-Subscription-Token': apiKey,
+    },
+  }, 25_000);
+  const result = await responseJson(response);
+  const rows = Array.isArray(result?.web?.results) ? result.web.results as Array<Record<string, unknown>> : [];
+  const candidates = rows.flatMap((item): ToolShareCandidate[] => {
+    const itemUrl = firstString(item.url);
+    if (!/^https?:\/\//i.test(itemUrl)) return [];
+    return [{
+      platform: 'web',
+      url: itemUrl,
+      title: firstString(item.title) || itemUrl,
+      description: firstString(item.description).slice(0, 1_200),
+      author: firstString(item.profile && typeof item.profile === 'object'
+        ? (item.profile as Record<string, unknown>).long_name
+        : '', item.meta_url && typeof item.meta_url === 'object'
+          ? (item.meta_url as Record<string, unknown>).hostname
+          : ''),
+      imageUrl: firstString(item.thumbnail && typeof item.thumbnail === 'object'
+        ? (item.thumbnail as Record<string, unknown>).src
+        : ''),
+    }];
+  }).slice(0, 12);
+  return {
+    status: 'completed',
+    eventType: 'autonomous_activity',
+    title: `搜索网页“${(goal.trim() || '今天值得留意的新闻').slice(0, 80)}”`,
+    toolName: 'brave_web_search',
+    summary: `搜索了网页，找到 ${candidates.length} 条可读结果，已经交给角色本人。`,
+    rawResult: { query: goal, results: rows.slice(0, 12) },
+    shareCandidates: candidates,
+    permissions: platformPermissions(connection),
+  };
+}
+
 export async function performPlatformLike(
   capabilityId: 'x.read' | 'xhs.read',
   candidate: ToolShareCandidate,
@@ -507,6 +556,10 @@ export async function testExternalToolConnection(connection: ToolConnection): Pr
     return '邮件触发与设备令牌配置完整（未发送测试邮件）';
   }
   const mode = String(connection.settings.mode ?? 'mcp');
+  if (connection.id === 'web.read') {
+    const result = await runWebSearch(connection, 'OpenAI');
+    return `${result.toolName} 已响应，找到 ${result.shareCandidates?.length ?? 0} 条结果`;
+  }
   if (connection.id === 'mcp.read' && mode === 'mcp-pool') {
     const servers = mcpPoolServers(connection);
     if (servers.length === 0) throw new Error('还没有同步已启用且完成工具发现的 MCP 服务器。');
@@ -569,12 +622,13 @@ export async function executeAutonomyTool(input: {
     };
   }
 
-  if (!['x.read', 'xhs.read', 'mcp.read'].includes(input.capabilityId)) {
+  if (!['x.read', 'xhs.read', 'web.read', 'mcp.read'].includes(input.capabilityId)) {
     throw new Error(`尚未实现能力 ${input.capabilityId}。`);
   }
-  const connection = await getToolConnection(input.capabilityId as 'x.read' | 'xhs.read' | 'mcp.read');
+  const connection = await getToolConnection(input.capabilityId as 'x.read' | 'xhs.read' | 'web.read' | 'mcp.read');
   if (!connection?.enabled) throw new Error('该工具连接尚未启用。');
   const mode = String(connection.settings.mode ?? 'mcp');
+  if (connection.id === 'web.read') return runWebSearch(connection, input.goal);
   if (connection.id === 'mcp.read' && mode === 'mcp-pool') return runMcpPool(connection, input.goal);
   if (!connection.endpoint) throw new Error('该工具连接没有填写服务地址。');
   if (connection.id === 'xhs.read' && mode === 'xhs-lite') return runXhsLite(connection, input.goal);

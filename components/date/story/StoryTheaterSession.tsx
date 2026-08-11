@@ -761,8 +761,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
 
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-7'>
             <div className='max-w-2xl mx-auto'>
-                {messages.length === 0 ? <section className='py-10 border-y border-slate-200'>
-                    <div className='text-[9px] tracking-[.25em] uppercase font-bold text-violet-500'>Opening note</div>
+                {messages.length === 0 ? <section className='story-glass-panel rounded-[24px] px-5 py-8'>
+                    <div className='text-[9px] tracking-[.25em] uppercase font-bold text-violet-500'>First current</div>
                     <h2 className='mt-3 text-3xl font-serif font-semibold leading-tight'>{entry.title}</h2>
                     <p className='mt-5 text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{entry.premise || (canWriteOpening ? '人物与世界已经就位，可以让故事先写下第一幕。' : '写下第一句话，让人物走进这座只属于本条剧情的剧场。')}</p>
                     <p className='mt-6 text-[10px] text-slate-400'>{canWriteOpening ? '输入框留空，点击推进即可开场' : '这一幕由你先落笔'}</p>
@@ -792,11 +792,17 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                                 </div>
                             </details>;
                         }
-                        if (message.role === 'user') return <section key={message.id} {...pressHandlersFor(message)} className='pl-4 border-l-2 border-violet-300'><div className='text-[9px] tracking-[.16em] font-bold text-violet-500'>你写下</div><p className='mt-2 text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p></section>;
+                        if (message.role === 'user') return <section key={message.id} {...pressHandlersFor(message)} className='story-dialog-row story-dialog-row-user'>
+                            {mask.avatar ? <img src={mask.avatar} alt='' className='story-dialog-avatar' /> : <span className='story-dialog-avatar grid place-items-center bg-violet-100 text-violet-700 text-[10px] font-bold'>{mask.name.slice(0, 1)}</span>}
+                            <div className='story-dialog-card story-dialog-user'><div className='text-[9px] tracking-[.16em] font-bold text-violet-500'>{youLabel}</div><p className='mt-2 text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p></div>
+                        </section>;
                         const isLatest = message.id === messages[messages.length - 1]?.id;
                         const swipeCandidates = swipeCandidatesFor(message);
                         const swipeIndex = Math.max(0, Math.min(swipeCandidates.length - 1, Number(message.metadata?.theaterSwipeIndex) || 0));
-                        return <article key={message.id} {...pressHandlersFor(message)}><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} />{isLatest && <div className='mt-4 flex flex-wrap items-center justify-end gap-2'>
+                        return <article key={message.id} {...pressHandlersFor(message)}><div className='story-dialog-row'>
+                            <span className='story-dialog-cast'>{actors.slice(0, 2).map(actor => <img key={actor.id} src={actor.avatar} alt='' className='story-dialog-avatar' />)}</span>
+                            <div className='story-dialog-card story-dialog-character'><div className='mb-3 text-[9px] tracking-[.16em] font-bold text-violet-500'>{actors.map(actor => actor.name).join('、') || '场景'}</div><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} /></div>
+                        </div>{isLatest && <div className='mt-4 flex flex-wrap items-center justify-end gap-2'>
                             {swipeCandidates.length > 1 && <div className='inline-flex items-center rounded-full border border-slate-200 bg-white'><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, -1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='上一个回复版本'><CaretLeft size={13} /></button><span className='min-w-8 text-center text-[9px] font-bold text-slate-400'>{swipeIndex + 1}/{swipeCandidates.length}</span><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, 1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='下一个回复版本'><CaretRight size={13} /></button></div>}
                             <button disabled={sending || mutatingMessage} onClick={() => void send(undefined, { text: '请紧接上一层正文自然继续，不重复已经发生的内容，也不要代替用户侧身份作重大决定。', hideUser: true })} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'><ArrowBendDownRight size={12} />继续</button>
                             <button disabled={sending || mutatingMessage} onClick={() => void send(message)} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'>{rerollingId === message.id ? <SpinnerGap size={12} className='animate-spin' /> : <ArrowClockwise size={12} />}重生成</button>

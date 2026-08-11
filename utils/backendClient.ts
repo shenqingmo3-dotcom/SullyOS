@@ -29,6 +29,8 @@ import {
 } from './pushSubscribeShared';
 import { DB } from './db';
 import { relevantNpcNetwork } from './npcNetwork';
+import { resolveCharTimeZone } from './timezone';
+import { getDailyScheduleForChar } from './dailySchedule';
 
 const CONFIG_KEY = 'sullyos_backend_chat_v1';
 const CLIENT_ID_KEY = 'sullyos_backend_client_id_v1';
@@ -133,7 +135,7 @@ export interface BackendPushEnableResult {
     endpoint: string;
 }
 
-export type BackendToolConnectionId = 'x.read' | 'xhs.read' | 'mcp.read' | 'phone.read';
+export type BackendToolConnectionId = 'x.read' | 'xhs.read' | 'web.read' | 'mcp.read' | 'phone.read';
 
 export interface BackendToolConnection {
     id: BackendToolConnectionId;
@@ -571,7 +573,7 @@ export async function getBackendPhonePeekImage(
 export async function updateBackendAgentAutonomy(
     config: BackendChatConfig,
     characterId: string,
-    input: Pick<BackendAgentAutonomy, 'enabled' | 'intervalMinutes' | 'policy'>,
+    input: Pick<BackendAgentAutonomy, 'enabled' | 'intervalMinutes' | 'policy'> & { timezone?: string },
 ): Promise<BackendAgentAutonomy> {
     const result = await backendFetch(
         config,
@@ -582,7 +584,7 @@ export async function updateBackendAgentAutonomy(
                 enabled: input.enabled,
                 intervalMinutes: input.intervalMinutes,
                 ...input.policy,
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+                timezone: input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
             }),
         },
     );
@@ -683,8 +685,7 @@ export async function syncBackendContext(input: {
     deletedMemoryIds?: string[];
 }): Promise<any> {
     const { character, user } = input;
-    const today = new Date().toISOString().split('T')[0];
-    const currentDailySchedule = await DB.getDailySchedule(character.id, today).catch(() => null);
+    const currentDailySchedule = await getDailyScheduleForChar(character).catch(() => null);
     return backendFetch(input.config, '/v1/context/sync', {
         method: 'POST',
         body: JSON.stringify({
@@ -719,7 +720,9 @@ export async function syncBackendContext(input: {
                     ...(currentDailySchedule ? { currentDailySchedule } : {}),
                     npcNetwork: relevantNpcNetwork(user.npcNetwork, character.id),
                 },
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+                timezone: resolveCharTimeZone(character)
+                    || Intl.DateTimeFormat().resolvedOptions().timeZone
+                    || 'UTC',
             },
             // 后端生成的 assistant 消息已经在 conversation_events 中；前端只保留其
             // 展示副本，下一轮同步时跳过，避免同一回复被写两遍。
@@ -1119,7 +1122,7 @@ export async function flushBackendMemorySyncQueue(input: {
         });
     }
 
-    await acknowledgeBackendMemoryChanges(changes.map(change => change.key));
+    await acknowledgeBackendMemoryChanges(changes);
     return { synced: changes.length };
 }
 

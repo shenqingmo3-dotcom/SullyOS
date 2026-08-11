@@ -91,6 +91,23 @@ const STORE_TOGETHER_SESSIONS = 'together_sessions'; // 共读与影院 MCP 会�
 const STORE_BACKEND_SYNC_QUEUE = 'backend_sync_queue';
 const STORE_BACKEND_EVENTS = 'backend_events';
 
+function queueBackendMessageDeletion(queue: IDBObjectStore, message: Message | undefined): void {
+  if (!message?.charId || message.groupId) return;
+  const backendEventId = typeof message.metadata?.backendEventId === 'string'
+    ? message.metadata.backendEventId
+    : '';
+  const entityType = backendEventId ? 'backend_event' : 'chat_message';
+  const entityId = backendEventId || String(message.id);
+  queue.put({
+    key: `${message.charId}:${entityType}:${entityId}`,
+    charId: message.charId,
+    entityType,
+    entityId,
+    operation: 'delete',
+    updatedAt: Date.now(),
+  });
+}
+
 // API 调用记录：保留近 5 天，超期丢弃；再加一个硬上限防止异常情况撑爆
 const API_CALL_LOG_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
 const API_CALL_LOG_MAX_ENTRIES = 2000;
@@ -907,25 +924,46 @@ export const DB = {
 
   deleteMessage: async (id: number): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
-    transaction.objectStore(STORE_MESSAGES).delete(id);
+    const transaction = db.transaction([STORE_MESSAGES, STORE_BACKEND_SYNC_QUEUE], 'readwrite');
+    const messages = transaction.objectStore(STORE_MESSAGES);
+    const queue = transaction.objectStore(STORE_BACKEND_SYNC_QUEUE);
+    const request = messages.get(id);
+    request.onsuccess = () => {
+      queueBackendMessageDeletion(queue, request.result as Message | undefined);
+      messages.delete(id);
+    };
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
   },
 
   deleteMessages: async (ids: number[]): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+      const transaction = db.transaction([STORE_MESSAGES, STORE_BACKEND_SYNC_QUEUE], 'readwrite');
       const store = transaction.objectStore(STORE_MESSAGES);
-      ids.forEach(id => store.delete(id));
-      return new Promise((resolve) => {
+      const queue = transaction.objectStore(STORE_BACKEND_SYNC_QUEUE);
+      ids.forEach(id => {
+          const request = store.get(id);
+          request.onsuccess = () => {
+              queueBackendMessageDeletion(queue, request.result as Message | undefined);
+              store.delete(id);
+          };
+      });
+      return new Promise((resolve, reject) => {
           transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error);
       });
   },
 
   clearMessages: async (charId: string): Promise<void> => {
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+      const transaction = db.transaction([STORE_MESSAGES, STORE_BACKEND_SYNC_QUEUE], 'readwrite');
       const store = transaction.objectStore(STORE_MESSAGES);
+      const queue = transaction.objectStore(STORE_BACKEND_SYNC_QUEUE);
       const index = store.index('charId');
       const request = index.openCursor(IDBKeyRange.only(charId));
 
@@ -934,6 +972,7 @@ export const DB = {
         if (cursor) {
             const m = cursor.value as Message;
             if (!m.groupId) {
+                queueBackendMessageDeletion(queue, m);
                 store.delete(cursor.primaryKey);
             }
             cursor.continue();
@@ -2956,7 +2995,7 @@ export const DB = {
           });
       };
 
-      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings, togetherItems, togetherSessions, backendSyncQueue, backendEvents] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
           getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
@@ -3009,6 +3048,10 @@ export const DB = {
           getAllFromStore(STORE_LIFE_RECORDS),
           getAllFromStore(STORE_MED_PLANS),
           getAllFromStore(STORE_LIFE_SETTINGS),
+          getAllFromStore(STORE_TOGETHER_ITEMS),
+          getAllFromStore(STORE_TOGETHER_SESSIONS),
+          getAllFromStore(STORE_BACKEND_SYNC_QUEUE),
+          getAllFromStore(STORE_BACKEND_EVENTS),
       ]);
 
       const userProfile = userProfiles.length > 0 ? {
@@ -3038,6 +3081,10 @@ export const DB = {
           lifeRecords,
           medPlans,
           lifeRecordSettings,
+          togetherItems,
+          togetherSessions,
+          backendSyncQueue,
+          backendEvents,
           hotNewsSnapshots,
           vrNovels,
           vrAnnotations,
@@ -3099,6 +3146,7 @@ export const DB = {
           STORE_HOTNEWS,
           STORE_VR_NOVELS, STORE_VR_ANNOTATIONS, STORE_CC_PARTS, STORE_VR_MUSIC, STORE_VR_GUESTBOOK, STORE_VR_SCRIPTS, STORE_VR_PLAYS, STORE_VR_PRESETS, STORE_VR_LETTERS, STORE_VR_SETTINGS,
           STORE_WORLDS, STORE_WORLD_EPISODES,
+          STORE_TOGETHER_ITEMS, STORE_TOGETHER_SESSIONS,
           'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
           'room_plates', 'digest_reports',
           STORE_BACKEND_SYNC_QUEUE, STORE_BACKEND_EVENTS,
@@ -3160,6 +3208,10 @@ export const DB = {
           data.storyTheaters !== undefined,
           data.storyTheaterPresets !== undefined,
           data.storyTheaterMasks !== undefined,
+          data.togetherItems !== undefined,
+          data.togetherSessions !== undefined,
+          data.backendSyncQueue !== undefined,
+          data.backendEvents !== undefined,
           data.novels !== undefined,
           data.songs !== undefined,
           data.quizSessions !== undefined,
@@ -3443,6 +3495,22 @@ export const DB = {
           await clearAndAdd(STORE_STORY_THEATER_MASKS, data.storyTheaterMasks, '剧场面具箱', true);
           data.storyTheaterMasks = undefined as any;
       }, data.storyTheaterMasks?.length || 0);
+      await runSection('一起看书架', data.togetherItems !== undefined, async () => {
+          await clearAndAdd(STORE_TOGETHER_ITEMS, data.togetherItems, '一起看书架', false);
+          data.togetherItems = undefined as any;
+      }, data.togetherItems?.length || 0);
+      await runSection('一起看会话', data.togetherSessions !== undefined, async () => {
+          await clearAndAdd(STORE_TOGETHER_SESSIONS, data.togetherSessions, '一起看会话', false);
+          data.togetherSessions = undefined as any;
+      }, data.togetherSessions?.length || 0);
+      await runSection('后端同步队列', data.backendSyncQueue !== undefined, async () => {
+          await clearAndAdd(STORE_BACKEND_SYNC_QUEUE, data.backendSyncQueue, '后端同步队列', false);
+          data.backendSyncQueue = undefined as any;
+      }, data.backendSyncQueue?.length || 0);
+      await runSection('后端事件镜像', data.backendEvents !== undefined, async () => {
+          await clearAndAdd(STORE_BACKEND_EVENTS, data.backendEvents, '后端事件镜像', false);
+          data.backendEvents = undefined as any;
+      }, data.backendEvents?.length || 0);
       await runSection('小说', data.novels !== undefined, async () => {
           await clearAndAdd(STORE_NOVELS, data.novels, '小说', false);
           data.novels = undefined as any;
