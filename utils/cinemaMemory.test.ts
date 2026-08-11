@@ -34,9 +34,10 @@ describe('cinema MCP memory bridge', () => {
             result: {
                 success: true,
                 data: {
-                    status: 'active',
+                    room: { id: 'room-1', status: 'active' },
+                    playback: { playheadMs: 600_000, state: 'playing' },
                     cursors: { mediaMs: 600_000, messageId: 2, observationSequence: 3 },
-                    messages: [{ id: 2, senderName: '用户', senderKind: 'human', content: '我喜欢这一段', mediaTimeMs: 600_000 }],
+                    newMessages: [{ id: 2, senderName: '用户', senderKind: 'human', content: '我喜欢这一段', mediaTimeMs: 600_000 }],
                 },
             },
             character,

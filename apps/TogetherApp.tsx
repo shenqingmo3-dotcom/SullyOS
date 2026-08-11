@@ -9,9 +9,9 @@ import { DB } from '../utils/db';
 import { TogetherStore } from '../utils/togetherStore';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
-import { currentInteractionMode, extractInteractionModeDirective } from '../utils/interactionMode';
+import { currentInteractionMode, extractInteractionModeDirective, inferExplicitUserMode, type InteractionModeDirective } from '../utils/interactionMode';
 import { MemoryNodeDB } from '../utils/memoryPalace/db';
-import { flushBackendMemorySyncQueue, loadBackendChatConfig } from '../utils/backendClient';
+import { flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
 
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -90,7 +90,41 @@ const TogetherApp: React.FC = () => {
         setItems(prev => prev.filter(current => current.id !== item.id));
     };
 
-    const modelReply = async (activeChar: CharacterProfile, userText: string, activeSession: TogetherSession): Promise<string> => {
+    const persistInteractionMode = async (
+        activeChar: CharacterProfile,
+        directive: InteractionModeDirective,
+        changedBy: 'user' | 'assistant',
+    ): Promise<CharacterProfile> => {
+        const patch = {
+            interactionMode: directive.mode,
+            interactionScene: {
+                ...(activeChar.interactionScene || {}),
+                location: directive.location || activeChar.interactionScene?.location,
+                distance: directive.distance || activeChar.interactionScene?.distance,
+                changedAt: Date.now(),
+                changedBy,
+            },
+        } as const;
+        const updatedCharacter = { ...activeChar, ...patch };
+        updateCharacter(activeChar.id, patch);
+        const backendConfig = loadBackendChatConfig();
+        if (backendConfig.enabled) {
+            await syncBackendContext({
+                config: backendConfig,
+                character: updatedCharacter,
+                user: userProfile,
+                messages: [],
+                memories: [],
+            }).catch(error => console.warn('[Together] 互动状态同步失败:', error));
+        }
+        return updatedCharacter;
+    };
+
+    const modelReply = async (
+        activeChar: CharacterProfile,
+        userText: string,
+        activeSession: TogetherSession,
+    ): Promise<{ content: string; directive: InteractionModeDirective | null }> => {
         const history = await DB.getRecentMessagesByCharId(activeChar.id, Math.min(activeChar.contextLimit || 500, 300));
         const text = activeItem?.text || '';
         const center = Math.round(text.length * activeSession.progress);
@@ -111,33 +145,36 @@ const TogetherApp: React.FC = () => {
         const data = await safeResponseJson(response);
         if (!response.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
         const extracted = extractInteractionModeDirective(extractContent(data).trim());
-        if (extracted.directive) {
-            updateCharacter(activeChar.id, {
-                interactionMode: extracted.directive.mode,
-                interactionScene: {
-                    ...(activeChar.interactionScene || {}),
-                    location: extracted.directive.location || activeChar.interactionScene?.location,
-                    distance: extracted.directive.distance || activeChar.interactionScene?.distance,
-                    changedAt: Date.now(), changedBy: 'assistant',
-                },
-            });
-        }
-        return extracted.content.trim();
+        return { content: extracted.content.trim(), directive: extracted.directive };
     };
 
     const sendDiscussion = async () => {
         const activeSession = sessionRef.current;
         if (!activeSession || !char || !draft.trim() || sending) return;
-        const userMessage: TogetherSessionMessage = { id: uid('together-msg'), role: 'user', content: draft.trim(), createdAt: Date.now(), progress: activeSession.progress };
-        const withUser = { ...activeSession, messages: [...activeSession.messages, userMessage] };
+        const userText = draft.trim();
         setDraft(''); setSending(true);
-        await saveSession(withUser);
         try {
-            const content = await modelReply(char, userMessage.content, withUser);
-            if (!content) throw new Error('模型没有返回正文');
+            const explicitMode = inferExplicitUserMode(userText);
+            let replyCharacter = char;
+            if (explicitMode) {
+                replyCharacter = await persistInteractionMode(char, { mode: explicitMode }, 'user');
+            }
+            const userMessage: TogetherSessionMessage = { id: uid('together-msg'), role: 'user', content: userText, createdAt: Date.now(), progress: activeSession.progress };
+            const withUser = {
+                ...activeSession,
+                interactionMode: explicitMode || activeSession.interactionMode,
+                messages: [...activeSession.messages, userMessage],
+            };
+            await saveSession(withUser);
+            const reply = await modelReply(replyCharacter, userMessage.content, withUser);
+            if (!reply.content) throw new Error('模型没有返回正文');
+            if (reply.directive) {
+                replyCharacter = await persistInteractionMode(replyCharacter, reply.directive, 'assistant');
+            }
             await saveSession({
                 ...withUser,
-                messages: [...withUser.messages, { id: uid('together-msg'), role: 'assistant', content, createdAt: Date.now(), progress: withUser.progress }],
+                interactionMode: reply.directive?.mode || withUser.interactionMode,
+                messages: [...withUser.messages, { id: uid('together-msg'), role: 'assistant', content: reply.content, createdAt: Date.now(), progress: withUser.progress }],
             });
         } catch (error: any) {
             addToast(`讨论失败：${error?.message || 'unknown error'}`, 'error');
@@ -148,40 +185,56 @@ const TogetherApp: React.FC = () => {
         const activeSession = sessionRef.current;
         if (!activeSession || !activeItem || !char || ending) return;
         setEnding(true);
-        const endedAt = Date.now();
-        const discussion = activeSession.messages.map(m => `${m.role === 'user' ? userProfile.name : char.name}: ${m.content}`).join('\n');
-        let summary = `${userProfile.name}和${char.name}${activeSession.interactionMode === 'offline' ? '线下' : '线上'}一起读了《${activeSession.itemTitle}》${elapsedText(activeSession.startedAt, endedAt)}，进度到${Math.round(activeSession.progress * 100)}%。`;
-        if (discussion) {
-            try {
-                const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}` },
-                    body: JSON.stringify({
-                        model: apiConfig.model, temperature: 0.25, stream: false,
-                        messages: [{ role: 'user', content: `把以下一起观看记录压缩成2—4句可长期保存的第三人称事实记忆。保留双方对作品的具体看法、分歧或喜欢的点，不虚构，不写空泛感想。\n作品：${activeSession.itemTitle}\n用时：${elapsedText(activeSession.startedAt, endedAt)}\n进度：${Math.round(activeSession.progress * 100)}%\n讨论：\n${discussion}` }],
-                    }),
-                });
-                const data = await safeResponseJson(response);
-                if (response.ok && extractContent(data).trim()) summary += ` ${extractContent(data).trim()}`;
-            } catch { /* deterministic summary remains valid */ }
+        try {
+            const endedAt = Date.now();
+            const discussion = activeSession.messages.map(m => `${m.role === 'user' ? userProfile.name : char.name}: ${m.content}`).join('\n');
+            let summary = `${userProfile.name}和${char.name}${activeSession.interactionMode === 'offline' ? '线下' : '线上'}一起读了《${activeSession.itemTitle}》${elapsedText(activeSession.startedAt, endedAt)}，进度到${Math.round(activeSession.progress * 100)}%。`;
+            if (discussion) {
+                try {
+                    const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}` },
+                        body: JSON.stringify({
+                            model: apiConfig.model, temperature: 0.25, stream: false,
+                            messages: [{ role: 'user', content: `把以下一起观看记录压缩成2—4句可长期保存的第三人称事实记忆。保留双方对作品的具体看法、分歧或喜欢的点，不虚构，不写空泛感想。\n作品：${activeSession.itemTitle}\n用时：${elapsedText(activeSession.startedAt, endedAt)}\n进度：${Math.round(activeSession.progress * 100)}%\n讨论：\n${discussion}` }],
+                        }),
+                    });
+                    const data = await safeResponseJson(response);
+                    if (response.ok && extractContent(data).trim()) summary += ` ${extractContent(data).trim()}`;
+                } catch { /* deterministic summary remains valid */ }
+            }
+            const completed: TogetherSession = { ...activeSession, endedAt, summary };
+            await TogetherStore.saveSession(completed);
+            const updatedItem = { ...activeItem, lastPosition: activeSession.progress, updatedAt: endedAt };
+            await TogetherStore.saveItem(updatedItem);
+            await MemoryNodeDB.save({
+                id: uid('mem-together'), charId: char.id, content: summary, room: 'living_room',
+                tags: ['一起看', '共读', activeSession.interactionMode === 'offline' ? '线下' : '线上'],
+                importance: 7, mood: 'warm', embedded: false, createdAt: endedAt, lastAccessedAt: endedAt,
+                accessCount: 0, origin: 'system',
+            });
+            const backendConfig = loadBackendChatConfig();
+            let backendSynced = false;
+            if (backendConfig.enabled) {
+                backendSynced = await flushBackendMemorySyncQueue({ config: backendConfig, character: char, user: userProfile })
+                    .then(() => true)
+                    .catch(() => false);
+            }
+            setItems(prev => prev.map(item => item.id === updatedItem.id ? updatedItem : item));
+            sessionRef.current = null;
+            setSession(null);
+            setActiveItem(null);
+            addToast(
+                backendSynced
+                    ? '这段“一起看”已写入前端与后端记忆'
+                    : '这段“一起看”已写入记忆；后端内容保留在同步队列中',
+                'success',
+            );
+        } catch (error: any) {
+            addToast(`归档失败：${error?.message || 'unknown error'}`, 'error');
+        } finally {
+            setEnding(false);
         }
-        const completed: TogetherSession = { ...activeSession, endedAt, summary };
-        await TogetherStore.saveSession(completed);
-        const updatedItem = { ...activeItem, lastPosition: activeSession.progress, updatedAt: endedAt };
-        await TogetherStore.saveItem(updatedItem);
-        await MemoryNodeDB.save({
-            id: uid('mem-together'), charId: char.id, content: summary, room: 'living_room',
-            tags: ['一起看', '共读', activeSession.interactionMode === 'offline' ? '线下' : '线上'],
-            importance: 7, mood: 'warm', embedded: false, createdAt: endedAt, lastAccessedAt: endedAt,
-            accessCount: 0, origin: 'system',
-        });
-        const backendConfig = loadBackendChatConfig();
-        if (backendConfig.enabled) {
-            await flushBackendMemorySyncQueue({ config: backendConfig, character: char, user: userProfile }).catch(() => {});
-        }
-        setItems(prev => prev.map(item => item.id === updatedItem.id ? updatedItem : item));
-        setSession(null); setActiveItem(null); setEnding(false);
-        addToast('这段“一起看”已同时写入前端与后端记忆', 'success');
     };
 
     const onNovelScroll = () => {

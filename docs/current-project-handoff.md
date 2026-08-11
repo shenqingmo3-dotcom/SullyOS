@@ -2,12 +2,13 @@
 
 更新时间：2026-08-11
 
-工作区：`C:\Users\86130\.codex\worktrees\a93e\sullyos`
+工作区：`C:\Users\86130\Documents\sullyos`
 
-分支：`codex/sullyos`
+分支：`master`
+二改整合提交：`77250050 feat: integrate SullyOS second-edition frontend and backend`
 基线提交：`b4fb5647 Merge pull request #405 from qegj567-cloud/claude/pengyou-character-profile-edit-8lwz4d`
 
-> 这是进行中的项目交接，不是完成报告。当前工作区有大量未提交改动和未跟踪文件，不能清理、重置或覆盖。
+> 二改源码已合并到主工作树并形成可追踪提交；真实影院、手机数据迁移与 VPS/PWA 部署仍属于下一阶段。
 
 ## 1. 项目最终目标
 
@@ -351,8 +352,9 @@
 
 ## 11. 工作区保护说明
 
-- 当前 `git status` 有大量修改与未跟踪文件，包括整个 `backend/`、新 App、工具设置、文档、worker bundle 和 `.deploy/` 包。
-- 这些改动来自连续多轮开发，不能运行 `git reset --hard`、`git checkout -- .`、递归删除或清空未跟踪文件。
+- 二改的前端、后端、工具与文档已由 `77250050` 提交并快进合并到主工作树 `master`。
+- 主工作树仍有用户自己的未跟踪目录 `apple-health-shortcuts-mcp/`；它没有被纳入 SullyOS 提交，也没有被清理或覆盖。
+- `backend/.env*`、构建目录、依赖目录和工具运行时等本机内容继续按忽略规则保留，不属于源码提交。
 - `progress.md` 是更早的 LifeSim 任务记录，已经过时，不能作为当前任务进度来源。
 - 当前最新可信交接以本文为准，但接手后仍要用实际代码、构建和运行结果校验每项声明。
 
@@ -388,3 +390,12 @@
 ## 14. 二改完整功能审计
 
 域名迁移前的前端、后端、同步、工具和验证状态已经重新按真实源码整理，详见 `docs/second-edition-feature-audit.md`。该文明确区分了“已落地并通过自动验证”“代码完成但依赖真实外部服务联调”和“尚未部署”，后续迁移应以这份边界为准。
+
+## 15. 主工作树合并与复核结果
+
+- `codex/sullyos` 的二改提交 `77250050` 已快进合并到 `C:\Users\86130\Documents\sullyos` 的 `master`，影院、小说共读和线上/线下功能现已位于同一工作树。
+- 修复“一起看”讨论中用户或 AI 切换互动模式后，会话标签、角色资料与后端 metadata 不一致的问题。
+- 修复结束共读时后端同步失败仍提示“前后端均已同步”、异常后按钮一直处于结束中，以及异步发送期间可能重复提交的问题。
+- 修复同一轮聊天先切换互动模式再调用 MCP 时，活动卡片和影院记忆仍使用旧角色状态的问题。
+- 加固影院后台 runtime 停止后的异步检查，避免组件状态变化后旧轮询继续发言或重复归档；影院测试已改用官方 `room.status`、`playback`、`newMessages` 返回结构。
+- 复核后前端完整测试、生产构建、后端 TypeScript 检查和后端完整测试均通过。真实 Open Watch Cinema 房间端到端联调仍保留为部署前的外部验收项。

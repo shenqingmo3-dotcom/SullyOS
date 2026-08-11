@@ -84,6 +84,7 @@ export function startCinemaAgentRuntime(input: {
                     cursors: session.cinema.cursors || {},
                 };
                 const tick = await callMcpTool(server, 'open_watch_cinema_tick', tickArgs);
+                if (stopped) return;
                 await observeCinemaMcpCall({
                     serverName: server.name,
                     toolName: 'open_watch_cinema_tick',
@@ -109,6 +110,7 @@ export function startCinemaAgentRuntime(input: {
                     realtimeConfig: input.realtimeConfig,
                     recallQueryHint: `一起看电影 ${session.itemTitle}`,
                 });
+                if (stopped) return;
                 const tickText = JSON.stringify(tick.data).slice(0, 24_000);
                 const response = await fetch(`${input.apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                     method: 'POST',
@@ -127,6 +129,7 @@ export function startCinemaAgentRuntime(input: {
                     }),
                 });
                 const data = await safeResponseJson(response);
+                if (stopped) return;
                 if (!response.ok) continue;
                 const decision = parseDecision(extractContent(data).trim());
                 if (!decision.speak) continue;
@@ -139,6 +142,7 @@ export function startCinemaAgentRuntime(input: {
                     senderName: latest.cinema.consumerName || character.name,
                 };
                 const posted = await callMcpTool(server, 'cinema_post_message', postArgs);
+                if (stopped) return;
                 await observeCinemaMcpCall({
                     serverName: server.name,
                     toolName: 'cinema_post_message',

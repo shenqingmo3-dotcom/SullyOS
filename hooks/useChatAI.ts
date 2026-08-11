@@ -1137,7 +1137,7 @@ export const useChatAI = ({
                     type: 'mcp_activity_card',
                     eventId: `frontend-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                     eventType: 'mcp_activity',
-                    charName: char.name,
+                    charName: charForGen.name,
                     occurredAt,
                     title: serverName || 'MCP 工具',
                     capabilityId: serverName,
@@ -1148,14 +1148,14 @@ export const useChatAI = ({
                     summary,
                 };
                 await DB.saveMessage({
-                    charId: char.id,
+                    charId: charForGen.id,
                     role: 'system',
                     type: 'score_card',
                     content: JSON.stringify(scoreCard),
                     metadata: {
                         scoreCard,
                         source: 'frontend-mcp',
-                        interactionMode: char.interactionMode === 'offline' ? 'offline' : 'online',
+                        interactionMode: charForGen.interactionMode === 'offline' ? 'offline' : 'online',
                     },
                 } as any);
                 setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
@@ -1164,7 +1164,7 @@ export const useChatAI = ({
                     toolName,
                     args,
                     result,
-                    character: char,
+                    character: charForGen,
                     user: userProfile,
                 }).catch(error => console.warn('[CinemaMemory] 观影会话同步失败:', error));
             };
