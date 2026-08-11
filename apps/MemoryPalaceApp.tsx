@@ -43,6 +43,11 @@ import {
     makeCustomMemoryPalaceWaterline,
     resolveMemoryPalaceWaterline,
 } from '../utils/memoryPalace/waterline';
+import {
+    deleteBackendMemoryPalace,
+    flushBackendMemorySyncQueue,
+    loadBackendChatConfig,
+} from '../utils/backendClient';
 
 /** 手动总结面板：每页渲染多少条聊天记录（翻页，避免一次性塞几百条 DOM 卡顿） */
 const RANGE_PAGE_SIZE = 50;
@@ -660,6 +665,13 @@ const MemoryWaterlineEditor: React.FC<{
 export default function MemoryPalaceApp() {
     const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig, characterGroups } = useOS();
     const char = characters.find(c => c.id === activeCharacterId);
+    const flushMemoryDeletesToBackend = useCallback(async (): Promise<boolean> => {
+        if (!char) return false;
+        const config = loadBackendChatConfig();
+        if (!config.enabled) return false;
+        await flushBackendMemorySyncQueue({ config, character: char, user: userProfile });
+        return true;
+    }, [char, userProfile]);
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选角色页的分组筛选
 
     const [view, setView] = useState<'picker' | 'palace' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>('picker');
@@ -1928,6 +1940,7 @@ export default function MemoryPalaceApp() {
             for (const id of selectedIds) {
                 await deleteMemory(id);
             }
+            const synced = await flushMemoryDeletesToBackend();
             // 刷新房间数据
             if (selectedRoom) {
                 const nodes = await MemoryNodeDB.getByRoom(char.id, selectedRoom);
@@ -1937,6 +1950,12 @@ export default function MemoryPalaceApp() {
             setSelectedIds(new Set());
             setSelectMode(false);
             loadStats();
+            addToast(
+                synced ? '选中记忆已从前端和后端删除' : '本地已删除，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
+        } catch (error) {
+            addToast('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'), 'error');
         } finally {
             setDeleting(false);
         }
@@ -1947,6 +1966,7 @@ export default function MemoryPalaceApp() {
         setDeleting(true);
         try {
             await deleteMemory(nodeId);
+            const synced = await flushMemoryDeletesToBackend();
             setSelectedNode(null);
             setView(prevView);
             if (prevView === 'room' && selectedRoom && char) {
@@ -1964,6 +1984,12 @@ export default function MemoryPalaceApp() {
                 setExpandedBoxId(null);
             }
             loadStats();
+            addToast(
+                synced ? '记忆已从前端和后端删除' : '本地已删除，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
+        } catch (error) {
+            addToast('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'), 'error');
         } finally {
             setDeleting(false);
         }
@@ -1986,6 +2012,8 @@ export default function MemoryPalaceApp() {
         setWipeResult(null);
         trackEvent('清空全部记忆数据', { scope: includeRemote ? 'all' : 'local' });
         try {
+            const backendConfig = loadBackendChatConfig();
+            if (backendConfig.enabled) await deleteBackendMemoryPalace(backendConfig);
             const result = await wipeAllMemoryPalace({
                 remoteConfig: includeRemote ? remoteVectorConfig : undefined,
                 skipRemote: !includeRemote,
@@ -2178,8 +2206,15 @@ export default function MemoryPalaceApp() {
             for (const node of migrated) {
                 await deleteMemory(node.id);
             }
-            setMigrationResult(`已清除 ${migrated.length} 条迁移数据`);
+            const synced = await flushMemoryDeletesToBackend();
+            setMigrationResult(
+                synced
+                    ? '已从前端和后端清除 ' + migrated.length + ' 条迁移数据'
+                    : '本地已清除 ' + migrated.length + ' 条；后端删除已进入待同步队列',
+            );
             loadStats();
+        } catch (error) {
+            setMigrationResult('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'));
         } finally {
             setDeleting(false);
         }

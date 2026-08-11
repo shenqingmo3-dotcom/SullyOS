@@ -73,6 +73,9 @@ import { exportMcdLocal } from '../utils/mcdMcpClient';
 import { exportMcpLocal } from '../utils/mcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
+import { startBackendEventRuntime } from '../utils/backendEventRuntime';
+import { deleteBackendCharacter, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { startCinemaAgentRuntime } from '../utils/cinemaAgentRuntime';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -871,6 +874,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [apiPresets, setApiPresets] = useState<ApiPreset[]>([]);
   const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig>(defaultRealtimeConfig);
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      return startBackendEventRuntime();
+  }, [isDataLoaded]);
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      return startCinemaAgentRuntime({ characters, user: userProfile, groups, apiConfig, realtimeConfig });
+  }, [isDataLoaded, characters, userProfile, groups, apiConfig, realtimeConfig]);
   const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
     try { const s = localStorage.getItem('os_memory_palace_config'); return s ? { ...defaultMemoryPalaceConfig, ...JSON.parse(s) } : defaultMemoryPalaceConfig; } catch { return defaultMemoryPalaceConfig; }
   });
@@ -1983,6 +1994,26 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           addToast(`${charName || '角色'}的情绪评估失败：${reason || '未知原因'}（不影响聊天回复）`, 'error');
       };
 
+      const journalEntryHandler = (e: Event) => {
+          const { charName } = ((e as CustomEvent).detail || {}) as { charName?: string };
+          setLastMsgTimestamp(Date.now());
+          addToast(`${charName || '角色'} 写了一篇新日记`, 'success');
+      };
+
+      const journalCommentHandler = (e: Event) => {
+          const { charName } = ((e as CustomEvent).detail || {}) as { charName?: string };
+          setLastMsgTimestamp(Date.now());
+          addToast(`${charName || '角色'} 在日记旁贴了一张便签`, 'success');
+      };
+
+      const backendCardHandler = (e: Event) => {
+          const { charName, eventType } = ((e as CustomEvent).detail || {}) as { charName?: string; eventType?: string };
+          setLastMsgTimestamp(Date.now());
+          if (eventType === 'mcp_activity' || eventType === 'tool_activity') {
+              addToast(`${charName || '角色'} 留下了一条 MCP 探索记录`, 'success');
+          }
+      };
+
       // 主动消息处理失败 → 明确告诉用户，别让消息无声无息地不出现。
       // 平时 push 路径是不弹 toast 的，但这里频率极低（本地存储出问题才会有），
       // 而且不说的话用户只会觉得「角色今天没理我」。每角色 60s 冷却防连推时刷屏。
@@ -2011,6 +2042,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       window.addEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
       window.addEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
       window.addEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
+      window.addEventListener('journal-entry-received', journalEntryHandler);
+      window.addEventListener('journal-comment-received', journalCommentHandler);
+      window.addEventListener('backend-card-received', backendCardHandler);
       document.addEventListener('visibilitychange', onVisible);
       return () => {
           window.removeEventListener('active-msg-received', handler);
@@ -2021,6 +2055,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           window.removeEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
+          window.removeEventListener('journal-entry-received', journalEntryHandler);
+          window.removeEventListener('journal-comment-received', journalCommentHandler);
+          window.removeEventListener('backend-card-received', backendCardHandler);
           document.removeEventListener('visibilitychange', onVisible);
       };
   }, [sendProactiveNativeNotification]);
@@ -3010,6 +3047,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         directive?: { mode?: 'online' | 'offline'; location?: string; distance?: string };
       };
       if (!detail.charId || !detail.directive?.mode) return;
+      const currentCharacter = characters.find(character => character.id === detail.charId);
+      const updatedCharacter = currentCharacter ? {
+        ...currentCharacter,
+        interactionMode: detail.directive.mode,
+        interactionScene: {
+          ...(currentCharacter.interactionScene || {}),
+          ...(detail.directive.location ? { location: detail.directive.location } : {}),
+          ...(detail.directive.distance ? { distance: detail.directive.distance } : {}),
+          changedAt: Date.now(),
+          changedBy: 'assistant' as const,
+        },
+      } : null;
       void updateCharacter(detail.charId, (character) => ({
         interactionMode: detail.directive!.mode,
         interactionScene: {
@@ -3020,10 +3069,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           changedBy: 'assistant',
         },
       }));
+      const backendConfig = loadBackendChatConfig();
+      if (updatedCharacter && backendConfig.enabled) {
+        void syncBackendContext({
+          config: backendConfig,
+          character: updatedCharacter,
+          user: userProfile,
+          messages: [],
+          memories: [],
+        }).catch(error => console.warn('[interaction-mode] assistant backend sync failed', error));
+      }
     };
     window.addEventListener('interaction-mode-directive', handleInteractionModeDirective);
     return () => window.removeEventListener('interaction-mode-directive', handleInteractionModeDirective);
-  }, [updateCharacter]);
+  }, [characters, updateCharacter, userProfile]);
   const deleteCharacter = async (id: string, options?: { force?: boolean }): Promise<DeleteCharacterResult> => {
     const target = characters.find(c => c.id === id);
     // 主动消息 2.0 的任务活在用户自己的 worker 上，不随本地角色删除消失：留着的话
@@ -3103,6 +3162,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           addToast('ta 的主动消息任务没能在远端取消，可能仍会到点推送，请检查 Worker 连接', 'error');
         }
       })();
+    }
+
+    const backendConfig = loadBackendChatConfig();
+    if (backendConfig.enabled) {
+      try {
+        await deleteBackendCharacter(backendConfig, id);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('context_not_found')) throw error;
+      }
     }
 
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });

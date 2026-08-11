@@ -31,6 +31,7 @@ import { normalizeTranslationLangLabel } from './translationLang';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { materializeVisionDescriptions } from './visionApi';
 import { buildInteractionModePrompt } from './interactionMode';
+import { buildActiveCinemaContext } from './cinemaMemory';
 
 export { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 
@@ -409,6 +410,9 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     // ── 10. recency 钢印归位 + 组装 fullMessages ─────────
     // 「关于对方的表达」+「回到你自己」必须是易变尾段的最后内容：修复旧版把双语/HTML/
     // 思考链/点单块拼在钢印之后、模型开口前最后读到的是格式说明书的问题。
+    // 外部影院仍在另一个网页里播放；这里把当前房间、片名、进度和最近讨论注入聊天，
+    // 让用户切回 SharkOS 后角色能无缝接着聊，并在结束时由影院观察器归档记忆。
+    volatileTail += await buildActiveCinemaContext(char.id, char.name);
     volatileTail += parts.recencyTail;
 
     // 结构：[稳定 system] + [历史消息] + [易变状态 system] (+ 末尾 reminder)。

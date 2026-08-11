@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { formatNpcNetworkContext, relevantNpcNetwork } from './npcNetwork';
 
@@ -23,5 +24,15 @@ describe('npcNetwork', () => {
         expect(context).toContain('和用户是“室友”（好感 100/100）');
         expect(context).toContain('和你是“不熟”（好感 0/100）');
         expect(context).toContain('对话、日程安排和自主活动');
+    });
+});
+
+describe('NPC editor wiring', () => {
+    it('keeps the second-edition editor in Neural Link', () => {
+        const source = readFileSync(new URL('../apps/Character.tsx', import.meta.url), 'utf8');
+        expect(source).toContain('title="NPC 关系网"');
+        expect(source).toContain('和用户的关系');
+        expect(source).toContain('和角色的关系（选择后才会注入该角色）');
+        expect(source).toContain('syncNpcContext(nextUser');
     });
 });

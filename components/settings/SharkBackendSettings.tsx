@@ -2,11 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import {
     addBackendModelProfile,
+    createBackendPairingCode,
     deleteBackendModelProfile,
+    disableBackendPush,
+    discoverBackendModels,
     enableBackendPush,
     exchangeBackendPairingCode,
     getBackendAgents,
     getBackendModelPool,
+    getBackendPushConfig,
     loadBackendChatConfig,
     saveBackendChatConfig,
     syncBackendCharacterFully,
@@ -19,6 +23,7 @@ import {
     type BackendAgentsResult,
     type BackendChatConfig,
     type BackendModelPool,
+    type BackendPushConfig,
 } from '../../utils/backendClient';
 import { acknowledgeBackendMemoryChangesThrough } from '../../utils/backendSyncQueue';
 import { DB } from '../../utils/db';
@@ -51,11 +56,14 @@ const SharkBackendSettings: React.FC = () => {
     const [open, setOpen] = useState(false);
     const [config, setConfig] = useState<BackendChatConfig>(loadBackendChatConfig);
     const [pairingCode, setPairingCode] = useState('');
+    const [generatedPairingCode, setGeneratedPairingCode] = useState('');
     const [status, setStatus] = useState('');
     const [busy, setBusy] = useState<string | null>(null);
     const [agents, setAgents] = useState<BackendAgentsResult | null>(null);
     const [agentBusyId, setAgentBusyId] = useState<string | null>(null);
     const [modelPool, setModelPool] = useState<BackendModelPool | null>(null);
+    const [pushConfig, setPushConfig] = useState<BackendPushConfig | null>(null);
+    const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
     const [newModel, setNewModel] = useState({ label: '', baseUrl: '', apiKey: '', model: '' });
 
     const persistConfig = () => {
@@ -65,12 +73,14 @@ const SharkBackendSettings: React.FC = () => {
     };
 
     const refreshRemoteState = async (candidate: BackendChatConfig) => {
-        const [nextAgents, nextPool] = await Promise.all([
+        const [nextAgents, nextPool, nextPush] = await Promise.all([
             getBackendAgents(candidate),
             getBackendModelPool(candidate),
+            getBackendPushConfig(candidate),
         ]);
         setAgents(nextAgents);
         setModelPool(nextPool);
+        setPushConfig(nextPush);
     };
 
     useEffect(() => {
@@ -125,6 +135,37 @@ const SharkBackendSettings: React.FC = () => {
             setStatus('✅ 已加入后端模型池');
         } catch (error) {
             setStatus(`❌ 保存模型失败：${error instanceof Error ? error.message : '未知错误'}`);
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    const discoverModels = async () => {
+        if (!newModel.baseUrl.trim() || !newModel.apiKey.trim()) return;
+        setBusy('discover-models');
+        try {
+            const models = await discoverBackendModels(persistConfig(), {
+                baseUrl: newModel.baseUrl,
+                apiKey: newModel.apiKey,
+            });
+            setDiscoveredModels(models);
+            if (!newModel.model && models[0]) setNewModel(current => ({ ...current, model: models[0] }));
+            setStatus(models.length ? `✅ 已发现 ${models.length} 个可用模型` : '⚠️ 接口没有返回可用模型');
+        } catch (error) {
+            setStatus(`❌ 读取模型失败：${error instanceof Error ? error.message : '未知错误'}`);
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    const generatePairingCode = async () => {
+        setBusy('generate-pair');
+        try {
+            const result = await createBackendPairingCode(persistConfig());
+            setGeneratedPairingCode(result.code);
+            setStatus('✅ 新配对码已生成，15 分钟内使用一次即失效');
+        } catch (error) {
+            setStatus(`❌ 生成配对码失败：${error instanceof Error ? error.message : '未知错误'}`);
         } finally {
             setBusy(null);
         }
@@ -248,9 +289,24 @@ const SharkBackendSettings: React.FC = () => {
             const candidate = persistConfig();
             await enableBackendPush(candidate);
             const result = await testBackendPush(candidate);
+            setPushConfig(await getBackendPushConfig(candidate));
             setStatus(`✅ 手机推送已连接；测试投递 ${result.delivered}/${result.attempted}`);
         } catch (error) {
             setStatus(`❌ 推送设置失败：${error instanceof Error ? error.message : '未知错误'}`);
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    const turnOffPush = async () => {
+        setBusy('disable-push');
+        try {
+            const candidate = persistConfig();
+            await disableBackendPush(candidate);
+            setPushConfig(await getBackendPushConfig(candidate));
+            setStatus('✅ 本设备后台推送已关闭');
+        } catch (error) {
+            setStatus(`❌ 关闭推送失败：${error instanceof Error ? error.message : '未知错误'}`);
         } finally {
             setBusy(null);
         }
@@ -271,9 +327,10 @@ const SharkBackendSettings: React.FC = () => {
                 <label className="block text-[10px] font-bold text-slate-500">后端地址
                     <input value={config.baseUrl} onChange={event => setConfig(current => ({ ...current, baseUrl: event.target.value }))} placeholder="https://goldenbite.icu" className="mt-1 w-full rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2 text-xs text-slate-700" />
                 </label>
-                <label className="block text-[10px] font-bold text-slate-500">APP Token
-                    <input type="password" value={config.token} onChange={event => setConfig(current => ({ ...current, token: event.target.value }))} className="mt-1 w-full rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2 text-xs text-slate-700" />
+                <label className="block text-[10px] font-bold text-slate-500">APP Token（高级设置，首次配对不用填）
+                    <input type="password" value={config.token} onChange={event => setConfig(current => ({ ...current, token: event.target.value }))} placeholder="建议使用下方的一次性配对码" className="mt-1 w-full rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2 text-xs text-slate-700" />
                 </label>
+                {!config.token.trim() && <p className="rounded-xl border border-sky-100 bg-sky-50 px-3 py-2 text-[10px] leading-relaxed text-sky-800">APP Token 是服务器内部密钥，不需要你自己创建。首次连接只要在下面输入服务器生成的 15 分钟一次性配对码。</p>}
                 {!config.token.trim() && <div className="flex gap-2 rounded-xl bg-sky-50 p-2">
                     <input value={pairingCode} onChange={event => setPairingCode(event.target.value)} placeholder="一次性配对码" className="min-w-0 flex-1 rounded-lg border border-sky-100 bg-white px-2 py-2 text-xs" />
                     <button disabled={busy !== null || !pairingCode.trim()} onClick={() => void pair()} className="rounded-lg bg-sky-600 px-3 text-xs font-bold text-white disabled:opacity-50">{busy === 'pair' ? '配对中' : '配对'}</button>
@@ -282,6 +339,23 @@ const SharkBackendSettings: React.FC = () => {
                     <button disabled={busy !== null} onClick={() => void connect()} className="rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white disabled:opacity-50">{busy === 'connect' ? '连接中…' : '保存并测试'}</button>
                     <button disabled={busy !== null || !config.token.trim()} onClick={() => void setupPush()} className="rounded-xl border border-emerald-200 bg-white py-2.5 text-xs font-bold text-emerald-700 disabled:opacity-50">{busy === 'push' ? '设置中…' : '连接并测试推送'}</button>
                 </div>
+                {config.token.trim() && <div className="space-y-2 rounded-xl border border-sky-100 bg-sky-50 p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                        <div>
+                            <div className="text-[10px] font-bold text-sky-800">给另一台设备配对</div>
+                            <div className="mt-0.5 text-[9px] text-sky-600">不会显示或复制服务器 APP Token。</div>
+                        </div>
+                        <button disabled={busy !== null} onClick={() => void generatePairingCode()} className="shrink-0 rounded-lg border border-sky-200 bg-white px-3 py-2 text-[10px] font-bold text-sky-700 disabled:opacity-50">{busy === 'generate-pair' ? '生成中…' : '生成配对码'}</button>
+                    </div>
+                    {generatedPairingCode && <div className="rounded-lg bg-white px-3 py-2 text-center font-mono text-base font-bold tracking-[0.18em] text-sky-700">{generatedPairingCode}</div>}
+                </div>}
+                {pushConfig && <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2">
+                    <div className="min-w-0">
+                        <div className="text-[10px] font-bold text-emerald-800">Web Push</div>
+                        <div className="text-[9px] text-emerald-600">服务器订阅 {pushConfig.activeSubscriptions} 台 · {pushConfig.configured ? '密钥已配置' : '密钥未配置'}</div>
+                    </div>
+                    <button disabled={busy !== null || pushConfig.activeSubscriptions === 0} onClick={() => void turnOffPush()} className="shrink-0 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-[10px] font-bold text-emerald-700 disabled:opacity-40">{busy === 'disable-push' ? '关闭中…' : '关闭本机推送'}</button>
+                </div>}
 
                 {modelPool && <div className="space-y-2 rounded-2xl bg-slate-50 p-3">
                     <div className="flex items-center justify-between"><span className="text-xs font-bold text-slate-700">后端模型池</span><span className="text-[9px] text-slate-400">{modelPool.routing.mode === 'auto' ? '自动故障转移' : '固定模型'}</span></div>
@@ -298,11 +372,15 @@ const SharkBackendSettings: React.FC = () => {
                     <button onClick={async () => { await updateBackendModelRouting(persistConfig(), { mode: 'auto', activeProfileId: null }); setModelPool(await getBackendModelPool(persistConfig())); }} className="w-full rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600">使用自动故障转移</button>
                     <div className="grid grid-cols-2 gap-2">
                         <input value={newModel.label} onChange={event => setNewModel(value => ({ ...value, label: event.target.value }))} placeholder="名称" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
-                        <input value={newModel.model} onChange={event => setNewModel(value => ({ ...value, model: event.target.value }))} placeholder="模型名" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
+                        <input list="sharkos-backend-models" value={newModel.model} onChange={event => setNewModel(value => ({ ...value, model: event.target.value }))} placeholder="模型名" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
                         <input value={newModel.baseUrl} onChange={event => setNewModel(value => ({ ...value, baseUrl: event.target.value }))} placeholder="API 地址" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
                         <input type="password" value={newModel.apiKey} onChange={event => setNewModel(value => ({ ...value, apiKey: event.target.value }))} placeholder="API Key" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
                     </div>
-                    <button disabled={busy !== null || !newModel.baseUrl || !newModel.apiKey || !newModel.model} onClick={() => void addModel()} className="w-full rounded-lg bg-slate-700 py-2 text-[10px] font-bold text-white disabled:opacity-40">{busy === 'model' ? '保存中…' : '加入模型池'}</button>
+                    <datalist id="sharkos-backend-models">{discoveredModels.map(model => <option key={model} value={model} />)}</datalist>
+                    <div className="grid grid-cols-2 gap-2">
+                        <button disabled={busy !== null || !newModel.baseUrl || !newModel.apiKey} onClick={() => void discoverModels()} className="rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600 disabled:opacity-40">{busy === 'discover-models' ? '读取中…' : '自动读取模型'}</button>
+                        <button disabled={busy !== null || !newModel.baseUrl || !newModel.apiKey || !newModel.model} onClick={() => void addModel()} className="rounded-lg bg-slate-700 py-2 text-[10px] font-bold text-white disabled:opacity-40">{busy === 'model' ? '保存中…' : '加入模型池'}</button>
+                    </div>
                 </div>}
 
                 <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 text-[10px] leading-relaxed text-amber-800">完整同步以当前手机为权威快照：相同 ID 更新而不是新增；最终 reconcile 会移除后端中手机已不存在的旧迁移副本。请先导入最完整的手机备份。</div>

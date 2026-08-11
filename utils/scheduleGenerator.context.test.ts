@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CharacterProfile, Message, UserProfile } from '../types';
-import { formatChatHistoryForSchedule } from './scheduleGenerator';
+import type { CharacterProfile, Message, Task, UserProfile } from '../types';
+import { formatChatHistoryForSchedule, formatUserScheduleForDate } from './scheduleGenerator';
 
 const char = {
     id: 'char-1',
@@ -104,5 +104,20 @@ describe('日程历史与私聊消息格式对齐', () => {
         expect(block).toContain('[User sent an image]');
         expect(block).not.toContain('data:image/png;base64');
         expect(block.length).toBeLessThan(1000);
+    });
+});
+
+describe('用户日历约束', () => {
+    it('把当日与每周重复日程交给角色调度，并尊重单日取消', () => {
+        const tasks = [
+            { id: 'weekly', title: '上午上课', supervisorId: char.id, tone: 'gentle', isCompleted: false, createdAt: 1, repeatWeekly: true, repeatDays: [4], startTime: '09:00', endTime: '11:00' },
+            { id: 'once', title: '十二点一起吃饭', supervisorId: char.id, tone: 'gentle', isCompleted: false, createdAt: 2, scheduleDate: '2026-07-30', startTime: '12:00' },
+            { id: 'cancelled', title: '取消的课', supervisorId: char.id, tone: 'gentle', isCompleted: false, createdAt: 3, repeatWeekly: true, repeatDays: [4], excludedDates: ['2026-07-30'], startTime: '15:00' },
+        ] as Task[];
+        const block = formatUserScheduleForDate(user, tasks, '2026-07-30', 4);
+        expect(block).toContain('上午上课');
+        expect(block).toContain('十二点一起吃饭');
+        expect(block).not.toContain('取消的课');
+        expect(block).toContain('只调整受影响时段');
     });
 });

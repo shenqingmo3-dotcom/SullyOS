@@ -1,5 +1,5 @@
 
-import { CharacterProfile, UserProfile, DailySchedule, ScheduleSlot, Message, Emoji } from '../types';
+import { CharacterProfile, UserProfile, DailySchedule, ScheduleSlot, Message, Emoji, Task } from '../types';
 import { ContextBuilder } from './context';
 import { DB } from './db';
 import { safeResponseJson, extractContent, extractJson } from './safeApi';
@@ -62,6 +62,38 @@ export function formatChatHistoryForSchedule(
         return `${sender}: ${content}`;
     });
     return `\n## 最近的聊天记录（与「${user.name}」）\n${lines.join('\n')}\n`;
+}
+
+export function formatUserScheduleForDate(
+    user: UserProfile,
+    tasks: Task[],
+    dateKey: string,
+    dayOfWeek: number,
+): string {
+    const activeTasks = tasks.filter(task => {
+        if (task.isCompleted || task.excludedDates?.includes(dateKey)) return false;
+        if (task.repeatWeekly) return (task.repeatDays || []).includes(dayOfWeek);
+        return (task.scheduleDate || task.deadline?.slice(0, 10)) === dateKey;
+    }).map(task => ({
+        title: task.title,
+        startTime: task.startTime || task.deadline?.slice(11, 16) || '时间未定',
+        endTime: task.endTime,
+        location: task.location,
+        note: task.note,
+    }));
+    const legacyEntries = (user.weeklySchedule || [])
+        .filter(entry => entry.daysOfWeek.includes(dayOfWeek));
+    const entries = [...activeTasks, ...legacyEntries]
+        .filter((entry, index, all) => all.findIndex(candidate => (
+            candidate.title === entry.title
+            && candidate.startTime === entry.startTime
+            && candidate.endTime === entry.endTime
+        )) === index)
+        .sort((left, right) => left.startTime.localeCompare(right.startTime));
+    if (entries.length === 0) return '';
+    return `\n## 用户今天的日程（共同生活的现实约束）\n${entries.map(entry => (
+        `- ${entry.startTime}${entry.endTime ? `-${entry.endTime}` : ''} ${entry.title}${entry.location ? `，地点：${entry.location}` : ''}${entry.note ? `（${entry.note}）` : ''}`
+    )).join('\n')}\n角色不必围着用户行动，但约见、陪伴、等下课等共同安排必须尊重这些时间；最近对话明确改变计划时，只调整受影响时段及之后必要的安排。\n`;
 }
 
 function buildLifestylePrompt(
@@ -236,11 +268,8 @@ export async function generateDailyScheduleForChar(
     const now = getScheduleWallClock(char, baseNow);
     const today = getScheduleDateKey(char, baseNow);
 
-    // Check if already exists
-    if (!forceRegenerate) {
-        const existing = await getDailyScheduleForChar(char, baseNow);
-        if (existing) return existing;
-    }
+    const existing = await getDailyScheduleForChar(char, baseNow);
+    if (!forceRegenerate && existing) return existing;
 
     // Preserve cover image from previous schedules
     let coverImage: string | undefined;
@@ -278,13 +307,19 @@ export async function generateDailyScheduleForChar(
     );
 
     const chatHistoryBlock = formatChatHistoryForSchedule(historyMessages, char, userProfile, emojis);
+    const userTasks = await DB.getAllTasks().catch(() => [] as Task[]);
+    const userScheduleBlock = formatUserScheduleForDate(userProfile, userTasks, today, now.getDay());
+    const priorScheduleBlock = forceRegenerate && existing
+        ? `\n## 今天已经存在的角色日程（作为调整基线）\n${existing.slots.map(slot => `- ${slot.startTime} ${slot.activity}${slot.location ? `，${slot.location}` : ''}`).join('\n')}\n如果最近对话改变了双方安排，只调整受影响的时段及其之后必要的安排；没有理由改变的时段保持不动。\n`
+        : '';
+    const planningContext = `${chatHistoryBlock}${userScheduleBlock}${priorScheduleBlock}`;
 
     const dayOfWeek = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
 
     const style = char.scheduleStyle || 'lifestyle';
     const prompt = style === 'mindful'
-        ? buildMindfulPrompt(baseContext, char, userProfile, today, dayOfWeek, chatHistoryBlock)
-        : buildLifestylePrompt(baseContext, char, userProfile, today, dayOfWeek, chatHistoryBlock);
+        ? buildMindfulPrompt(baseContext, char, userProfile, today, dayOfWeek, planningContext)
+        : buildLifestylePrompt(baseContext, char, userProfile, today, dayOfWeek, planningContext);
 
     try {
         const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {

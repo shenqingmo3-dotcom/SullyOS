@@ -3006,7 +3006,7 @@ const Settings: React.FC = () => {
 
         <SharkBackendSettings />
 
-        <VersionInfo />
+        {import.meta.env.DEV && <VersionInfo />}
 
         {/* QQ 小群入口不主动曝光：接近水印，仅在 hover / 键盘聚焦 / 按住时略微显现。 */}
         <button

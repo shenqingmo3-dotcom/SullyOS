@@ -67,6 +67,8 @@ import {
     resolveContextRangeMode,
     type ContextRangeMode,
 } from '../utils/chatContextRange';
+import { flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { enqueueBackendChatMessageDeletes } from '../utils/backendSyncQueue';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 /** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
@@ -243,6 +245,22 @@ const Chat: React.FC = () => {
     }, [messages]);
     const charDateKey = useLocalDateKey(resolveCharTimeZone(char));
     charRef.current = char; // Keep ref in sync for async callbacks
+    const deleteMessagesEverywhere = useCallback(async (targets: Message[]): Promise<boolean> => {
+        if (!char || targets.length === 0) return false;
+        await enqueueBackendChatMessageDeletes(char.id, targets);
+        const backendConfig = loadBackendChatConfig();
+        let backendSynced = false;
+        if (backendConfig.enabled) {
+            await flushBackendMemorySyncQueue({
+                config: backendConfig,
+                character: char,
+                user: userProfile,
+            });
+            backendSynced = true;
+        }
+        await DB.deleteMessages(targets.map(message => message.id));
+        return backendSynced;
+    }, [char, userProfile]);
     const historyContextRange = useMemo(() => {
         if (!char) return undefined;
         return computeContextRangeSnapshot(
@@ -1353,7 +1371,14 @@ const Chat: React.FC = () => {
 
         if (toDeleteIds.length === 0) return;
 
-        await DB.deleteMessages(toDeleteIds);
+        const targets = messages.filter(message => toDeleteIds.includes(message.id));
+        try {
+            await deleteMessagesEverywhere(targets);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : '未知错误';
+            addToast('回溯失败，后端上下文未删除：' + detail, 'error');
+            return;
+        }
         discardVoiceForMessages(toDeleteIds);
         // 重 roll 也删了消息：正常路径下这轮生成结束会再打脏一次，这里先打是兜住
         // 「触发失败没走到生成收尾」的路径，云端 fire_pack 不能停在删除前。
@@ -1410,14 +1435,26 @@ const Chat: React.FC = () => {
             case 'interaction-mode-toggle': {
                 if (!char) break;
                 const nextMode = char.interactionMode === 'offline' ? 'online' : 'offline';
-                updateCharacter(char.id, {
+                const updatedChar: typeof char = {
+                    ...char,
                     interactionMode: nextMode,
                     interactionScene: {
                         ...(char.interactionScene || {}),
                         changedAt: Date.now(),
                         changedBy: 'user',
                     },
-                });
+                };
+                updateCharacter(char.id, updatedChar);
+                const backendConfig = loadBackendChatConfig();
+                if (backendConfig.enabled) {
+                    void syncBackendContext({
+                        config: backendConfig,
+                        character: updatedChar,
+                        user: userProfile,
+                        messages: [],
+                        memories: [],
+                    }).catch(error => console.warn('[interaction-mode] backend sync failed', error));
+                }
                 setShowPanel('none');
                 addToast(nextMode === 'offline' ? '已切到线下相处' : '已切回线上聊天', 'success');
                 break;
@@ -1694,6 +1731,19 @@ const Chat: React.FC = () => {
     }, [char, reloadMessages]);
 
     // --- Schedule Handlers ---
+    const syncScheduleSnapshot = (targetChar: typeof char) => {
+        if (!targetChar) return;
+        const backendConfig = loadBackendChatConfig();
+        if (!backendConfig.enabled || !backendConfig.baseUrl.trim() || !backendConfig.token.trim()) return;
+        void syncBackendContext({
+            config: backendConfig,
+            character: targetChar,
+            user: userProfile,
+            messages: [],
+            memories: [],
+        }).catch(error => console.warn('[Schedule] backend snapshot sync failed', error));
+    };
+
     const loadSchedule = async () => {
         if (!char) return;
         if (!isScheduleFeatureOn(char)) { setScheduleData(null); return; }
@@ -1715,6 +1765,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        syncScheduleSnapshot(char);
         markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
 
@@ -1724,6 +1775,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        syncScheduleSnapshot(char);
         markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
 
@@ -2083,7 +2135,7 @@ const Chat: React.FC = () => {
                     return;
                 }
                 const processedIds = processedMsgs.map(m => m.id);
-                await DB.deleteMessages(processedIds);
+                const synced = await deleteMessagesEverywhere(processedMsgs);
                 discardVoiceForMessages(processedIds);
                 // 清历史同样动了云端 fire_pack 的对话快照来源，落库后打脏（下同）。
                 markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
@@ -2092,7 +2144,12 @@ const Chat: React.FC = () => {
                 setTotalMsgCount(remaining.length);
                 setVisibleCount(LOAD_BATCH_SIZE);
                 visibleCountRef.current = LOAD_BATCH_SIZE;
-                addToast(`已安全清理 ${processedMsgs.length} 条已处理记录，保留 ${remaining.length} 条未处理记录`, 'success');
+                addToast(
+                    synced
+                        ? '已前后端清理 ' + processedMsgs.length + ' 条已处理记录，保留 ' + remaining.length + ' 条未处理记录'
+                        : '本地已清理 ' + processedMsgs.length + ' 条，后端删除已进入待同步队列',
+                    synced ? 'success' : 'info',
+                );
                 trackEvent('清空聊天记录');
                 setModalType('none');
                 return;
@@ -2110,22 +2167,29 @@ const Chat: React.FC = () => {
                 return;
             }
             const toDeleteIds = toDelete.map(m => m.id);
-            await DB.deleteMessages(toDeleteIds);
+            const synced = await deleteMessagesEverywhere(toDelete);
             discardVoiceForMessages(toDeleteIds);
             setMessages(toKeep);
             setTotalMsgCount(toKeep.length);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
-            addToast(`已清理 ${toDelete.length} 条历史，保留最近10条`, 'success');
+            addToast(
+                synced ? '已前后端清理 ' + toDelete.length + ' 条历史，保留最近10条' : '本地已清理，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
         } else {
-            const allIds = (await DB.getMessagesByCharId(char.id, true)).map(m => m.id);
-            await DB.clearMessages(char.id);
+            const allMessages = await DB.getMessagesByCharId(char.id, true);
+            const allIds = allMessages.map(m => m.id);
+            const synced = await deleteMessagesEverywhere(allMessages);
             discardVoiceForMessages(allIds);
             setMessages([]);
             setTotalMsgCount(0);
             setVisibleCount(LOAD_BATCH_SIZE);
             visibleCountRef.current = LOAD_BATCH_SIZE;
-            addToast('已清空', 'success');
+            addToast(
+                synced ? '聊天与后端上下文均已清空' : '本地已清空，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
         }
         markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
         trackEvent('清空聊天记录');
@@ -2472,7 +2536,17 @@ const Chat: React.FC = () => {
     const handleDeleteMessage = async () => {
         if (!selectedMessage) return;
         const deletedId = selectedMessage.id;
-        await DB.deleteMessage(deletedId);
+        try {
+            const synced = await deleteMessagesEverywhere([selectedMessage]);
+            addToast(
+                synced ? '消息已从前端和后端删除' : '消息已删除，后端删除已进入待同步队列',
+                synced ? 'success' : 'info',
+            );
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : '未知错误';
+            addToast('删除失败，前端内容已保留：' + detail, 'error');
+            return;
+        }
         discardVoiceForMessages([deletedId]);
         // 满血主动消息：云端 fire_pack 里带最近对话原文，删了消息不打脏的话，角色到点
         // 还会提起这条已经不存在的消息（快照的消息在 flush 时从 DB 重读，这里只管打脏）。
@@ -2481,7 +2555,6 @@ const Chat: React.FC = () => {
         setTotalMsgCount(prev => Math.max(0, prev - 1));
         setModalType('none');
         setSelectedMessage(null);
-        addToast('消息已删除', 'success');
         trackEvent('删除一条消息');
     };
 
@@ -2637,7 +2710,14 @@ const Chat: React.FC = () => {
         }
         const ids = Array.from(msgIdsToDelete);
         if (ids.length > 0) {
-            await DB.deleteMessages(ids);
+            const targets = messages.filter(message => msgIdsToDelete.has(message.id));
+            try {
+                await deleteMessagesEverywhere(targets);
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : '未知错误';
+                addToast('删除失败，前端内容已保留：' + detail, 'error');
+                return;
+            }
             discardVoiceForMessages(ids);
         }
 

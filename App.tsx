@@ -13,8 +13,8 @@ import { installDevDebugLifecycleCapture } from './utils/devDebug';
 
 const App: React.FC = () => {
   React.useEffect(() => {
-    // 常驻监听前后台 / 焦点 / 网络事件；抓不抓由 devDebug 的 lifecycle 类勾选决定
-    installDevDebugLifecycleCapture();
+    // 调试采集和浮层只属于本地开发。生产 PWA 不安装监听，也不显示构建徽标/扳手。
+    if (import.meta.env.DEV) installDevDebugLifecycleCapture();
   }, []);
 
   const useAbsoluteShell = typeof window !== 'undefined' && isIOSStandaloneWebApp();
@@ -39,8 +39,8 @@ const App: React.FC = () => {
           </OSProvider>
         </div>
       </div>
-      <BuildBadge />
-      <DevDebugPanel />
+      {import.meta.env.DEV && <BuildBadge />}
+      {import.meta.env.DEV && <DevDebugPanel />}
       <VRBroadcast />
       <WorldBroadcast />
       <ChatBroadcast />

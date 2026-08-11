@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { buildInteractionModePrompt, currentInteractionMode, extractInteractionModeDirective, inferExplicitUserMode } from './interactionMode';
 
@@ -21,7 +22,15 @@ describe('interactionMode', () => {
             interactionScene: { location: '食堂', distance: '面对面' },
         } as any, '用户');
         expect(prompt).toContain('当前是线下相处');
-        expect(prompt).toContain('小红书、X、网页和 MCP 等工具在两种状态下都可照常使用');
+        expect(prompt).toContain('社交平台、网页和 MCP 等工具在两种状态下都可照常使用');
         expect(prompt).toContain('状态持续有效');
+    });
+
+    it('聊天主提示词不再用本体规则强制回到线上', () => {
+        const source = readFileSync(new URL('./chatPrompts.ts', import.meta.url), 'utf8');
+        expect(source).toContain('同一互动平台行为规范');
+        expect(source).toContain('线下输出格式');
+        expect(source).toContain('线上输出格式');
+        expect(source).not.toContain('当前，你都是已经处于线上聊天状态了');
     });
 });
