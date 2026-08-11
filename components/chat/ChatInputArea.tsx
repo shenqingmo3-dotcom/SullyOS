@@ -1,10 +1,12 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, MapPin, CaretDown, FadersHorizontal } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import { AcnhActionTile } from '../os/acnhIcons';
 import { isIOSStandaloneWebApp } from '../../utils/iosStandalone';
-import { useIncrementalReveal } from '../../hooks/useIncrementalReveal';
+import { trackEvent } from '../../utils/analytics';
+
+const EMOJI_PAGE_SIZE = 40;
 
 interface ChatInputAreaProps {
     input: string;
@@ -51,7 +53,6 @@ interface ChatInputAreaProps {
     htmlModeEnabled?: boolean;
     // 思考过程展示（会话级）
     showThinkingChain?: boolean;
-    interactionMode?: 'online' | 'offline';
     // Input style
     inputStyle?: 'default' | 'rounded' | 'flat' | 'wechat' | 'ios' | 'telegram' | 'discord' | 'pixel';
     sendButtonStyle?: 'circle' | 'pill' | 'minimal';
@@ -77,7 +78,6 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     luckinActivated = false,
     htmlModeEnabled = false,
     showThinkingChain = false,
-    interactionMode = 'online',
     inputStyle = 'default',
     sendButtonStyle = 'circle',
     chromeStyle = 'soft',
@@ -85,7 +85,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
 }) => {
     const chatImageInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const [actionsPage, setActionsPage] = useState<0 | 1>(0);
+    const [actionsPage, setActionsPage] = useState<0 | 1 | 2>(0);
     // 气泡样式面板：搜索 + 两步确认删除（防止 hover 小 × 误删）
     const [bubbleSearch, setBubbleSearch] = useState('');
     // 会话面板的主要用途仍是切换聊天；气泡选择作为次级工具默认收起。
@@ -93,10 +93,17 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const [pendingDeleteThemeId, setPendingDeleteThemeId] = useState<string | null>(null);
     const [emojiSelectionMode, setEmojiSelectionMode] = useState(false);
     const [selectedEmojis, setSelectedEmojis] = useState<any[]>([]);
-    // 分组太多时横向拖不动：提供「展开全部分组」网格总览
-    const [showCategoryOverview, setShowCategoryOverview] = useState(false);
-    // 表情网格增量渲染：几百张 base64 图一次性挂载会卡爆，滚动到底再补
-    const { count: visibleEmojiCount, hasMore: hasMoreEmojis, sentinelRef: emojiSentinelRef } = useIncrementalReveal(emojis.length, 48, activeCategory);
+    // 手动分页避免旧版/第三方 WebView 不触发 IntersectionObserver，永远卡在「加载中」。
+    const [emojiPage, setEmojiPage] = useState(0);
+    const emojiPageCount = Math.max(1, Math.ceil(emojis.length / EMOJI_PAGE_SIZE));
+    const emojiPageStart = emojiPage * EMOJI_PAGE_SIZE;
+    const visibleEmojis = emojis.slice(emojiPageStart, emojiPageStart + EMOJI_PAGE_SIZE);
+    useEffect(() => {
+        setEmojiPage(0);
+    }, [activeCategory]);
+    useEffect(() => {
+        setEmojiPage(current => Math.min(current, emojiPageCount - 1));
+    }, [emojiPageCount]);
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const startPos = useRef({ x: 0, y: 0 });
     const isLongPressTriggered = useRef(false); // Track if long press action fired
@@ -209,8 +216,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         actionsSwipeStart.current = null;
         const SWIPE_THRESHOLD = 40;
         if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
-            if (dx < 0 && actionsPage === 0) setActionsPage(1);
-            else if (dx > 0 && actionsPage === 1) setActionsPage(0);
+            if (dx < 0 && actionsPage < 2) {
+                setActionsPage((actionsPage + 1) as 0 | 1 | 2);
+            } else if (dx > 0 && actionsPage > 0) {
+                setActionsPage((actionsPage - 1) as 0 | 1 | 2);
+            }
         }
     };
 
@@ -271,7 +281,6 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         if (showPanel !== 'emojis') {
             setEmojiSelectionMode(false);
             setSelectedEmojis([]);
-            setShowCategoryOverview(false);
         }
     }, [showPanel]);
 
@@ -347,13 +356,14 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         : isDiscordStyle
           ? 'bg-slate-900/95 border-t border-white/10'
           : 'bg-slate-50 border-t border-slate-200/60';
-    const panelTopBarClass = acnh
-        ? 'h-10 bg-[#efe7d4] border-b-2 border-[#e0d6c0] flex items-center px-2 gap-2 overflow-x-auto no-scrollbar shrink-0'
+    const panelTopBarSurfaceClass = acnh
+        ? 'bg-[#efe7d4] border-b-2 border-[#e0d6c0]'
         : isPixelStyle
-        ? 'h-10 bg-[#eadfce] border-b-2 border-[#8f674a] flex items-center px-2 gap-2 overflow-x-auto no-scrollbar shrink-0'
+        ? 'bg-[#eadfce] border-b-2 border-[#8f674a]'
         : isDiscordStyle
-          ? 'h-10 bg-slate-950 border-b border-white/10 flex items-center px-2 gap-2 overflow-x-auto no-scrollbar shrink-0'
-          : 'h-10 bg-white border-b border-slate-100 flex items-center px-2 gap-2 overflow-x-auto no-scrollbar shrink-0';
+          ? 'bg-slate-950 border-b border-white/10'
+          : 'bg-white border-b border-slate-100';
+    const panelTopBarClass = 'h-10 min-w-0 flex-1 flex items-center px-2 gap-2 overflow-x-auto no-scrollbar';
     const inactiveCategoryClass = isPixelStyle
         ? 'bg-[#f3e7d6] text-[#8f674a] border border-[#8f674a]/30'
         : isDiscordStyle
@@ -402,7 +412,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                 <div className={`p-3 flex gap-2 ${isPixelStyle ? 'bg-[#f3e7d6]' : isDiscordStyle ? 'bg-slate-900/60 backdrop-blur-md' : 'bg-white/50 backdrop-blur-md'}`}>
                     {onForwardSelected && (
                         <button
-                            onClick={onForwardSelected}
+                            onClick={() => { onForwardSelected?.(); trackEvent('转发选中的消息'); }}
                             disabled={selectedCount === 0}
                             className={`flex-1 py-3 font-bold rounded-xl shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${selectedCount === 0 ? 'bg-slate-200 text-slate-400 shadow-none' : 'bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-blue-200'}`}
                         >
@@ -411,7 +421,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                         </button>
                     )}
                     <button
-                        onClick={onDeleteSelected}
+                        onClick={() => { onDeleteSelected(); trackEvent('批量删除选中的消息'); }}
                         className={`${onForwardSelected ? 'flex-1' : 'w-full'} py-3 bg-red-500 text-white font-bold rounded-xl shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-2`}
                     >
                         <Trash className="w-5 h-5" weight="bold" />
@@ -468,7 +478,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                     {showPanel === 'emojis' && (
                         <>
                             {/* Categories Bar */}
-                            <div className="relative">
+                            <div className={`relative flex shrink-0 ${panelTopBarSurfaceClass}`}>
                                 {/* touch-action: pan-x —— 显式告诉浏览器"从分组 chip 上起手的触摸就是横向滚动"，
                                     防止 chip 的长按/点击手势让部分浏览器犹豫而吞掉滑动（分组多时滑不到末尾的 +） */}
                                 <div className={panelTopBarClass} style={{ touchAction: 'pan-x' }}>
@@ -494,9 +504,6 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                         </button>
                                     ))}
                                     <button onClick={() => onPanelAction('add-category')} className={categoryAddButtonClass}>+</button>
-                                    {/* 尾部留白必须 ≥ 右侧浮动按钮区宽度（两个 w-6 + gap + px-3 ≈ 78px），
-                                        否则滚到最右时 + 按钮被浮动小药丸盖住点不到 */}
-                                    <div className="w-24 shrink-0 pointer-events-none" />
                                 </div>
                                 {emojiSelectionMode ? (
                                     <div 
@@ -520,23 +527,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                         </button>
                                     </div>
                                 ) : (
-                                    <div className="absolute right-0 top-0 bottom-0 z-10 flex items-center justify-end gap-1.5 px-3 pointer-events-none">
-                                        {categories.length > 1 && (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); setShowCategoryOverview(v => !v); }}
-                                                title="展开全部分组"
-                                                className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors shadow-sm pointer-events-auto ${
-                                                    isPixelStyle ? 'bg-[#c99872] text-[#fff7ed] hover:bg-[#b07d57]' :
-                                                    isDiscordStyle ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' :
-                                                    'bg-white/90 text-slate-600 hover:bg-slate-100 backdrop-blur-sm border border-slate-200/50'
-                                                }`}
-                                            >
-                                                <CaretDown className={`w-3.5 h-3.5 transition-transform ${showCategoryOverview ? 'rotate-180' : ''}`} weight="bold" />
-                                            </button>
-                                        )}
+                                    /* 编辑按钮占据独立列，滚动区在它左侧结束，末尾的 + 不会再被覆盖。 */
+                                    <div className="flex h-10 shrink-0 items-center pl-1 pr-3">
                                         <button
                                             onClick={(e) => { e.stopPropagation(); setEmojiSelectionMode(true); }}
-                                            className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors shadow-sm pointer-events-auto ${
+                                            className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors shadow-sm ${
                                                 isPixelStyle ? 'bg-[#c99872] text-[#fff7ed] hover:bg-[#b07d57]' :
                                                 isDiscordStyle ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' :
                                                 'bg-white/90 text-slate-600 hover:bg-slate-100 backdrop-blur-sm border border-slate-200/50'
@@ -547,35 +542,6 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     </div>
                                 )}
                             </div>
-
-                            {/* 分组总览：换行网格 + 限高滚动，分组再多也不用横向拖 */}
-                            {showCategoryOverview && !emojiSelectionMode && (
-                                <div className={`shrink-0 max-h-24 overflow-y-auto overscroll-contain px-3 py-2 flex flex-wrap gap-1.5 border-b ${
-                                    isPixelStyle ? 'bg-[#eadfce] border-[#8f674a]/40' :
-                                    isDiscordStyle ? 'bg-slate-950 border-white/10' :
-                                    'bg-white border-slate-100'
-                                }`}>
-                                    {categories.map(cat => (
-                                        <button
-                                            key={cat.id}
-                                            onClick={() => { onPanelAction('select-category', cat.id); setShowCategoryOverview(false); }}
-                                            className={`px-3 py-1 text-xs rounded-full whitespace-nowrap max-w-full truncate transition-all select-none flex items-center gap-1 ${activeCategory === cat.id ? activeCategoryClass : inactiveCategoryClass}`}
-                                        >
-                                            {cat.name}
-                                            {cat.allowedCharacterIds && cat.allowedCharacterIds.length > 0 && (
-                                                <Lock className="w-3 h-3 opacity-60" weight="bold" />
-                                            )}
-                                        </button>
-                                    ))}
-                                    {/* 总览里也能新建分组：横向条分组多时 + 可能滑不到/被浮动按钮挡，这里保底 */}
-                                    <button
-                                        onClick={() => { onPanelAction('add-category'); setShowCategoryOverview(false); }}
-                                        className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-all select-none ${inactiveCategoryClass}`}
-                                    >
-                                        + 新建分组
-                                    </button>
-                                </div>
-                            )}
 
                             <div className="flex-1 overflow-y-auto no-scrollbar p-4">
                                 {/* 4 列 → 5 列：面板缩略图整体缩小一档（吸收社区美化的共识密度）。
@@ -596,7 +562,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     ) : (
                                         <button onClick={() => onPanelAction('emoji-import')} className={emojiImportTileClass}>+</button>
                                     )}
-                                    {emojis.slice(0, visibleEmojiCount).map((e) => {
+                                    {visibleEmojis.map((e) => {
                                         const isSelected = selectedEmojiUrls.has(e.url);
                                         return (
                                         <button
@@ -625,9 +591,29 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                         );
                                     })}
                                 </div>
-                                {hasMoreEmojis && (
-                                    <div ref={emojiSentinelRef} className={`py-3 text-center text-[10px] ${emojiLabelClass}`}>
-                                        加载中... ({visibleEmojiCount}/{emojis.length})
+                                {emojiPageCount > 1 && (
+                                    <div className={`py-3 flex items-center justify-center gap-3 text-[10px] ${emojiLabelClass}`}>
+                                        <button
+                                            type="button"
+                                            aria-label="上一页表情"
+                                            disabled={emojiPage === 0}
+                                            onClick={() => setEmojiPage(page => Math.max(0, page - 1))}
+                                            className="w-8 h-7 rounded-full border border-current/20 disabled:opacity-30 active:scale-95"
+                                        >
+                                            ‹
+                                        </button>
+                                        <span>
+                                            {emojiPage + 1}/{emojiPageCount} 页 · {emojiPageStart + 1}-{Math.min(emojiPageStart + EMOJI_PAGE_SIZE, emojis.length)}/{emojis.length}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            aria-label="下一页表情"
+                                            disabled={emojiPage >= emojiPageCount - 1}
+                                            onClick={() => setEmojiPage(page => Math.min(emojiPageCount - 1, page + 1))}
+                                            className="w-8 h-7 rounded-full border border-current/20 disabled:opacity-30 active:scale-95"
+                                        >
+                                            ›
+                                        </button>
                                     </div>
                                 )}
                             </div>
@@ -640,7 +626,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             {actionsContent}
                         </div>
                     )}
-                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务) */}
+                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务, page 2 = 更多) */}
                     {showPanel === 'actions' && !actionsContent && (
                         <div
                             className="overflow-y-auto no-scrollbar"
@@ -650,12 +636,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             onClickCapture={handleActionsClickCapture}
                         >
                           <div className={`p-6 grid grid-cols-4 gap-8 ${actionsPage === 0 ? '' : 'hidden'}`}>
-                            {/* 同一会话内切换线上聊天 / 线下相处，固定放在工具栏第一格。 */}
-                            <button onClick={() => onPanelAction('interaction-mode-toggle')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
-                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${interactionMode === 'offline' ? (isDiscordStyle ? 'bg-rose-500/20 text-rose-300 border-rose-400/30' : 'bg-rose-50 text-rose-500 border-rose-200') : (isDiscordStyle ? 'bg-slate-800 text-sky-300 border-sky-400/20' : 'bg-sky-50 text-sky-500 border-sky-100')}`}>
-                                    {interactionMode === 'offline' ? <MapPin className="w-6 h-6" weight="fill" /> : <ChatCircleDots className="w-6 h-6" weight="fill" />}
+                            {/* 见面：直接跳到该角色的见面模式（等同于进见面 App 并点击该角色） */}
+                            <button onClick={() => onPanelAction('meetup')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-violet-300 border-violet-400/20' : 'bg-violet-50 text-violet-500 border-violet-100'}`}>
+                                    <Sparkle className="w-6 h-6" weight="fill" />
                                 </div>
-                                <span className="text-xs font-bold">{interactionMode === 'offline' ? '线下相处' : '线上聊天'}</span>
+                                <span className="text-xs font-bold">见面</span>
                             </button>
 
                             <button onClick={() => onPanelAction('transfer')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
@@ -728,6 +714,15 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                 </div>)}
                                 <span className="text-xs font-bold">主动消息</span>
                                 {isProactiveActive && <span className={`absolute top-0 right-1 w-2.5 h-2.5 rounded-full border-2 ${isDiscordStyle ? 'bg-violet-400 border-slate-900' : 'bg-violet-500 border-white'}`} />}
+                            </button>
+
+                            {/* 主动消息 2.0：云端 worker 定时任务，App 关闭后仍可收取。 */}
+                            <button onClick={() => onPanelAction('active-msg-2')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+                                {acnh ? <AcnhActionTile kind="proactive" /> : (
+                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-indigo-300 border-indigo-400/20' : 'bg-indigo-50 text-indigo-500 border-indigo-100'}`}>
+                                    <Alarm className="w-6 h-6" weight="bold" />
+                                </div>)}
+                                <span className="text-xs font-bold">主动消息 2.0</span>
                             </button>
 
                             <button
@@ -825,6 +820,10 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                               <span className="text-xs font-bold">白框</span>
                             </button>
 
+                          </div>
+
+                          {/* Page 2: 更多 */}
+                          <div className={`p-6 grid grid-cols-4 gap-8 ${actionsPage === 2 ? '' : 'hidden'}`}>
                             {/* 提示音：打开该角色专属的「白框提示音」弹窗（挨着白框，独立于白框可绑定/解绑） */}
                             <button
                               onClick={() => onPanelAction('chrome-sound')}
@@ -834,6 +833,17 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                   <BellSimpleRinging className="w-6 h-6" weight="bold" />
                               </div>
                               <span className="text-xs font-bold">提示音</span>
+                            </button>
+
+                            {/* 记忆链接与提示音同级：都是聊天工具入口，不单独占一整块。 */}
+                            <button
+                              onClick={() => onPanelAction('memory-link')}
+                              className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}
+                            >
+                              <span className={`w-14 h-14 rounded-2xl grid place-items-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4] text-[#8f674a]' : isDiscordStyle ? 'bg-slate-800 text-purple-300 border-purple-400/20' : 'bg-purple-50 text-purple-500 border-purple-100'}`}>
+                                <LinkSimple className="w-6 h-6" weight="bold" />
+                              </span>
+                              <span className="text-xs font-bold">记忆链接</span>
                             </button>
                           </div>
 
@@ -850,6 +860,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                               aria-label="第 2 页"
                               onClick={() => setActionsPage(1)}
                               className={`w-2 h-2 rounded-full transition-all ${actionsPage === 1 ? (isDiscordStyle ? 'bg-slate-200 w-5' : 'bg-slate-500 w-5') : (isDiscordStyle ? 'bg-slate-600' : 'bg-slate-300')}`}
+                            />
+                            <button
+                              type="button"
+                              aria-label="第 3 页"
+                              onClick={() => setActionsPage(2)}
+                              className={`w-2 h-2 rounded-full transition-all ${actionsPage === 2 ? (isDiscordStyle ? 'bg-slate-200 w-5' : 'bg-slate-500 w-5') : (isDiscordStyle ? 'bg-slate-600' : 'bg-slate-300')}`}
                             />
                           </div>
                         </div>

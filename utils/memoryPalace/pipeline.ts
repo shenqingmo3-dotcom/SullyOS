@@ -6,9 +6,9 @@
  * 2. processNewMessages() — 缓冲区机制，AI 回复后后台调用
  *
  * 缓冲区机制（替代旧的 TopicLoom + 封盒方案）：
- * - 热区：最近 200 条消息留在聊天上下文
+ * - 热区：按角色档位保留最近一段消息在聊天上下文
  * - 缓冲区：热区之前、高水位之后的消息
- * - 缓冲区 >= 50 条时触发：LLM 提取记忆 → Embedding → 更新高水位
+ * - 缓冲区达到角色档位阈值时触发：LLM 提取记忆 → Embedding → 更新高水位
  * - 保留缓冲区尾部 15% 作为下次提取的上下文衔接
  *
  * LLM 调用策略：
@@ -17,9 +17,17 @@
  * - 检索管线 → 纯计算，不调 LLM
  */
 
-import type { Message } from '../../types';
+import type { MemoryPalaceWaterlineConfig, Message } from '../../types';
 import type { EmbeddingConfig, PersonalityStyle, RemoteVectorConfig, ScoredMemory } from './types';
-import { countUnprocessedBufferMessages } from './bufferCount';
+import {
+    countOneShotPendingMessages,
+    countUnprocessedBufferMessages,
+    getOneShotTargetHighWaterMark,
+} from './bufferCount';
+import {
+    DEFAULT_MEMORY_PALACE_WATERLINE,
+    resolveMemoryPalaceWaterline,
+} from './waterline';
 
 /** 从 localStorage 读取远程向量配置（避免在每个调用点都传参） */
 function getRemoteVectorConfig(): RemoteVectorConfig | undefined {
@@ -73,6 +81,13 @@ import { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, AnticipationDB } from './db
 import { DB } from '../db';
 import { isMessageSemanticallyRelevant, formatMessageForPrompt } from '../messageFormat';
 import { sanitizeQuerySourceMessages } from './querySanitizer';
+import { getLocalDateKey } from '../localDate';
+import { extractExternalMemoryText } from './externalMemory';
+import {
+    getLocalMemoryPalaceHighWaterMark,
+    getReliableMemoryPalaceHighWaterMark,
+    setReliableMemoryPalaceHighWaterMark,
+} from './highWaterMark';
 
 // ─── 轻量 LLM 配置类型 ───────────────────────────────
 
@@ -148,7 +163,7 @@ async function loadMemoriesByDateRanges(
  *
  * 返回 null：memories 为空（没有新记忆，不需要归档动作）。
  */
-function buildAutoArchiveFragments(
+export function buildAutoArchiveFragments(
     memories: { id: string; content: string; createdAt: number }[],
     hideBeforeMessageId: number,
 ): NonNullable<PipelineResult['autoArchive']> | null {
@@ -1118,49 +1133,77 @@ export async function ingestDiaryToPalace(
 
 // ─── 高水位标记：记录每个角色处理到的最后消息 ID ────────
 
-const LAST_MSG_KEY = (charId: string) => `mp_lastMsgId_${charId}`;
-
-function getLastProcessedId(charId: string): number {
-    try {
-        const val = parseInt(localStorage.getItem(LAST_MSG_KEY(charId)) || '0', 10);
-        return isNaN(val) || val < 0 ? 0 : val;
-    } catch { return 0; }
-}
-
-function setLastProcessedId(charId: string, msgId: number): void {
-    try { localStorage.setItem(LAST_MSG_KEY(charId), String(msgId)); } catch {}
-}
 
 /** 获取当前高水位标记（供外部上下文过滤使用） */
 export function getMemoryPalaceHighWaterMark(charId: string): number {
-    return getLastProcessedId(charId);
+    return getLocalMemoryPalaceHighWaterMark(charId);
 }
 
 // ─── 缓冲区配置 ─────────────────────────────────────
 
-/** 热区大小：最近 N 条消息始终留在聊天上下文，不处理 */
-const HOT_ZONE_SIZE = 200;
-/** 缓冲区阈值：累积超过 N 条消息后触发处理 */
-const BUFFER_THRESHOLD = 100;
 /** 处理比例：取缓冲区前 85%，保留尾部 15% 作为下次总结的上下文 */
 const PROCESS_RATIO = 0.85;
+
+/**
+ * 水位节奏的唯一读取入口。配置跟随 CharacterProfile 存在 IndexedDB；调用方无需
+ * 判断消息来自私聊、见面、通话还是剧情，整个 charId 时间线统一使用同一份档位。
+ */
+async function loadCharacterWaterline(
+    charId: string,
+    override?: MemoryPalaceWaterlineConfig,
+) {
+    if (override) return resolveMemoryPalaceWaterline(override);
+    try {
+        const characters = await DB.getAllCharacters();
+        const character = characters.find(item => item.id === charId);
+        return resolveMemoryPalaceWaterline(character?.memoryPalaceWaterline);
+    } catch (error) {
+        console.warn('🏰 [Pipeline] 读取角色水位档位失败，回退默认 200/100', error);
+        return { ...DEFAULT_MEMORY_PALACE_WATERLINE };
+    }
+}
 
 /**
  * 计算当前"真正可被 pipeline 处理"的缓冲区消息数。
  *
  * 与 processNewMessages 的口径完全一致：
- *   - 只数语义相关消息（排除纯图片/语音/表情）
- *   - 排除最后 HOT_ZONE_SIZE 条（热区永远不会被处理）
+ *   - 只数语义相关消息（排除纯图片/表情和无转写的纯音频；保留有文字的语音与卡片）
+ *   - 排除角色档位指定的最后 N 条（热区永远不会被处理）
  *   - 只数 id > 高水位标记的部分
  *
- * 切勿用"id > hwm"裸过滤——那会把热区的 200 条也算进未同步，
+ * 切勿用"id > hwm"裸过滤——那会把当前热区也算进未同步，
  * 导致 UI 显示的"未同步条数"远大于 pipeline 实际能处理的量
  * （表现：弹窗说有几百条未同步，点立即追平却跑不出新 hwm）。
  */
-export async function getMemoryPalaceUnprocessedBufferCount(charId: string): Promise<number> {
+export async function getMemoryPalaceUnprocessedBufferCount(
+    charId: string,
+    waterlineOverride?: MemoryPalaceWaterlineConfig,
+): Promise<number> {
     const allMessages = await DB.getMessagesByCharId(charId, true);
-    const semantic = allMessages.filter(m => isMessageSemanticallyRelevant(m));
-    return countUnprocessedBufferMessages(semantic, getLastProcessedId(charId), HOT_ZONE_SIZE);
+    const semantic = allMessages.filter(m => !m.groupId && isMessageSemanticallyRelevant(m));
+    const highWaterMark = await getReliableMemoryPalaceHighWaterMark(charId);
+    const waterline = await loadCharacterWaterline(charId, waterlineOverride);
+    return countUnprocessedBufferMessages(semantic, highWaterMark, waterline.hotZoneSize);
+}
+
+/**
+ * 聊天设置「一键存入」专用统计。与日常后台管线不同，它允许把热区也纳入本次处理，
+ * 并按全部原文精确保留 0 或 10 条。
+ */
+export async function getMemoryPalaceOneShotPendingCount(
+    charId: string,
+    retainRecentMessages: number = 0,
+): Promise<number> {
+    const allMessages = await DB.getMessagesByCharId(charId, true);
+    const privateMessages = allMessages.filter(message => !message.groupId);
+    const semantic = privateMessages.filter(message => isMessageSemanticallyRelevant(message));
+    const highWaterMark = await getReliableMemoryPalaceHighWaterMark(charId);
+    return countOneShotPendingMessages(
+        semantic,
+        privateMessages,
+        highWaterMark,
+        retainRecentMessages,
+    );
 }
 
 /** 并发锁：防止多次 AI 回复同时触发 processNewMessages 产生竞态 */
@@ -1169,7 +1212,7 @@ const processingLocks = new Set<string>();
 /**
  * 缓冲区机制处理聊天消息：
  *
- * 1. 热区 = 最近 200 条消息（留在聊天上下文，不处理）
+ * 1. 热区 = 角色档位指定的最近 N 条消息（留在聊天上下文，不处理）
  * 2. 缓冲区 = 高水位标记之后、热区之前的消息
  * 3. 缓冲区 >= 阈值时：取前 85% → LLM 提取记忆 → Embedding → 更新高水位
  * 4. 保留尾部 15%，避免下次总结时事件没有起因
@@ -1239,6 +1282,7 @@ async function extractAndStoreMemories(
     userName: string,
     onProgress: ((stage: string) => void) | undefined,
     skipDedup: boolean,
+    requireAllBatches: boolean = false,
 ): Promise<ExtractCoreResult> {
         // 5. 构建精简上下文：角色档案 + 用户档案 + 相关已有记忆
         let charContext = '';
@@ -1345,6 +1389,7 @@ async function extractAndStoreMemories(
         const allCrossTimeLinks: { newMemoryId: string; existingMemoryId: string }[] = [];
         const allEventBoxHints: import('./extraction').EventBoxHint[] = [];
         const allCorrections: { targetId: string; note: string }[] = [];
+        const allUnpinIds = new Set<string>();
         const batchResults: PipelineResult['batches'] = [];
 
         for (let ci = 0; ci < chunks.length; ci++) {
@@ -1360,23 +1405,37 @@ async function extractAndStoreMemories(
                 allCrossTimeLinks.push(...extractionResult.crossTimeLinks);
                 allEventBoxHints.push(...extractionResult.eventBoxHints);
                 allCorrections.push(...extractionResult.corrections);
+                extractionResult.unpinIds.forEach(id => allUnpinIds.add(id));
                 batchResults.push({ index: ci + 1, total: chunks.length, extracted: extractionResult.memories.length, ok: true });
-
-                // 处理便利贴摘除
-                if (extractionResult.unpinIds.length > 0) {
-                    for (const unpinId of extractionResult.unpinIds) {
-                        const node = allCharNodes.find(n => n.id === unpinId);
-                        if (node) {
-                            node.pinnedUntil = null;
-                            await MemoryNodeDB.save(node);
-                        }
-                    }
-                    console.log(`📌 [Pipeline] batch ${ci + 1}: 摘除 ${extractionResult.unpinIds.length} 条便利贴`);
-                }
             } catch (e: any) {
                 console.warn(`🏰 [Pipeline] batch ${ci + 1} 提取失败: ${e.message}（继续下一批）`);
                 batchResults.push({ index: ci + 1, total: chunks.length, extracted: 0, ok: false, error: e.message });
             }
+        }
+
+        if (requireAllBatches && batchResults.some(batch => !batch.ok)) {
+            console.warn('🏰 [Pipeline] 一键存入存在失败批次：不写向量、不推进水位线，保留原文供下次重试');
+            return {
+                stored: 0,
+                skipped: 0,
+                memories: [],
+                batches: batchResults,
+                crossTimeLinks: [],
+                eventBoxHints: [],
+                corrections: [],
+            };
+        }
+
+        // 所有需要保留的批次均提取成功后再摘除便利贴；严格模式下避免半成功副作用。
+        for (const unpinId of allUnpinIds) {
+            const node = allCharNodes.find(n => n.id === unpinId);
+            if (node) {
+                node.pinnedUntil = null;
+                await MemoryNodeDB.save(node);
+            }
+        }
+        if (allUnpinIds.size > 0) {
+            console.log(`📌 [Pipeline] 摘除 ${allUnpinIds.size} 条便利贴`);
         }
 
         const memories = allMemories;
@@ -1484,7 +1543,7 @@ async function applyMemorySideEffects(
                     merged.set(c.targetId, arr);
                 }
 
-                const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+                const dateStr = getLocalDateKey();
                 const toRevectorize: import('./types').MemoryNode[] = [];
                 for (const [targetId, notes] of merged) {
                     const node = await MemoryNodeDB.getById(targetId);
@@ -1526,6 +1585,17 @@ async function applyMemorySideEffects(
         }
 }
 
+export interface ProcessNewMessagesOptions {
+    /** 一键存入后仍保留为聊天原文的最近消息数；只在 drainBuffer=true 时生效。 */
+    retainRecentMessages?: number;
+    /** 处理水位线到目标边界之间的全部内容，不套用日常档位热区与 85% 尾部保留。 */
+    drainBuffer?: boolean;
+    /** 任一 LLM 提取批次失败时整轮不写向量、不推进水位线。 */
+    requireAllBatches?: boolean;
+    /** 测试或刚完成设置写入时可显式覆盖；常规路径会按 charId 从 IndexedDB 读取。 */
+    waterline?: MemoryPalaceWaterlineConfig;
+}
+
 export async function processNewMessages(
     _allRecentMessages: Message[], // 保留参数兼容，但内部直接从 DB 加载
     charId: string,
@@ -1537,6 +1607,7 @@ export async function processNewMessages(
     force: boolean = false,
     /** 进度回调：通知调用方当前阶段 */
     onProgress?: (stage: string) => void,
+    options: ProcessNewMessagesOptions = {},
 ): Promise<PipelineResult | null> {
     // 并发锁：同一角色同时只能跑一次
     if (processingLocks.has(charId)) {
@@ -1547,36 +1618,85 @@ export async function processNewMessages(
 
     try {
         // 1. 加载全部消息（含已处理的），计算热区和缓冲区
-        //    过滤：保留任何有语义的消息类型（text / score_card / system / transfer / interaction），
-        //    只排除纯视觉/音频类（image / emoji / voice）—— 后者经 normalize 变短占位，对 LLM 无增益
+        //    过滤：保留任何有语义的消息类型（文字、带转写的语音、卡片、系统事件等），
+        //    只排除纯视觉资源和无转写的纯音频，避免 URL / base64 污染 LLM。
         const allMessages = await DB.getMessagesByCharId(charId, true);
-        const textMessages = allMessages
+        const privateMessages = allMessages
+            .filter(message => !message.groupId)
+            .sort((a, b) => a.id - b.id);
+        const textMessages = privateMessages
             .filter(m => isMessageSemanticallyRelevant(m))
             .sort((a, b) => a.id - b.id);
 
         const totalCount = textMessages.length;
+        const lastProcessedId = await getReliableMemoryPalaceHighWaterMark(charId);
+        const drainBuffer = options.drainBuffer === true;
+        const waterline = await loadCharacterWaterline(charId, options.waterline);
+        const hotZoneSize = waterline.hotZoneSize;
+        const bufferThreshold = waterline.bufferThreshold;
+        const retainedCount = Math.max(0, Math.floor(options.retainRecentMessages || 0));
+        const targetHighWaterMark = drainBuffer
+            ? getOneShotTargetHighWaterMark(privateMessages, retainedCount)
+            : 0;
 
-        if (totalCount <= HOT_ZONE_SIZE) {
-            console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${HOT_ZONE_SIZE}，无需处理`);
-            return makeSkipResult('hot_zone');
+        let buffer: Message[];
+        let hotZoneSizeForLog = hotZoneSize;
+
+        if (drainBuffer) {
+            // 一键存入的边界按全部原文计算，真正送给记忆提取的仍只包含有语义的内容。
+            // 目标水位可能落在图片/卡片消息上，这是刻意的：原文范围必须精确保留 0/10 条。
+            buffer = textMessages.filter(message => (
+                message.id > lastProcessedId && message.id <= targetHighWaterMark
+            ));
+            hotZoneSizeForLog = retainedCount;
+
+            if (targetHighWaterMark <= lastProcessedId) {
+                console.log(`🏰 [Pipeline] 一键存入无需处理：目标水位 ${targetHighWaterMark} <= 当前水位 ${lastProcessedId}`);
+                return {
+                    stored: 0,
+                    skipped: 0,
+                    processedMessages: 0,
+                    memories: [],
+                    batches: [],
+                    autoArchive: null,
+                };
+            }
+
+            // 边界内只有纯媒体/系统壳时没有内容需要送 LLM，但这些原文本身也无需继续注入。
+            if (buffer.length === 0) {
+                await setReliableMemoryPalaceHighWaterMark(charId, targetHighWaterMark);
+                onProgress?.('聊天原文边界已同步');
+                return {
+                    stored: 0,
+                    skipped: 0,
+                    processedMessages: 0,
+                    memories: [],
+                    batches: [],
+                    autoArchive: null,
+                };
+            }
+        } else {
+            if (totalCount <= hotZoneSize) {
+                console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${hotZoneSize}（${waterline.preset}），无需处理`);
+                return makeSkipResult('hot_zone');
+            }
+
+            // 日常后台路径：热区 = 角色档位指定的最近 N 条。
+            const hotZoneStartIdx = totalCount - hotZoneSize;
+            const hotZoneStartId = textMessages[hotZoneStartIdx].id;
+            buffer = textMessages.filter(m => m.id > lastProcessedId && m.id < hotZoneStartId);
         }
 
-        // 2. 热区 = 最后 HOT_ZONE_SIZE 条
-        const hotZoneStartIdx = totalCount - HOT_ZONE_SIZE;
-        const hotZoneStartId = textMessages[hotZoneStartIdx].id;
-
-        // 3. 缓冲区 = 高水位标记之后、热区之前
-        const lastProcessedId = getLastProcessedId(charId);
-        const buffer = textMessages.filter(m => m.id > lastProcessedId && m.id < hotZoneStartId);
-
-        const minThreshold = force ? 10 : BUFFER_THRESHOLD;
+        const minThreshold = drainBuffer ? 1 : (force ? 10 : bufferThreshold);
         if (buffer.length < minThreshold) {
-            console.log(`🏰 [Pipeline] 跳过：缓冲区 ${buffer.length} 条 < 阈值 ${minThreshold}（hwm=${lastProcessedId}, hotZone起始id=${hotZoneStartId}）`);
+            console.log(`🏰 [Pipeline] 跳过：缓冲区 ${buffer.length} 条 < 阈值 ${minThreshold}（hwm=${lastProcessedId}）`);
             return makeSkipResult('threshold');
         }
 
-        // 4. 取前 85% 处理，保留尾部 15%
-        const processCount = Math.ceil(buffer.length * PROCESS_RATIO);
+        // 日常路径保留尾部 15% 衔接；一键存入严格处理到选定边界。
+        const processCount = drainBuffer
+            ? buffer.length
+            : Math.ceil(buffer.length * PROCESS_RATIO);
         const toProcess = buffer.slice(0, processCount);
         const keptTail = buffer.length - processCount;
 
@@ -1584,7 +1704,7 @@ export async function processNewMessages(
 
         console.log(`🏰 [Pipeline] 开始处理缓冲区：${toProcess.length} 条消息（保留尾部 ${keptTail} 条）`);
         console.log(`🏰 [Pipeline]   消息ID范围: ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}`);
-        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 热区: ${HOT_ZONE_SIZE}, 缓冲区: ${buffer.length}, hwm: ${lastProcessedId}`);
+        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 保留原文: ${hotZoneSizeForLog}, 缓冲区: ${buffer.length}/${minThreshold}, 档位: ${waterline.preset}, hwm: ${lastProcessedId}`);
         onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
 
         // 5–8. 构建上下文 → LLM 提取 → 向量化（共用 extractAndStoreMemories）。
@@ -1593,11 +1713,26 @@ export async function processNewMessages(
         //       消息不会被重复处理，去重在这条路径上收益小、误伤大。
         const core = await extractAndStoreMemories(
             toProcess, charId, charName, embeddingConfig, llmConfig, userName, onProgress, true,
+            options.requireAllBatches === true,
         );
 
         if (core.memories.length === 0) {
-            // helper 内已打印"提取 0 条"日志
-            return { stored: 0, skipped: 0, memories: [], batches: core.batches };
+            const allBatchesSucceeded = core.batches.length > 0 && core.batches.every(batch => batch.ok);
+            if (drainBuffer && options.requireAllBatches && allBatchesSucceeded) {
+                // LLM 成功读完但判断没有值得长期保存的记忆，仍可视为完成了本次记忆处理。
+                await setReliableMemoryPalaceHighWaterMark(charId, targetHighWaterMark);
+                onProgress?.('记忆整理完成，本段没有新增长期记忆');
+                return {
+                    stored: 0,
+                    skipped: 0,
+                    processedMessages: toProcess.length,
+                    memories: [],
+                    batches: core.batches,
+                    autoArchive: null,
+                };
+            }
+            // helper 内已打印"提取 0 条"或失败批次日志；严格模式不会推进水位线。
+            return { stored: 0, skipped: 0, processedMessages: toProcess.length, memories: [], batches: core.batches };
         }
 
         // 9. 只有真的存成功了才更新高水位
@@ -1605,8 +1740,10 @@ export async function processNewMessages(
             console.warn(`🏰 [Pipeline] 向量化后 0 条存储成功，不更新高水位`);
             return { stored: 0, skipped: core.skipped, memories: [], batches: core.batches };
         }
-        const newHighWaterMark = toProcess[toProcess.length - 1].id;
-        setLastProcessedId(charId, newHighWaterMark);
+        const newHighWaterMark = drainBuffer
+            ? targetHighWaterMark
+            : toProcess[toProcess.length - 1].id;
+        await setReliableMemoryPalaceHighWaterMark(charId, newHighWaterMark);
         console.log(`✅ [Pipeline] 缓冲区处理完成：${core.stored} 条记忆, hwm ${lastProcessedId} → ${newHighWaterMark}`);
         onProgress?.(`记忆整理完成！新增 ${core.stored} 条记忆`);
 
@@ -1658,6 +1795,144 @@ export interface RangeProcessResult {
      * - 其它字符串    异常信息
      */
     error?: 'lock' | 'empty' | 'no_memories' | string;
+}
+
+/** 外部文本搬家到记忆宫殿的结果。 */
+export interface ExternalMemoryImportResult {
+    stored: number;
+    skipped: number;
+    extracted: number;
+    /** 与本次真正写入向量库的节点完全同源，供 caller 回写神经链接里的传统记忆档案。 */
+    archiveFragments: NonNullable<PipelineResult['autoArchive']>['fragments'];
+    /** 记忆宫殿内部的节点关联边；不要和“神经链接 App”混为一谈。 */
+    links: number;
+    batches: import('./externalMemory').ExternalMemoryBatchResult[];
+    error?: 'lock' | 'empty' | 'no_memories' | string;
+}
+
+/**
+ * 把其它应用/设备导出的原始记忆文字直接迁入当前角色的记忆宫殿。
+ *
+ * 与聊天缓冲区不同，这条路径不碰消息水位线：
+ * 外部文本 → 保真清洗/整理时间 → 分配房间 → embedding 入库 → 宫殿内部建链/巩固
+ *          → 同源 MemoryFragment 回写神经链接角色档案（不推进聊天水位线）。
+ */
+export async function importExternalMemoryText(
+    rawText: string,
+    charId: string,
+    charName: string,
+    embeddingConfig: EmbeddingConfig,
+    llmConfig: LightLLMConfig,
+    userName: string = '',
+    onProgress?: (stage: string) => void,
+): Promise<ExternalMemoryImportResult> {
+    if (processingLocks.has(charId)) {
+        return { stored: 0, skipped: 0, extracted: 0, archiveFragments: [], links: 0, batches: [], error: 'lock' };
+    }
+    processingLocks.add(charId);
+
+    try {
+        if (!rawText.trim()) {
+            return { stored: 0, skipped: 0, extracted: 0, archiveFragments: [], links: 0, batches: [], error: 'empty' };
+        }
+
+        const existingBefore = await MemoryNodeDB.getByCharId(charId);
+        const extraction = await extractExternalMemoryText(
+            rawText,
+            charId,
+            charName,
+            userName,
+            llmConfig,
+            onProgress,
+        );
+        const failedBatch = extraction.batches.find(batch => !batch.ok);
+        if (failedBatch) {
+            return {
+                stored: 0,
+                skipped: 0,
+                extracted: 0,
+                archiveFragments: [],
+                links: 0,
+                batches: extraction.batches,
+                error: `第 ${failedBatch.index}/${failedBatch.total} 批未能无损清洗：${failedBatch.error || '完整性校验失败'}。本次没有写入任何记忆`,
+            };
+        }
+        if (extraction.memories.length === 0) {
+            return {
+                stored: 0,
+                skipped: 0,
+                extracted: 0,
+                archiveFragments: [],
+                links: 0,
+                batches: extraction.batches,
+                error: 'no_memories',
+            };
+        }
+
+        try {
+            const consistency = await checkModelConsistency(charId, embeddingConfig.model);
+            if (consistency === 'mismatch') {
+                onProgress?.('检测到向量模型已更换，正在重建已有向量…');
+                await rebuildAllVectors(charId, embeddingConfig, getRemoteVectorConfig());
+            }
+        } catch (error: any) {
+            console.warn(`🏰 [ExternalImport] 模型一致性检查失败（继续导入）: ${error?.message || error}`);
+        }
+
+        onProgress?.(`正在生成 ${extraction.memories.length} 条向量记忆…`);
+        const vectorResult = await vectorizeAndStore(
+            extraction.memories,
+            embeddingConfig,
+            getRemoteVectorConfig(),
+            { skipDedup: false },
+        );
+
+        // 只拿本次真正写入的节点建链；被向量去重跳过的候选不能留下悬空边。
+        const storedIdSet = new Set(extraction.memories.map(memory => memory.id));
+        const allAfter = await MemoryNodeDB.getByCharId(charId);
+        const justStored = allAfter.filter(node => storedIdSet.has(node.id));
+
+        // 神经链接桥接只依赖真正写入的同批节点；先生成，避免可选关联步骤失败时丢掉双写。
+        const archiveFragments = buildAutoArchiveFragments(justStored, 0)?.fragments || [];
+        onProgress?.(`正在建立 ${justStored.length} 条记忆的宫殿内部关联…`);
+        let links: Awaited<ReturnType<typeof buildLinks>> = [];
+        try {
+            links = await buildLinks(justStored, existingBefore, llmConfig);
+        } catch (error: any) {
+            console.warn(`🏰 [ExternalImport] 建立关联失败，记忆与神经链接双写仍继续: ${error?.message || error}`);
+        }
+        try {
+            await runConsolidation(charId, getRemoteVectorConfig());
+        } catch (error: any) {
+            console.warn(`🏰 [ExternalImport] 巩固失败，已写入记忆不受影响: ${error?.message || error}`);
+        }
+        // 与全自动总结水位线共用同一个桥接器：同一批 MemoryNode 按日期组成
+        // mood='palace' 的 MemoryFragment，交给 UI 合并进当前角色的神经链接档案。
+        // 外部导入没有聊天 Message ID，因此这里只双写记忆，不推进/伪造聊天水位线。
+        onProgress?.(`搬家完成：新增 ${vectorResult.stored} 条向量记忆`);
+
+        return {
+            stored: vectorResult.stored,
+            skipped: vectorResult.skipped,
+            extracted: extraction.memories.length,
+            archiveFragments,
+            links: links.length,
+            batches: extraction.batches,
+        };
+    } catch (error: any) {
+        console.error(`❌ [ExternalImport] ${charName} 外部记忆导入失败:`, error);
+        return {
+            stored: 0,
+            skipped: 0,
+            extracted: 0,
+            archiveFragments: [],
+            links: 0,
+            batches: [],
+            error: error?.message || String(error),
+        };
+    } finally {
+        processingLocks.delete(charId);
+    }
 }
 
 /**

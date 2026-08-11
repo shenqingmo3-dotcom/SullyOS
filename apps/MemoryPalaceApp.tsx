@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import {
     MemoryRoom, MemoryNode, ROOM_CONFIGS, ROOM_LABELS, getRoomLabel,
@@ -12,19 +12,40 @@ import {
     DigestReportDB, PLATE_TITLES,
     bootstrapPlatesFromHistory, markPlateBootstrapDone,
     getBootstrapResume, setBootstrapResume, clearBootstrapResume,
+    updateStoredMemoryNode,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox, DigestReport } from '../utils/memoryPalace';
 import { confirmExportSafety } from '../utils/exportGuard';
-import type { Message } from '../types';
+import type { CharacterProfile, MemoryPalaceWaterlinePreset, Message } from '../types';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import {
-    deleteBackendMemoryPalace,
-    flushBackendMemorySyncQueue,
-    loadBackendChatConfig,
-} from '../utils/backendClient';
+    CONTEXT_RANGE_POLICY_VERSION,
+    DEFAULT_MANUAL_CONTEXT_LIMIT,
+} from '../utils/chatContextRange';
+import {
+    buildRangeSearchEntries,
+    filterRangeSearchEntries,
+    getRangeEndpointLabel,
+    getRangeSelectionHint,
+} from '../utils/memoryPalace/rangeSelection';
+import { trackEvent } from '../utils/analytics';
+import {
+    EXTERNAL_MEMORY_MAX_CHARS,
+    getExternalMemoryLengthInfo,
+    getExternalMemoryOverLimitMessage,
+} from '../utils/memoryPalace/externalMemory';
+import {
+    MAX_MEMORY_BUFFER_THRESHOLD,
+    MAX_MEMORY_HOT_ZONE_SIZE,
+    MEMORY_PALACE_WATERLINE_PRESETS,
+    MIN_MEMORY_BUFFER_THRESHOLD,
+    MIN_MEMORY_HOT_ZONE_SIZE,
+    makeCustomMemoryPalaceWaterline,
+    resolveMemoryPalaceWaterline,
+} from '../utils/memoryPalace/waterline';
 
 /** 手动总结面板：每页渲染多少条聊天记录（翻页，避免一次性塞几百条 DOM 卡顿） */
-const RANGE_PAGE_SIZE = 100;
+const RANGE_PAGE_SIZE = 50;
 
 /** 手动总结面板：把毫秒时间戳格式化成「2026-03-20 14:30」 */
 const fmtRangeTs = (ts: number): string => {
@@ -428,18 +449,217 @@ const ROOM_COLORS: Record<MemoryRoom, string> = {
 const inputClass = "w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white focus:outline-none focus:ring-1 focus:ring-violet-300 transition-all";
 const labelClass = "text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1";
 
+const WATERLINE_PRESET_COPY: Record<MemoryPalaceWaterlinePreset, { label: string; short: string; description: string }> = {
+    online: {
+        label: '线上为主',
+        short: '默认',
+        description: '主要在私聊里慢慢聊，保留更长的连续原文，整理节奏更从容。',
+    },
+    balanced: {
+        label: '综合',
+        short: '均衡',
+        description: '私聊、见面和剧情都会用，在上下文长度与沉淀速度之间取平衡。',
+    },
+    offline: {
+        label: '见面/剧情为主',
+        short: '更快',
+        description: '经常使用见面或剧情陪伴，更快沉淀；副 API 会更频繁地被调用。',
+    },
+    custom: {
+        label: '自定义',
+        short: '微调',
+        description: '自己决定保留多少条原文、积累多少条后开始整理。',
+    },
+};
+
+const WATERLINE_PRESET_ORDER: MemoryPalaceWaterlinePreset[] = ['online', 'balanced', 'offline', 'custom'];
+
+const MemoryWaterlineEditor: React.FC<{
+    character: CharacterProfile;
+    expanded: boolean;
+    disabled?: boolean;
+    onToggle: () => void;
+    onPresetChange: (preset: MemoryPalaceWaterlinePreset) => void;
+    onSaveCustom: (hotZoneSize: number, bufferThreshold: number) => void;
+}> = ({ character, expanded, disabled, onToggle, onPresetChange, onSaveCustom }) => {
+    const resolved = resolveMemoryPalaceWaterline(character.memoryPalaceWaterline);
+    const [hotDraft, setHotDraft] = useState(String(resolved.hotZoneSize));
+    const [bufferDraft, setBufferDraft] = useState(String(resolved.bufferThreshold));
+    const [showHelp, setShowHelp] = useState(false);
+
+    useEffect(() => {
+        setHotDraft(String(resolved.hotZoneSize));
+        setBufferDraft(String(resolved.bufferThreshold));
+    }, [character.id, resolved.hotZoneSize, resolved.bufferThreshold]);
+
+    const saveCustom = () => {
+        const hot = Number(hotDraft);
+        const buffer = Number(bufferDraft);
+        onSaveCustom(hot, buffer);
+    };
+
+    return (
+        <div
+            style={{
+                marginTop: -2,
+                borderRadius: 15,
+                border: '1px solid #f5d0e3',
+                background: 'linear-gradient(135deg, rgba(253,242,248,0.9), rgba(250,245,255,0.9))',
+                overflow: 'hidden',
+                opacity: disabled ? 0.65 : 1,
+            }}
+        >
+            <div style={{ display: 'flex', alignItems: 'center', paddingRight: 10 }}>
+                <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={e => { e.stopPropagation(); onToggle(); }}
+                    style={{
+                        minWidth: 0, flex: 1, border: 0, background: 'transparent', padding: '10px 6px 10px 12px',
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+                        cursor: disabled ? 'wait' : 'pointer', textAlign: 'left',
+                    }}
+                >
+                    <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 11, fontWeight: 800, color: '#9d174d' }}>聊天记忆整理节奏</span>
+                        <span style={{ display: 'block', marginTop: 2, fontSize: 10, color: '#9ca3af' }}>
+                            {WATERLINE_PRESET_COPY[resolved.preset].label} · AI 直接读最近 {resolved.hotZoneSize} 条 · 每攒 {resolved.bufferThreshold} 条整理
+                        </span>
+                    </span>
+                    <span style={{ color: '#be185d', fontSize: 14, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>⌄</span>
+                </button>
+                <button
+                    type="button"
+                    aria-label="水位线是什么"
+                    title="水位线是什么"
+                    onClick={e => { e.stopPropagation(); setShowHelp(open => !open); }}
+                    style={{
+                        width: 22, height: 22, flexShrink: 0, borderRadius: '50%',
+                        border: '1px solid #e9a8c7', background: showHelp ? '#db2777' : 'rgba(255,255,255,0.8)',
+                        color: showHelp ? '#fff' : '#be185d', fontSize: 11, fontWeight: 900,
+                        lineHeight: 1, display: 'grid', placeItems: 'center', cursor: 'pointer',
+                    }}
+                >
+                    ?
+                </button>
+            </div>
+
+            {showHelp && (
+                <div
+                    style={{
+                        margin: '0 10px 10px', padding: '11px 12px', borderRadius: 12,
+                        background: '#fff', border: '1px solid #f1d5e4', color: '#6b4b64',
+                        fontSize: 10, lineHeight: 1.65, boxShadow: '0 5px 14px rgba(88,28,135,0.08)',
+                    }}
+                    onClick={e => e.stopPropagation()}
+                >
+                    <div style={{ fontSize: 11, fontWeight: 900, color: '#9d174d', marginBottom: 6 }}>聊天会按时间排在同一条线上</div>
+                    <div style={{ padding: '7px 8px', borderRadius: 9, background: '#faf5ff', color: '#6d28d9', fontWeight: 800, textAlign: 'center' }}>
+                        较旧　已向量化整理　｜水位线｜　等待整理　·　最近原文　较新
+                    </div>
+                    <div style={{ marginTop: 7 }}><b style={{ color: '#7c3aed' }}>水位线前（较旧的一侧）</b>：聊天已经经过向量化，被整理进记忆宫殿。原记录仍在数据库里，没有删除；AI 平时不再整段重读，需要时会从记忆宫殿召回。</div>
+                    <div style={{ marginTop: 4 }}><b style={{ color: '#7c3aed' }}>水位线后（较新的一侧）</b>：聊天暂时保留为原文，包括正在等待整理的内容，以及 AI 每次直接读取的最近原文。</div>
+                    <div style={{ marginTop: 4 }}>等待区攒够设定条数后，较早的约 85% 会被向量化并移到水位线前，留下约 15% 衔接下一次整理。</div>
+                    <div style={{ marginTop: 6, padding: '7px 8px', borderRadius: 9, background: '#faf5ff', color: '#6d28d9' }}>
+                        例如 50 / 20：AI 每次直接读最近 50 条；在这 50 条之外又攒够 20 条等待内容时，约 17 条会被向量化、进入水位线前，约 3 条留下衔接。一问一答通常约 2 条消息。
+                    </div>
+                    <div style={{ marginTop: 7, padding: '7px 8px', borderRadius: 9, background: '#fff1f7', color: '#9d174d' }}>
+                        <b>见面、剧情里的内容也会被整理吗？会。</b><br />
+                        私聊、见面、通话、剧情、主动消息、小屋、彼方，只要其中有可读内容并进入这个角色的上下文时间线，就都会排进这里，之后跨过同一条水位线进入记忆宫殿。不是只有私聊会整理，也不是每个入口各算一条线。
+                    </div>
+                </div>
+            )}
+
+            {expanded && (
+                <div style={{ padding: '0 10px 11px' }} onClick={e => e.stopPropagation()}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                        {WATERLINE_PRESET_ORDER.map(preset => {
+                            const active = resolved.preset === preset;
+                            const presetNumbers = preset === 'custom'
+                                ? null
+                                : MEMORY_PALACE_WATERLINE_PRESETS[preset];
+                            return (
+                                <button
+                                    key={preset}
+                                    type="button"
+                                    disabled={disabled}
+                                    onClick={() => onPresetChange(preset)}
+                                    style={{
+                                        border: active ? '1px solid #db2777' : '1px solid #f1d5e4',
+                                        borderRadius: 11,
+                                        padding: '8px 7px',
+                                        background: active ? '#fff1f7' : 'rgba(255,255,255,0.78)',
+                                        color: active ? '#9d174d' : '#6b7280',
+                                        textAlign: 'left', cursor: disabled ? 'wait' : 'pointer',
+                                        boxShadow: active ? '0 2px 8px rgba(219,39,119,0.1)' : 'none',
+                                    }}
+                                >
+                                    <span style={{ display: 'block', fontSize: 10, fontWeight: 800 }}>{WATERLINE_PRESET_COPY[preset].label}</span>
+                                    <span style={{ display: 'block', marginTop: 2, fontSize: 9, opacity: 0.72 }}>
+                                        {presetNumbers
+                                            ? `最近 ${presetNumbers.hotZoneSize} · 攒 ${presetNumbers.bufferThreshold}`
+                                            : WATERLINE_PRESET_COPY[preset].short}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div style={{ marginTop: 8, padding: '8px 9px', borderRadius: 10, background: 'rgba(255,255,255,0.68)', fontSize: 9.5, lineHeight: 1.5, color: '#7c3aed' }}>
+                        {WATERLINE_PRESET_COPY[resolved.preset].description}
+                    </div>
+
+                    {resolved.preset === 'custom' && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 6, alignItems: 'end', marginTop: 8 }}>
+                            <label style={{ minWidth: 0 }}>
+                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>AI 直接读最近原文（20–500）</span>
+                                <input
+                                    type="number"
+                                    min={MIN_MEMORY_HOT_ZONE_SIZE}
+                                    max={MAX_MEMORY_HOT_ZONE_SIZE}
+                                    step={10}
+                                    value={hotDraft}
+                                    onChange={e => setHotDraft(e.target.value)}
+                                    style={{ width: '100%', minWidth: 0, border: '1px solid #e9d5ff', borderRadius: 9, padding: '7px 6px', fontSize: 11, color: '#581c87', background: '#fff' }}
+                                />
+                            </label>
+                            <label style={{ minWidth: 0 }}>
+                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>攒够多少条开始整理（10–200）</span>
+                                <input
+                                    type="number"
+                                    min={MIN_MEMORY_BUFFER_THRESHOLD}
+                                    max={MAX_MEMORY_BUFFER_THRESHOLD}
+                                    step={10}
+                                    value={bufferDraft}
+                                    onChange={e => setBufferDraft(e.target.value)}
+                                    style={{ width: '100%', minWidth: 0, border: '1px solid #e9d5ff', borderRadius: 9, padding: '7px 6px', fontSize: 11, color: '#581c87', background: '#fff' }}
+                                />
+                            </label>
+                            <button
+                                type="button"
+                                disabled={disabled}
+                                onClick={saveCustom}
+                                style={{ border: 0, borderRadius: 9, padding: '8px 9px', background: '#7c3aed', color: '#fff', fontSize: 10, fontWeight: 800, cursor: disabled ? 'wait' : 'pointer' }}
+                            >
+                                保存
+                            </button>
+                        </div>
+                    )}
+
+                    <div style={{ marginTop: 8, fontSize: 9, lineHeight: 1.45, color: '#9ca3af' }}>
+                        调快后会在下一次达到阈值时整理，成功前不会隐藏原文；调慢不会倒退水位或重复记忆，原文窗口会随新对话逐渐变长。
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 // ─── 主组件 ───────────────────────────────────────────
 
 export default function MemoryPalaceApp() {
     const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig, characterGroups } = useOS();
     const char = characters.find(c => c.id === activeCharacterId);
-    const flushMemoryDeletesToBackend = useCallback(async (): Promise<boolean> => {
-        if (!char) return false;
-        const config = loadBackendChatConfig();
-        if (!config.enabled) return false;
-        await flushBackendMemorySyncQueue({ config, character: char, user: userProfile });
-        return true;
-    }, [char, userProfile]);
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选角色页的分组筛选
 
     const [view, setView] = useState<'picker' | 'palace' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>('picker');
@@ -456,6 +676,11 @@ export default function MemoryPalaceApp() {
     const [boxCount, setBoxCount] = useState(0);
     const [anticipations, setAnticipations] = useState<Anticipation[]>([]);
     const [pinnedNodes, setPinnedNodes] = useState<MemoryNode[]>([]);
+    const [editingAnticipation, setEditingAnticipation] = useState<Anticipation | null>(null);
+    const [anticipationDraft, setAnticipationDraft] = useState('');
+    const [savingAnticipation, setSavingAnticipation] = useState(false);
+    const anticipationPressTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const anticipationPressStartRef = React.useRef<{ x: number; y: number } | null>(null);
 
     // 事件盒视图
     const [allBoxes, setAllBoxes] = useState<EventBox[]>([]);
@@ -490,6 +715,16 @@ export default function MemoryPalaceApp() {
     const [rangeRunning, setRangeRunning] = useState(false);
     const [rangeProgress, setRangeProgress] = useState('');
     const [rangeResult, setRangeResult] = useState<string | null>(null);
+    // 输入优先响应；消息内容和格式化日期只在记录集变化时预计算一次。
+    const deferredRangeQuery = useDeferredValue(rangeQuery);
+    const rangeSearchEntries = useMemo(
+        () => buildRangeSearchEntries(rangeMessages, fmtRangeTs),
+        [rangeMessages],
+    );
+    const filteredRangeMessages = useMemo(
+        () => filterRangeSearchEntries(rangeSearchEntries, deferredRangeQuery),
+        [rangeSearchEntries, deferredRangeQuery],
+    );
     // 完成后的结果弹窗（逐条列出新增记忆，和水位线总结一致）
     const [rangeResultData, setRangeResultData] = useState<import('../utils/memoryPalace/pipeline').RangeProcessResult | null>(null);
 
@@ -519,6 +754,7 @@ export default function MemoryPalaceApp() {
         }
         setBootstrapping(true);
         setBootstrapStatus(null);
+        trackEvent('整理历史记忆到门牌');
         try {
             // 每按一次只清一小段（断点续传）：上千条记忆的用户不会被一长串批次吓到，
             // 也随时可以停——进度存在本地，下次按继续
@@ -560,6 +796,15 @@ export default function MemoryPalaceApp() {
     const [importing, setImporting] = useState(false);
     const [importResult, setImportResult] = useState<string | null>(null);
     const importInputRef = React.useRef<HTMLInputElement>(null);
+    // 从其它应用搬来的原始文本：同一次清洗结果双写向量宫殿与神经链接角色档案。
+    const [externalMemoryText, setExternalMemoryText] = useState('');
+    const [externalImporting, setExternalImporting] = useState(false);
+    const [externalImportProgress, setExternalImportProgress] = useState('');
+    const [externalImportResult, setExternalImportResult] = useState<string | null>(null);
+    const externalLengthInfo = useMemo(
+        () => getExternalMemoryLengthInfo(externalMemoryText),
+        [externalMemoryText],
+    );
 
     // 关联记忆状态（记忆详情页展示 EventBox 兄弟 + 兼容展示遗留 causal link）
     const [linkedMemories, setLinkedMemories] = useState<LinkedMemoryUI[]>([]);
@@ -577,6 +822,7 @@ export default function MemoryPalaceApp() {
     // 全自动记忆（自动归档）catch-up 状态：按角色 id 分别记录
     const [autoArchiveSyncingId, setAutoArchiveSyncingId] = useState<string | null>(null);
     const [autoArchiveSyncProgress, setAutoArchiveSyncProgress] = useState('');
+    const [waterlineEditorCharId, setWaterlineEditorCharId] = useState<string | null>(null);
 
     // 全自动记忆追平确认弹窗（替代原生 confirm）
     const [autoArchiveConfirm, setAutoArchiveConfirm] = useState<{
@@ -724,6 +970,7 @@ export default function MemoryPalaceApp() {
         const detectingCharId = char.id;
         const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
         setDetectingPersonality(true);
+        trackEvent('评估角色认知参数');
         detectPersonalityStyle(detectingCharId, char.name, persona, llm)
             .then(result => {
                 setPendingPersonality(result);
@@ -774,6 +1021,81 @@ export default function MemoryPalaceApp() {
 
     useEffect(() => { loadStats(); }, [loadStats]);
 
+    const cancelAnticipationLongPress = useCallback(() => {
+        if (anticipationPressTimerRef.current) {
+            clearTimeout(anticipationPressTimerRef.current);
+            anticipationPressTimerRef.current = null;
+        }
+        anticipationPressStartRef.current = null;
+    }, []);
+
+    const openAnticipationEditor = useCallback((ant: Anticipation) => {
+        cancelAnticipationLongPress();
+        setEditingAnticipation(ant);
+        setAnticipationDraft(ant.content);
+    }, [cancelAnticipationLongPress]);
+
+    const startAnticipationLongPress = useCallback((e: React.PointerEvent<HTMLDivElement>, ant: Anticipation) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        cancelAnticipationLongPress();
+        anticipationPressStartRef.current = { x: e.clientX, y: e.clientY };
+        anticipationPressTimerRef.current = setTimeout(() => {
+            anticipationPressTimerRef.current = null;
+            anticipationPressStartRef.current = null;
+            setEditingAnticipation(ant);
+            setAnticipationDraft(ant.content);
+        }, 550);
+    }, [cancelAnticipationLongPress]);
+
+    const moveAnticipationLongPress = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        const start = anticipationPressStartRef.current;
+        if (!start) return;
+        if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) {
+            cancelAnticipationLongPress();
+        }
+    }, [cancelAnticipationLongPress]);
+
+    useEffect(() => () => cancelAnticipationLongPress(), [cancelAnticipationLongPress]);
+    useEffect(() => {
+        setEditingAnticipation(null);
+        setAnticipationDraft('');
+    }, [char?.id]);
+
+    const handleSaveAnticipation = async () => {
+        if (!editingAnticipation) return;
+        const content = anticipationDraft.trim();
+        if (!content) {
+            addToast('期盼内容不能为空', 'error');
+            return;
+        }
+        setSavingAnticipation(true);
+        try {
+            const updated = { ...editingAnticipation, content };
+            await AnticipationDB.save(updated);
+            setAnticipations(prev => prev.map(ant => ant.id === updated.id ? updated : ant));
+            setEditingAnticipation(null);
+            setAnticipationDraft('');
+            addToast('窗台期盼已修改', 'success');
+        } finally {
+            setSavingAnticipation(false);
+        }
+    };
+
+    const handleDeleteAnticipation = async () => {
+        if (!editingAnticipation) return;
+        if (!window.confirm('确定删除这条窗台期盼吗？删除后不会自动恢复。')) return;
+        setSavingAnticipation(true);
+        try {
+            await AnticipationDB.delete(editingAnticipation.id);
+            setAnticipations(prev => prev.filter(ant => ant.id !== editingAnticipation.id));
+            setEditingAnticipation(null);
+            setAnticipationDraft('');
+            addToast('窗台期盼已删除', 'success');
+        } finally {
+            setSavingAnticipation(false);
+        }
+    };
+
     // 加载可用月份和分块（旧记忆迁移用）
     useEffect(() => {
         if (char?.memories && char.memories.length > 0) {
@@ -796,6 +1118,7 @@ export default function MemoryPalaceApp() {
 
     const openAllBoxes = async () => {
         if (!char) return;
+        trackEvent('打开事件盒列表');
         const boxes = await EventBoxDB.getByCharId(char.id);
         boxes.sort((a, b) => b.updatedAt - a.updatedAt);
         setAllBoxes(boxes);
@@ -931,6 +1254,7 @@ export default function MemoryPalaceApp() {
 
     const openRoom = async (room: MemoryRoom) => {
         if (!char) return;
+        trackEvent('打开记忆宫殿房间', { room });
         const nodes = await MemoryNodeDB.getByRoom(char.id, room);
         nodes.sort((a: MemoryNode, b: MemoryNode) => b.createdAt - a.createdAt);
         setRoomNodes(nodes);
@@ -1015,18 +1339,25 @@ export default function MemoryPalaceApp() {
         if (!selectedNode || !char) return;
         setSaving(true);
         try {
-            const updated: MemoryNode = {
-                ...selectedNode,
+            const result = await updateStoredMemoryNode(
+                selectedNode.id,
+                {
                 content: editContent.trim(),
                 importance: editImportance,
                 mood: editMood.trim(),
                 room: editRoom,
                 tags: editTags.split(/[,，]/).map(t => t.trim()).filter(Boolean),
-            };
-            await MemoryNodeDB.save(updated);
-            // 远程同步由 MemoryNodeDB.save 自动处理
+                },
+                memoryPalaceConfig.embedding,
+                remoteVectorConfig,
+            );
+            const updated = result.node;
             setSelectedNode(updated);
             setEditing(false);
+            addToast(
+                result.reembedded ? '记忆已保存，语义向量已同步更新' : '记忆设置已保存',
+                'success',
+            );
             // 如果房间变了，刷新房间列表
             if (selectedRoom) {
                 const nodes = await MemoryNodeDB.getByRoom(char.id, selectedRoom);
@@ -1034,6 +1365,8 @@ export default function MemoryPalaceApp() {
                 setRoomNodes(nodes);
             }
             loadStats();
+        } catch (error: any) {
+            addToast(error?.message || '保存记忆失败', 'error');
         } finally {
             setSaving(false);
         }
@@ -1099,22 +1432,34 @@ export default function MemoryPalaceApp() {
 
     // 切换"记忆宫殿"总开关（picker 卡片上）
     const handleTogglePalaceFromPicker = (charId: string, on: boolean) => {
+        trackEvent('开启记忆宫殿', { enabled: on ? 'on' : 'off' });
         if (on) {
             updateCharacter(charId, { memoryPalaceEnabled: true } as any);
         } else {
             // 关闭 palace 必然连带关闭全自动记忆；同时清空残留的向量召回注入，
             // 否则旧的 memoryPalaceInjection 会被 saveCharacter 持久化并继续注入 prompt。
-            updateCharacter(charId, { memoryPalaceEnabled: false, autoArchiveEnabled: false, memoryPalaceInjection: undefined } as any);
+            updateCharacter(charId, {
+                memoryPalaceEnabled: false,
+                autoArchiveEnabled: false,
+                memoryPalaceInjection: undefined,
+                contextRangeMode: 'manual',
+                contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
+            } as any);
         }
     };
 
     // 切换"全自动记忆"（原 autoArchive）开关：复用原 Character.tsx 中的追平逻辑
     const handleToggleAutoArchiveFromPicker = async (charId: string, on: boolean): Promise<void> => {
+        trackEvent('开启全自动记忆', { enabled: on ? 'on' : 'off' });
         const target = characters.find(c => c.id === charId);
         if (!target) return;
 
         if (!on) {
-            updateCharacter(charId, { autoArchiveEnabled: false } as any);
+            updateCharacter(charId, {
+                autoArchiveEnabled: false,
+                contextRangeMode: 'manual',
+                contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
+            } as any);
             addToast('已关闭全自动记忆（palace 向量化仍在正常运行）', 'info');
             return;
         }
@@ -1130,10 +1475,16 @@ export default function MemoryPalaceApp() {
             return;
         }
 
-        updateCharacter(charId, { autoArchiveEnabled: true } as any);
+        updateCharacter(charId, {
+            autoArchiveEnabled: true,
+            contextRangeMode: 'adaptive',
+            contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
+            contextLimit: DEFAULT_MANUAL_CONTEXT_LIMIT,
+            contextUserStartMessageId: undefined,
+        } as any);
 
         // 统计未同步消息数并决定是否立即追平历史
-        // 口径必须和 pipeline 的缓冲区定义一致：排除热区（最后 200 条），
+        // 口径必须和 pipeline 的缓冲区定义一致：排除该角色档位指定的热区，
         // 否则会把"永远不会被处理"的热区也算成未同步，欺骗用户去点立即追平。
         const { getMemoryPalaceUnprocessedBufferCount } = await import('../utils/memoryPalace/pipeline');
         const unprocessedCount = await getMemoryPalaceUnprocessedBufferCount(charId);
@@ -1153,6 +1504,52 @@ export default function MemoryPalaceApp() {
             mpEmb,
             mpLLM,
         });
+    };
+
+    const saveCharacterWaterline = (
+        target: CharacterProfile,
+        nextConfig: CharacterProfile['memoryPalaceWaterline'],
+    ) => {
+        const before = resolveMemoryPalaceWaterline(target.memoryPalaceWaterline);
+        const after = resolveMemoryPalaceWaterline(nextConfig);
+        updateCharacter(target.id, { memoryPalaceWaterline: nextConfig });
+
+        const faster = after.hotZoneSize <= before.hotZoneSize
+            && after.bufferThreshold <= before.bufferThreshold
+            && (after.hotZoneSize < before.hotZoneSize || after.bufferThreshold < before.bufferThreshold);
+        const slower = after.hotZoneSize >= before.hotZoneSize
+            && after.bufferThreshold >= before.bufferThreshold
+            && (after.hotZoneSize > before.hotZoneSize || after.bufferThreshold > before.bufferThreshold);
+        if (faster) {
+            addToast('已调快：下次达到新阈值时开始整理，成功前不会隐藏原文', 'success');
+        } else if (slower) {
+            addToast('已调慢：旧水位不会倒退，原文窗口会随新对话逐渐变长', 'success');
+        } else {
+            addToast('已保存这个角色的记忆处理节奏', 'success');
+        }
+    };
+
+    const handleWaterlinePresetChange = (
+        target: CharacterProfile,
+        preset: MemoryPalaceWaterlinePreset,
+    ) => {
+        if (preset === 'custom') {
+            const current = resolveMemoryPalaceWaterline(target.memoryPalaceWaterline);
+            saveCharacterWaterline(target, makeCustomMemoryPalaceWaterline(
+                current.hotZoneSize,
+                current.bufferThreshold,
+            ));
+            return;
+        }
+        saveCharacterWaterline(target, { preset });
+    };
+
+    const handleSaveCustomWaterline = (
+        target: CharacterProfile,
+        hotZoneSize: number,
+        bufferThreshold: number,
+    ) => {
+        saveCharacterWaterline(target, makeCustomMemoryPalaceWaterline(hotZoneSize, bufferThreshold));
     };
 
     // 全自动记忆：用户点「立即追平」后跑的循环逻辑
@@ -1184,7 +1581,7 @@ export default function MemoryPalaceApp() {
 
             for (let round = 1; round <= MAX_ROUNDS; round++) {
                 const curHwm = getMemoryPalaceHighWaterMark(charId);
-                // 用 pipeline 的真实缓冲区口径（排除热区），避免把热区的 200 条
+                // 用 pipeline 的真实缓冲区口径（排除该角色档位的热区），避免把热区
                 // 当未同步反复重试——下面的 force=true 调用其实也只会处理缓冲区，
                 // 用同一口径循环才能正确收敛。
                 const remaining = await getMemoryPalaceUnprocessedBufferCount(charId);
@@ -1255,6 +1652,7 @@ export default function MemoryPalaceApp() {
     // 远程向量：同步本地到远程
     const handleSyncToRemote = async () => {
         setRvSyncing(true);
+        trackEvent('同步记忆向量到云端');
         try {
             const { syncLocalToRemote } = await import('../utils/memoryPalace/supabaseVector');
             const { MemoryNodeDB } = await import('../utils/memoryPalace/db');
@@ -1301,6 +1699,7 @@ export default function MemoryPalaceApp() {
     // 打开区间选择弹窗：加载该角色全部聊天记录（含已被自动总结过的）
     const openRangeModal = async () => {
         if (!char) return;
+        trackEvent('打开手动区间总结面板');
         setRangeModalOpen(true);
         setRangeLoading(true);
         setRangeResult(null);
@@ -1363,6 +1762,7 @@ export default function MemoryPalaceApp() {
         setRangeRunning(true);
         setRangeResult(null);
         setRangeProgress('准备中...');
+        trackEvent('运行手动区间总结');
         try {
             const { processMessageRange } = await import('../utils/memoryPalace/pipeline');
             const r = await processMessageRange(
@@ -1448,6 +1848,7 @@ export default function MemoryPalaceApp() {
 
     const handleDigest = async () => {
         if (!char || digesting) return;
+        trackEvent('手动触发认知消化');
         const lightApi = memoryPalaceConfig.lightLLM;
         if (!lightApi?.baseUrl) {
             setDigestResult('[err]请先在设置中配置副 API');
@@ -1527,7 +1928,6 @@ export default function MemoryPalaceApp() {
             for (const id of selectedIds) {
                 await deleteMemory(id);
             }
-            const synced = await flushMemoryDeletesToBackend();
             // 刷新房间数据
             if (selectedRoom) {
                 const nodes = await MemoryNodeDB.getByRoom(char.id, selectedRoom);
@@ -1537,12 +1937,6 @@ export default function MemoryPalaceApp() {
             setSelectedIds(new Set());
             setSelectMode(false);
             loadStats();
-            addToast(
-                synced ? '选中记忆已从前端和后端删除' : '本地已删除，后端删除已进入待同步队列',
-                synced ? 'success' : 'info',
-            );
-        } catch (error) {
-            addToast('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'), 'error');
         } finally {
             setDeleting(false);
         }
@@ -1553,7 +1947,6 @@ export default function MemoryPalaceApp() {
         setDeleting(true);
         try {
             await deleteMemory(nodeId);
-            const synced = await flushMemoryDeletesToBackend();
             setSelectedNode(null);
             setView(prevView);
             if (prevView === 'room' && selectedRoom && char) {
@@ -1571,12 +1964,6 @@ export default function MemoryPalaceApp() {
                 setExpandedBoxId(null);
             }
             loadStats();
-            addToast(
-                synced ? '记忆已从前端和后端删除' : '本地已删除，后端删除已进入待同步队列',
-                synced ? 'success' : 'info',
-            );
-        } catch (error) {
-            addToast('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'), 'error');
         } finally {
             setDeleting(false);
         }
@@ -1586,10 +1973,10 @@ export default function MemoryPalaceApp() {
     /** 一键清空记忆宫殿（本地 + 可选云端）。双重确认后执行。 */
     const handleWipeAll = async (includeRemote: boolean) => {
         const firstPrompt = includeRemote
-            ? '即将清空【本地 + 自建后端 + 云端 Supabase】所有记忆宫殿数据，包括：\n\n' +
+            ? '即将清空【本地 + 云端 Supabase】所有记忆宫殿数据，包括：\n\n' +
               '- 所有角色的记忆节点、向量、关联、事件盒\n- 高水位标记\n- 云端 memory_vectors 全表\n\n' +
               '此操作不可撤销。确定继续？'
-            : '即将清空【本地 + 自建后端】所有记忆宫殿数据（Supabase 保留）。\n\n' +
+            : '即将清空【本地】所有记忆宫殿数据（云端保留）。\n\n' +
               '包括所有角色的记忆节点、向量、关联、事件盒、高水位标记。\n\n' +
               '此操作不可撤销。确定继续？';
         if (!confirm(firstPrompt)) return;
@@ -1597,9 +1984,8 @@ export default function MemoryPalaceApp() {
 
         setWiping(true);
         setWipeResult(null);
+        trackEvent('清空全部记忆数据', { scope: includeRemote ? 'all' : 'local' });
         try {
-            const backendConfig = loadBackendChatConfig();
-            if (backendConfig.enabled) await deleteBackendMemoryPalace(backendConfig);
             const result = await wipeAllMemoryPalace({
                 remoteConfig: includeRemote ? remoteVectorConfig : undefined,
                 skipRemote: !includeRemote,
@@ -1660,6 +2046,7 @@ export default function MemoryPalaceApp() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
+            trackEvent('导出记忆宫殿备份');
             const vecPart = exportWithVectors ? `、${c.vectors} 条向量` : '';
             setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${c.eventBoxes} 个事件盒、${c.anticipations} 个期盼${vecPart}`);
         } catch (e: any) {
@@ -1681,7 +2068,7 @@ export default function MemoryPalaceApp() {
             const text = await fileObj.text();
             const data = JSON.parse(text);
             if (!isMemoryPalaceExportFile(data)) {
-                setImportResult('[err]这不是 SharkOS / SullyOS 兼容的记忆宫殿导出文件');
+                setImportResult('[err]这不是 SullyOS 记忆宫殿导出文件');
                 return;
             }
             const totalNodes = data.characters.reduce((s, c) => s + (c.nodes?.length || 0), 0);
@@ -1694,6 +2081,7 @@ export default function MemoryPalaceApp() {
             )) return;
 
             const result = await importMemoryPalace(data, char.id);
+            trackEvent('导入记忆宫殿备份');
             const vecPart = result.vectors > 0 ? `、${result.vectors} 条向量` : '';
             const platePart = result.roomPlateEntries > 0 ? `、${result.roomPlateEntries} 条门牌认知` : '';
             setImportResult(
@@ -1708,6 +2096,79 @@ export default function MemoryPalaceApp() {
         }
     };
 
+    /** 外部原始文本 → 保真清洗 → 向量宫殿 + 神经链接传统档案双写。 */
+    const handleExternalMemoryImport = async () => {
+        if (!char || externalImporting) return;
+        const text = externalMemoryText.trim();
+        if (!text) {
+            setExternalImportResult('[err]请先粘贴要搬家的记忆文本');
+            return;
+        }
+        if (externalLengthInfo.overLimit) {
+            setExternalImportResult(`[err]${getExternalMemoryOverLimitMessage(externalMemoryText)}`);
+            return;
+        }
+        const emb = memoryPalaceConfig.embedding;
+        const llm = memoryPalaceConfig.lightLLM;
+        if (!emb?.baseUrl || !emb?.apiKey || !emb?.model) {
+            setExternalImportResult('[err]请先在记忆宫殿设置中配置 Embedding API');
+            return;
+        }
+        if (!llm?.baseUrl || !llm?.apiKey || !llm?.model) {
+            setExternalImportResult('[err]请先在记忆宫殿设置中配置副 API');
+            return;
+        }
+
+        const target = { id: char.id, name: char.name };
+        setExternalImporting(true);
+        setExternalImportResult(null);
+        setExternalImportProgress('准备搬家：只整理时间和结构，不压缩内容…');
+        try {
+            const {
+                importExternalMemoryText,
+                mergePalaceFragmentsIntoMemories,
+            } = await import('../utils/memoryPalace/pipeline');
+            const result = await importExternalMemoryText(
+                text,
+                target.id,
+                target.name,
+                emb,
+                llm,
+                userProfile?.name || '',
+                stage => setExternalImportProgress(stage),
+            );
+            if (result.error === 'lock') {
+                setExternalImportResult('[err]这个角色已有其它记忆任务正在运行，请稍后再试');
+            } else if (result.error === 'no_memories') {
+                setExternalImportResult('[warn]没有整理出可导入的记忆，请检查原文或副 API 返回');
+            } else if (result.error) {
+                setExternalImportResult(`[err]搬家失败：${result.error}`);
+            } else {
+                // 与全自动总结水位线共用同一个桥接器：把本次真正写入向量库的
+                // 同一批节点按日期合并进角色 memories。外部导入没有消息 ID，
+                // 因此只双写记忆，不推进 hideBeforeMessageId / 聊天水位线。
+                setExternalImportProgress(`正在把同一批记忆同步到【${target.name}】的神经链接档案…`);
+                const latestMemories = characters.find(c => c.id === target.id)?.memories || [];
+                const mergedMemories = mergePalaceFragmentsIntoMemories(
+                    latestMemories,
+                    result.archiveFragments,
+                );
+                updateCharacter(target.id, { memories: mergedMemories });
+                setExternalImportResult(
+                    `[ok]已放入【${target.name}】：${result.stored} 条向量记忆；同一批内容已同步到神经链接档案`
+                    + (result.skipped ? `，${result.skipped} 条重复内容已跳过` : ''),
+                );
+                setExternalMemoryText('');
+                await loadStats();
+            }
+        } catch (error: any) {
+            setExternalImportResult(`[err]搬家失败：${error?.message || error}`);
+        } finally {
+            setExternalImporting(false);
+            setExternalImportProgress('');
+        }
+    };
+
     const handleClearMigrated = async () => {
         if (!char) return;
         setDeleting(true);
@@ -1717,15 +2178,8 @@ export default function MemoryPalaceApp() {
             for (const node of migrated) {
                 await deleteMemory(node.id);
             }
-            const synced = await flushMemoryDeletesToBackend();
-            setMigrationResult(
-                synced
-                    ? '已从前端和后端清除 ' + migrated.length + ' 条迁移数据'
-                    : '本地已清除 ' + migrated.length + ' 条；后端删除已进入待同步队列',
-            );
+            setMigrationResult(`已清除 ${migrated.length} 条迁移数据`);
             loadStats();
-        } catch (error) {
-            setMigrationResult('本地删除已记录，但后端同步失败，将自动重试：' + (error instanceof Error ? error.message : '未知错误'));
         } finally {
             setDeleting(false);
         }
@@ -2159,6 +2613,21 @@ export default function MemoryPalaceApp() {
                                                     />
                                                 </label>
                                             </div>
+
+                                            {palaceOn && autoOn && (
+                                                <MemoryWaterlineEditor
+                                                    character={c}
+                                                    expanded={waterlineEditorCharId === c.id}
+                                                    disabled={syncing}
+                                                    onToggle={() => setWaterlineEditorCharId(current => current === c.id ? null : c.id)}
+                                                    onPresetChange={preset => handleWaterlinePresetChange(c, preset)}
+                                                    onSaveCustom={(hotZoneSize, bufferThreshold) => handleSaveCustomWaterline(
+                                                        c,
+                                                        hotZoneSize,
+                                                        bufferThreshold,
+                                                    )}
+                                                />
+                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -2314,7 +2783,7 @@ export default function MemoryPalaceApp() {
                                         color: '#7c3aed', fontSize: 13, fontWeight: 600,
                                     }}
                                 >
-                                    稍后慢慢处理（每 100 条触发一次）
+                                    稍后按所选档位慢慢处理
                                 </button>
                             </div>
                         </div>
@@ -2776,8 +3245,6 @@ export default function MemoryPalaceApp() {
                                 {[
                                     { model: 'BAAI/bge-m3', dim: 1024, tag: '推荐', desc: '多语言顶级模型，免费', color: '#7c3aed' },
                                     { model: 'Pro/BAAI/bge-m3', dim: 1024, tag: '最强', desc: '加速推理版，¥0.7/百万token', color: '#f59e0b' },
-                                    { model: 'BAAI/bge-large-zh-v1.5', dim: 1024, tag: '免费', desc: '中文专精，轻量快速', color: '#10b981' },
-                                    { model: 'netease-youdao/bce-embedding-base_v1', dim: 768, tag: '免费', desc: '网易有道，768维', color: '#10b981' },
                                 ].map(opt => {
                                     const isActive = embModel === opt.model && embDimensions === opt.dim;
                                     return (
@@ -3391,30 +3858,26 @@ create table if not exists memory_vectors (
                 {/* 手动总结：区间选择弹窗（浏览聊天记录 → 点选起点/终点 → 总结） */}
                 {rangeModalOpen && char && (() => {
                     const bothSet = rangeStartId != null && rangeEndId != null;
-                    const lo = bothSet ? Math.min(rangeStartId!, rangeEndId!) : rangeStartId;
+                    const hasEndpoint = rangeStartId != null || rangeEndId != null;
+                    const lo = bothSet ? Math.min(rangeStartId!, rangeEndId!) : null;
                     const hi = bothSet ? Math.max(rangeStartId!, rangeEndId!) : null;
                     const selectedCount = (lo != null && hi != null)
                         ? rangeMessages.filter(m => m.id >= lo && m.id <= hi).length
-                        : (rangeStartId != null ? 1 : 0);
+                        : (hasEndpoint ? 1 : 0);
 
-                    const q = rangeQuery.trim().toLowerCase();
-                    const filtered = q
-                        ? rangeMessages.filter(m => (m.content || '').toLowerCase().includes(q) || fmtRangeTs(m.timestamp).includes(q))
-                        : rangeMessages;
                     // 翻页：每页 RANGE_PAGE_SIZE 条，避免一次渲染几百条 DOM
-                    const totalPages = Math.max(1, Math.ceil(filtered.length / RANGE_PAGE_SIZE));
+                    const totalPages = Math.max(1, Math.ceil(filteredRangeMessages.length / RANGE_PAGE_SIZE));
                     const page = Math.min(Math.max(0, rangePage), totalPages - 1);
                     const pageStart = page * RANGE_PAGE_SIZE;
-                    const shown = filtered.slice(pageStart, pageStart + RANGE_PAGE_SIZE);
+                    const shown = filteredRangeMessages.slice(pageStart, pageStart + RANGE_PAGE_SIZE);
 
                     return (
                         <div
                             style={{
                                 position: 'fixed', inset: 0, zIndex: 210,
                                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                padding: 16,
+                                padding: 12,
                                 background: 'rgba(31,17,71,0.45)',
-                                backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
                                 animation: 'fade-in 0.2s ease-out',
                             }}
                             onClick={() => { if (!rangeRunning) setRangeModalOpen(false); }}
@@ -3422,7 +3885,8 @@ create table if not exists memory_vectors (
                             <div
                                 onClick={e => e.stopPropagation()}
                                 style={{
-                                    width: '100%', maxWidth: 420, height: '82vh',
+                                    width: '100%', maxWidth: 420, height: 'min(82dvh, 720px)', maxHeight: 'calc(100dvh - 24px)',
+                                    minHeight: 0,
                                     display: 'flex', flexDirection: 'column',
                                     borderRadius: 24, overflow: 'hidden',
                                     background: '#ffffff',
@@ -3461,7 +3925,10 @@ create table if not exists memory_vectors (
                                 </div>
 
                                 {/* 消息列表 */}
-                                <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
+                                <div style={{
+                                    flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 10px',
+                                    WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y',
+                                }}>
                                     {rangeLoading && (
                                         <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: 24 }}>加载聊天记录中...</div>
                                     )}
@@ -3470,7 +3937,7 @@ create table if not exists memory_vectors (
                                             {rangeMessages.length === 0 ? '这个角色还没有聊天记录' : '没有匹配的消息'}
                                         </div>
                                     )}
-                                    {!rangeLoading && filtered.length > RANGE_PAGE_SIZE && (
+                                    {!rangeLoading && filteredRangeMessages.length > RANGE_PAGE_SIZE && (
                                         <div style={{
                                             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                             gap: 8, padding: '6px 8px', marginBottom: 6,
@@ -3484,7 +3951,7 @@ create table if not exists memory_vectors (
                                                 ‹ 更早
                                             </button>
                                             <span style={{ fontSize: 10, color: '#7c3aed', fontWeight: 600 }}>
-                                                第 {page + 1} / {totalPages} 页 · 共 {filtered.length} 条
+                                                第 {page + 1} / {totalPages} 页 · 共 {filteredRangeMessages.length} 条
                                             </span>
                                             <button
                                                 onClick={() => setRangePage(p => Math.min(totalPages - 1, p + 1))}
@@ -3498,9 +3965,10 @@ create table if not exists memory_vectors (
                                     {!rangeLoading && shown.map(m => {
                                         const isStart = m.id === rangeStartId;
                                         const isEnd = m.id === rangeEndId;
+                                        const endpointLabel = getRangeEndpointLabel(m.id, rangeStartId, rangeEndId);
                                         const isPending = m.id === rangePendingId;
                                         const inRange = lo != null && hi != null && m.id >= lo && m.id <= hi;
-                                        const isEndpoint = (lo != null && m.id === lo) || (hi != null && m.id === hi) || (rangeStartId != null && rangeEndId == null && isStart);
+                                        const isEndpoint = !!endpointLabel;
                                         const who = m.role === 'user' ? '我' : m.role === 'system' ? '系统' : char.name;
                                         const isDate = (m.metadata as any)?.source === 'date';
                                         const preview = (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 48);
@@ -3523,7 +3991,7 @@ create table if not exists memory_vectors (
                                                     </span>
                                                     {(isStart || isEnd) && (
                                                         <span style={{ fontSize: 9, fontWeight: 800, color: '#fff', background: '#7c3aed', borderRadius: 6, padding: '1px 6px' }}>
-                                                            {bothSet ? (m.id === lo ? '起点' : '终点') : '起点'}
+                                                            {endpointLabel}
                                                         </span>
                                                     )}
                                                 </div>
@@ -3571,15 +4039,15 @@ create table if not exists memory_vectors (
                                     )}
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                                         <span style={{ fontSize: 11, color: '#64748b' }}>
-                                            {bothSet ? `已选 ${selectedCount} 条` : rangeStartId != null ? '已选起点，请再点终点' : '未选择'}
+                                            {getRangeSelectionHint(rangeStartId, rangeEndId, selectedCount)}
                                         </span>
                                         <button
                                             onClick={() => { setRangeStartId(null); setRangeEndId(null); }}
-                                            disabled={rangeRunning || rangeStartId == null}
+                                            disabled={rangeRunning || !hasEndpoint}
                                             style={{
-                                                fontSize: 11, fontWeight: 600, color: (rangeRunning || rangeStartId == null) ? '#cbd5e1' : '#dc2626',
+                                                fontSize: 11, fontWeight: 600, color: (rangeRunning || !hasEndpoint) ? '#cbd5e1' : '#dc2626',
                                                 background: 'transparent', border: 'none',
-                                                cursor: (rangeRunning || rangeStartId == null) ? 'not-allowed' : 'pointer',
+                                                cursor: (rangeRunning || !hasEndpoint) ? 'not-allowed' : 'pointer',
                                             }}
                                         >
                                             清除选择
@@ -4038,11 +4506,123 @@ create table if not exists memory_vectors (
                         )}
                     </button>
 
-                    {/* 导入：把导出的 JSON 合并回当前角色（跨设备迁移 / 恢复） */}
+                    {/* 外部文本搬家：原文清洗后直接向量化、分房间并建链 */}
+                    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #dbeafe' }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: '#1e40af', marginBottom: 6 }}>
+                            从其它地方搬入原始记忆
+                        </div>
+                        <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 10, lineHeight: 1.65 }}>
+                            最多 5 万字，字数完全在本地统计。AI 只整理时间与事件结构，<b>不摘要、不合并、不省略细节</b>；
+                            随后直接生成向量、分配宫殿房间，并把<b>同一批内容</b>同步进
+                            <b>【{char?.name || '当前角色'}】的神经链接记忆档案</b>。
+                            5 万字以内会自动按自然段分批，不需要手动切。
+                        </div>
+                        <textarea
+                            value={externalMemoryText}
+                            onChange={event => setExternalMemoryText(event.target.value)}
+                            disabled={externalImporting}
+                            placeholder="粘贴从其它应用、设备或记忆系统带来的原始文字…"
+                            style={{
+                                width: '100%',
+                                minHeight: 150,
+                                resize: 'vertical',
+                                borderRadius: 12,
+                                border: '1px solid #bfdbfe',
+                                background: externalImporting ? '#f8fafc' : 'white',
+                                color: '#334155',
+                                fontSize: 12,
+                                lineHeight: 1.65,
+                                padding: 12,
+                                outline: 'none',
+                            }}
+                        />
+                        <div style={{
+                            fontSize: 10,
+                            color: externalLengthInfo.overLimit ? '#dc2626' : '#94a3b8',
+                            fontWeight: externalLengthInfo.overLimit ? 700 : 400,
+                            textAlign: 'right',
+                            margin: '4px 2px 8px',
+                        }}>
+                            {externalLengthInfo.count.toLocaleString()} / {EXTERNAL_MEMORY_MAX_CHARS.toLocaleString()} 字（本地统计）
+                        </div>
+                        {externalLengthInfo.overLimit && (
+                            <div style={{
+                                fontSize: 11,
+                                lineHeight: 1.65,
+                                color: '#92400e',
+                                background: '#fffbeb',
+                                border: '1px solid #fde68a',
+                                borderRadius: 10,
+                                padding: 10,
+                                marginBottom: 8,
+                            }}>
+                                {getExternalMemoryOverLimitMessage(externalMemoryText)}
+                            </div>
+                        )}
+                        <details style={{
+                            fontSize: 11,
+                            color: '#475569',
+                            background: '#f8fafc',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: 10,
+                            padding: '8px 10px',
+                            marginBottom: 10,
+                        }}>
+                            <summary style={{ cursor: 'pointer', fontWeight: 700, color: '#475569' }}>
+                                导入前常见疑问
+                            </summary>
+                            <div style={{ marginTop: 8, lineHeight: 1.75 }}>
+                                <div><b>会导给谁？</b> 只导入当前选中的【{char?.name || '当前角色'}】，不会串到其他角色。</div>
+                                <div><b>会覆盖旧记忆吗？</b> 不会；只追加新节点，相似内容会在向量阶段去重。</div>
+                                <div><b>会压缩原文吗？</b> 不会；只整理时间、事件边界和第一人称视角，长事件宁可拆多条也不省略。</div>
+                                <div><b>会写到哪里？</b> 同一次清洗结果会双写：一份进记忆宫殿向量库，一份按日期合并进神经链接的角色记忆档案。</div>
+                                <div><b>和全自动水位线有什么不同？</b> 双写方式相同；但外部文本没有聊天消息 ID，所以不会推进水位线，也不会隐藏聊天记录。</div>
+                                <div><b>会调用什么？</b> 先用副 API 清洗和分房间，再用 Embedding API 生成向量；宫殿内部仍会建立记忆关联。</div>
+                                <div><b>超过 5 万字怎么办？</b> 页面会在本地计算并建议批数；超限内容不会上传或调用 API。</div>
+                                <div><b>中途失败怎么办？</b> 清洗阶段任一批格式不完整或疑似删减，整次都不会入库，输入框会保留原文；系统会先自动重试一次。</div>
+                            </div>
+                        </details>
+                        {externalImportProgress && (
+                            <div style={{ fontSize: 11, color: '#2563eb', marginBottom: 8 }}>
+                                {externalImportProgress}
+                            </div>
+                        )}
+                        {externalImportResult && (
+                            <div style={{
+                                fontSize: 12,
+                                marginBottom: 8,
+                                color: externalImportResult.startsWith('[err]')
+                                    ? '#dc2626'
+                                    : externalImportResult.startsWith('[warn]') ? '#d97706' : '#16a34a',
+                            }}>
+                                <StatusMessage msg={externalImportResult} />
+                            </div>
+                        )}
+                        <button
+                            onClick={handleExternalMemoryImport}
+                            disabled={externalImporting || !externalMemoryText.trim() || externalLengthInfo.overLimit}
+                            style={{
+                                width: '100%',
+                                padding: '10px 0',
+                                borderRadius: 12,
+                                border: 'none',
+                                fontWeight: 700,
+                                fontSize: 13,
+                                color: 'white',
+                                background: externalImporting || !externalMemoryText.trim() || externalLengthInfo.overLimit ? '#cbd5e1' : '#4f46e5',
+                                cursor: externalImporting || !externalMemoryText.trim() || externalLengthInfo.overLimit ? 'not-allowed' : 'pointer',
+                            }}
+                        >
+                            {externalImporting
+                                ? '正在清洗并生成向量…'
+                                : externalLengthInfo.overLimit ? '请按建议分批后再导入' : '开始清洗并导入'}
+                        </button>
+                    </div>
+
+                    {/* 结构化导入：把本系统导出的 JSON 合并回当前角色（跨设备迁移 / 恢复） */}
                     <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #dbeafe' }}>
                         <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 10, lineHeight: 1.6 }}>
-                            把之前导出的 JSON 合并进 <b>{char.name}</b> 的记忆宫殿（追加，不覆盖现有记忆）。
-                            用于跨设备迁移或恢复。
+                            已经是 SullyOS 记忆宫殿 JSON 的文件无需清洗，可直接合并进 <b>{char.name}</b>（追加，不覆盖）。
                         </div>
 
                         {importResult && (
@@ -4071,7 +4651,7 @@ create table if not exists memory_vectors (
                             {importing ? '导入中…' : (
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                                     <Icon name="document" size={13} />
-                                    <span>从 JSON 导入</span>
+                                    <span>从 SullyOS JSON 导入</span>
                                 </span>
                             )}
                         </button>
@@ -4444,13 +5024,26 @@ create table if not exists memory_vectors (
                         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                             <Icon name="sunrise" size={14} />
                             <span>窗台期盼</span>
+                            <span style={{ marginLeft: 'auto', fontSize: 10, color: '#9ca3af', fontWeight: 400 }}>长按可修改或删除</span>
                         </div>
                         {anticipations.map((ant: Anticipation) => (
-                            <div key={ant.id} style={{
+                            <div
+                                key={ant.id}
+                                onPointerDown={(e) => startAnticipationLongPress(e, ant)}
+                                onPointerMove={moveAnticipationLongPress}
+                                onPointerUp={cancelAnticipationLongPress}
+                                onPointerCancel={cancelAnticipationLongPress}
+                                onPointerLeave={cancelAnticipationLongPress}
+                                onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    openAnticipationEditor(ant);
+                                }}
+                                style={{
                                 padding: 10, borderRadius: 8, marginBottom: 6,
                                 backgroundColor: ant.status === 'fulfilled' ? '#ecfdf5' :
                                     ant.status === 'disappointed' ? '#fef2f2' : '#fefce8',
-                                fontSize: 13, display: 'flex', alignItems: 'center', gap: 6,
+                                fontSize: 13, display: 'flex', alignItems: 'flex-start', gap: 6,
+                                cursor: 'pointer', userSelect: 'none', touchAction: 'pan-y',
                             }}>
                                 <span style={{ display: 'inline-flex', color:
                                     ant.status === 'active' ? '#7c3aed' :
@@ -4464,12 +5057,97 @@ create table if not exists memory_vectors (
                                         size={14}
                                     />
                                 </span>
-                                {ant.content}
-                                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                                    {new Date(ant.createdAt).toLocaleDateString('zh-CN')} · {ant.status}
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                    <div style={{ lineHeight: 1.5, color: '#1f2937', whiteSpace: 'pre-wrap' }}>{ant.content}</div>
+                                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                                        {new Date(ant.createdAt).toLocaleDateString('zh-CN')} · {ant.status}
+                                    </div>
                                 </div>
                             </div>
                         ))}
+                    </div>
+                )}
+
+                {editingAnticipation && (
+                    <div
+                        onClick={() => {
+                            if (!savingAnticipation) {
+                                setEditingAnticipation(null);
+                                setAnticipationDraft('');
+                            }
+                        }}
+                        style={{
+                            position: 'fixed', inset: 0, zIndex: 120,
+                            background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(4px)',
+                            display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                            padding: 16,
+                        }}
+                    >
+                        <div
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                                width: '100%', maxWidth: 520, padding: 18,
+                                borderRadius: 22, background: 'white',
+                                boxShadow: '0 18px 50px rgba(15,23,42,0.22)',
+                            }}
+                        >
+                            <div style={{ fontSize: 16, fontWeight: 700, color: '#1f2937' }}>修改窗台期盼</div>
+                            <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 3, marginBottom: 12 }}>
+                                只修改便利贴正文；状态与创建时间保持不变
+                            </div>
+                            <textarea
+                                autoFocus
+                                value={anticipationDraft}
+                                onChange={e => setAnticipationDraft(e.target.value)}
+                                rows={5}
+                                maxLength={2000}
+                                style={{
+                                    width: '100%', boxSizing: 'border-box', resize: 'vertical',
+                                    border: '1px solid #e5e7eb', borderRadius: 14,
+                                    background: '#fffbeb', color: '#1f2937',
+                                    fontSize: 14, lineHeight: 1.6, padding: 12, outline: 'none',
+                                }}
+                            />
+                            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                                <button
+                                    onClick={handleDeleteAnticipation}
+                                    disabled={savingAnticipation}
+                                    style={{
+                                        padding: '10px 14px', borderRadius: 12,
+                                        border: '1px solid #fecaca', background: '#fef2f2',
+                                        color: '#dc2626', fontWeight: 700, cursor: 'pointer',
+                                    }}
+                                >
+                                    删除
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setEditingAnticipation(null);
+                                        setAnticipationDraft('');
+                                    }}
+                                    disabled={savingAnticipation}
+                                    style={{
+                                        marginLeft: 'auto', padding: '10px 16px', borderRadius: 12,
+                                        border: '1px solid #e5e7eb', background: 'white',
+                                        color: '#6b7280', fontWeight: 600, cursor: 'pointer',
+                                    }}
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleSaveAnticipation}
+                                    disabled={savingAnticipation || !anticipationDraft.trim()}
+                                    style={{
+                                        padding: '10px 18px', borderRadius: 12,
+                                        border: 'none', background: '#7c3aed',
+                                        color: 'white', fontWeight: 700, cursor: 'pointer',
+                                        opacity: savingAnticipation || !anticipationDraft.trim() ? 0.5 : 1,
+                                    }}
+                                >
+                                    {savingAnticipation ? '保存中…' : '保存'}
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>
@@ -5177,6 +5855,7 @@ create table if not exists memory_vectors (
                                                             // 新版：绑入 EventBox（取代旧的 causal MemoryLink 单边关联）
                                                             const box = await manuallyBindMemories(char!.id, selectedNode.id, node.id);
                                                             if (box) {
+                                                                trackEvent('手动关联两条记忆');
                                                                 // 重新加载兄弟列表，展示最新 box 状态
                                                                 await loadLinkedMemories(selectedNode.id);
                                                             }

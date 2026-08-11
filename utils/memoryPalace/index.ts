@@ -26,7 +26,8 @@ export type { RerankApiConfig, RerankResult } from './rerank';
 
 // 输入管线
 export { extractMemoriesFromBuffer } from './extraction';
-export { vectorizeAndStore, checkModelConsistency, rebuildAllVectors } from './vectorStore';
+export { vectorizeAndStore, updateStoredMemoryNode, checkModelConsistency, rebuildAllVectors } from './vectorStore';
+export type { UpdateStoredMemoryNodeResult } from './vectorStore';
 
 // 认知过程
 export { runConsolidation, calculateEffectiveImportance, shouldPromote } from './consolidation';
@@ -39,10 +40,22 @@ export { hybridSearch } from './hybridSearch';
 export { spreadActivation } from './activation';
 export { applyPriming, checkRumination } from './priming';
 export { expandAndFormat } from './formatter';
+export { formatMemoryDateWithDistance } from './memoryDate';
 
 // 集成
 export type { LightLLMConfig, PipelineResult, DiaryIngestResult } from './pipeline';
 export { retrieveMemories, injectMemoryPalace, processNewMessages, getMemoryPalaceHighWaterMark, ingestDiaryToPalace } from './pipeline';
+export {
+    DEFAULT_MEMORY_PALACE_WATERLINE,
+    MEMORY_PALACE_WATERLINE_PRESETS,
+    MIN_MEMORY_HOT_ZONE_SIZE,
+    MAX_MEMORY_HOT_ZONE_SIZE,
+    MIN_MEMORY_BUFFER_THRESHOLD,
+    MAX_MEMORY_BUFFER_THRESHOLD,
+    resolveMemoryPalaceWaterline,
+    makeCustomMemoryPalaceWaterline,
+} from './waterline';
+export type { ResolvedMemoryPalaceWaterline } from './waterline';
 
 // 期盼
 export {

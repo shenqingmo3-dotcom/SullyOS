@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
-import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFragment, NpcNetworkEntry } from '../types';
+import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFragment } from '../types';
 import { SlidersHorizontal, SpeakerHigh, Books, BookOpen } from '@phosphor-icons/react';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
@@ -26,8 +26,14 @@ import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { confirmExportSafety } from '../utils/exportGuard';
+import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
-import { loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import {
+    EXTERNAL_MEMORY_MAX_CHARS,
+    extractExternalMemoryText,
+    getExternalMemoryLengthInfo,
+    getExternalMemoryOverLimitMessage,
+} from '../utils/memoryPalace/externalMemory';
 
 // ── 神经链接 · 列表页视觉件（淡紫留白风）────────────────────
 // 之前的「星点 + 玻璃饰带 + 华丽头像框」看久了眼花、低端机也重绘卡。
@@ -82,7 +88,7 @@ const CharacterCard: React.FC<{
 );
 
 const Character: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, updateUserProfile, worldbooks, addWorldbook } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, worldbooks, addWorldbook } = useOS();
   const launchIntent = characterLaunch.peek();
   const [view, setView] = useState<'list' | 'detail'>(() => launchIntent ? 'detail' : 'list');
   const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个，仅未建分组时）
@@ -135,76 +141,24 @@ const Character: React.FC = () => {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false); 
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+  // 云端 amsg2 任务没清干净、本地删除被拦下的角色 → 弹「重试 / 仍然删除」二次确认。
+  const [cloudCleanupFailTarget, setCloudCleanupFailTarget] = useState<string | null>(null);
+  // 删除要先 await 云端任务取消（名下有 amsg2 任务时），期间锁住按钮防连点。
+  const [isDeleting, setIsDeleting] = useState(false);
   const [showWorldbookModal, setShowWorldbookModal] = useState(false); // New Modal
   // 挂载世界书弹窗：搜索词 + 当前展开的分组（分组默认折叠，避免全量条目一次性渲染卡爆）
   const [wbModalSearch, setWbModalSearch] = useState('');
   const [wbModalExpandedCategory, setWbModalExpandedCategory] = useState<string | null>(null);
   const [showGroupModal, setShowGroupModal] = useState(false); // 角色分组管理
-  const [showNpcModal, setShowNpcModal] = useState(false);
-  const [npcDraft, setNpcDraft] = useState<NpcNetworkEntry | null>(null);
   const [newGroupName, setNewGroupName] = useState('');
   // 编辑页「新建分组并指派」的内联输入
   const [detailGroupDraft, setDetailGroupDraft] = useState<string | null>(null);
-
-  const newNpcDraft = (): NpcNetworkEntry => ({
-      id: `npc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      name: '', avatar: '', persona: '', userRelation: '', userAffinity: 50,
-      characterRelations: [], createdAt: Date.now(), updatedAt: Date.now(),
-  });
-
-  const syncNpcContext = (nextUser: typeof userProfile, charIds: string[]) => {
-      const backendConfig = loadBackendChatConfig();
-      if (!backendConfig.enabled) return;
-      for (const charId of [...new Set(charIds)]) {
-          const character = characters.find(item => item.id === charId);
-          if (!character) continue;
-          void syncBackendContext({ config: backendConfig, character, user: nextUser, messages: [], memories: [] })
-              .catch(error => console.warn('[NPC] 后端关系网同步失败:', error));
-      }
-  };
-
-  const saveNpcDraft = () => {
-      if (!npcDraft?.name.trim()) { addToast('请填写 NPC 名字', 'error'); return; }
-      const previous = (userProfile.npcNetwork || []).find(item => item.id === npcDraft.id);
-      const normalized: NpcNetworkEntry = {
-          ...npcDraft,
-          name: npcDraft.name.trim(),
-          persona: npcDraft.persona.trim(),
-          userRelation: npcDraft.userRelation.trim(),
-          userAffinity: Math.max(0, Math.min(100, Math.round(npcDraft.userAffinity || 0))),
-          characterRelations: npcDraft.characterRelations.map(relation => ({
-              ...relation,
-              relation: relation.relation.trim(),
-              affinity: Math.max(0, Math.min(100, Math.round(relation.affinity || 0))),
-          })),
-          updatedAt: Date.now(),
-      };
-      const nextNetwork = (userProfile.npcNetwork || []).some(item => item.id === normalized.id)
-          ? (userProfile.npcNetwork || []).map(item => item.id === normalized.id ? normalized : item)
-          : [...(userProfile.npcNetwork || []), normalized];
-      const nextUser = { ...userProfile, npcNetwork: nextNetwork };
-      updateUserProfile({ npcNetwork: nextNetwork });
-      syncNpcContext(nextUser, [
-          ...(previous?.characterRelations || []).map(relation => relation.charId),
-          ...normalized.characterRelations.map(relation => relation.charId),
-      ]);
-      setNpcDraft(null);
-      addToast(`NPC「${normalized.name}」已保存`, 'success');
-  };
-
-  const deleteNpc = (npc: NpcNetworkEntry) => {
-      if (!window.confirm(`删除 NPC「${npc.name}」？`)) return;
-      const nextNetwork = (userProfile.npcNetwork || []).filter(item => item.id !== npc.id);
-      const nextUser = { ...userProfile, npcNetwork: nextNetwork };
-      updateUserProfile({ npcNetwork: nextNetwork });
-      syncNpcContext(nextUser, npc.characterRelations.map(relation => relation.charId));
-      if (npcDraft?.id === npc.id) setNpcDraft(null);
-  };
 
   const [importText, setImportText] = useState('');
   const [exportText, setExportText] = useState('');
   const [isProcessingMemory, setIsProcessingMemory] = useState(false);
   const [importStatus, setImportStatus] = useState('');
+  const importLengthInfo = useMemo(() => getExternalMemoryLengthInfo(importText), [importText]);
 
   // Batch Summarize State
   const [batchRange, setBatchRange] = useState({ start: '', end: '' });
@@ -261,6 +215,7 @@ const Character: React.FC = () => {
           notes: formData.voiceProfile?.notes || '',
       });
       addToast(`已应用音色：${voice.voice_name || voice.voice_id}`, 'success');
+      trackEvent('应用音色到角色', { source });
   };
 
   // Load archive prompts from localStorage (shared with ChatApp)
@@ -389,6 +344,7 @@ const Character: React.FC = () => {
       handleChange('mountedWorldbooks', [...currentBooks, newBookEntry]);
       setShowWorldbookModal(false);
       addToast(`已挂载: ${book.title}`, 'success');
+      trackEvent('给角色挂载世界书');
   };
 
   // New: Mount entire category
@@ -451,6 +407,7 @@ const Character: React.FC = () => {
       setWbModalSearch('');
       setWbModalExpandedCategory(null);
       setShowWorldbookModal(true);
+      trackEvent('打开挂载世界书弹窗');
   };
 
   // ... (Other handlers unchanged)
@@ -488,6 +445,7 @@ const Character: React.FC = () => {
       if (!formData) return;
 
       const targetId = formData.id; // LOCK ID
+      trackEvent('提炼当月核心记忆');
 
       // Build lightweight character identity context (no memories - we're generating those)
       let identityContext = `[角色身份]\n名字: ${formData.name}\n`;
@@ -556,33 +514,7 @@ const Character: React.FC = () => {
       } catch (e: any) { addToast(`精炼失败: ${e.message}`, 'error'); }
   };
 
-  const syncCharacterProfile = async (nextCharacter: CharacterProfile): Promise<boolean> => {
-      const config = loadBackendChatConfig();
-      if (!config.enabled) return false;
-      await syncBackendContext({
-          config,
-          character: nextCharacter,
-          user: userProfile,
-          messages: [],
-          memories: [],
-      });
-      return true;
-  };
-
-  const handleDeleteMemories = async (ids: string[]) => {
-      if (!formData) return;
-      const nextMemories = (formData.memories || []).filter(m => !ids.includes(m.id));
-      try {
-          const synced = await syncCharacterProfile({ ...formData, memories: nextMemories });
-          handleChange('memories', nextMemories);
-          addToast(
-              synced ? '记忆已从前端和后端删除' : '记忆已从本地角色档案删除',
-              'success',
-          );
-      } catch (error) {
-          addToast('删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
-      }
-  };
+  const handleDeleteMemories = (ids: string[]) => { if (!formData) return; handleChange('memories', (formData.memories || []).filter(m => !ids.includes(m.id))); addToast(`已删除 ${ids.length} 条记忆`, 'success'); };
   const handleUpdateMemory = (id: string, newSummary: string) => { if (!formData) return; handleChange('memories', (formData.memories || []).map(m => m.id === id ? { ...m, summary: newSummary } : m)); addToast('记忆已更新', 'success'); };
 
   /**
@@ -663,18 +595,13 @@ const Character: React.FC = () => {
       addToast('核心记忆已更新', 'success');
   };
 
-  const handleDeleteRefinedMemory = async (year: string, month: string) => {
+  const handleDeleteRefinedMemory = (year: string, month: string) => {
       if (!formData || !formData.refinedMemories) return;
       const key = `${year}-${month}`;
       const newRefined = { ...formData.refinedMemories };
       delete newRefined[key];
-      try {
-          const synced = await syncCharacterProfile({ ...formData, refinedMemories: newRefined });
-          handleChange('refinedMemories', newRefined);
-          addToast(synced ? '核心记忆已从前端和后端删除' : '核心记忆已从本地角色档案删除', 'success');
-      } catch (error) {
-          addToast('删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
-      }
+      handleChange('refinedMemories', newRefined);
+      addToast('核心记忆已删除', 'success');
   };
 
   const handleExportPreview = () => { if (!formData) return; const mems = formData.memories as any[]; if (!mems || mems.length === 0) { addToast('暂无记忆数据可导出', 'info'); return; } const sortedMemories = [...mems].sort((a, b) => a.date.localeCompare(b.date)); let text = `【角色档案】\nName: ${formData.name}\nExported: ${new Date().toLocaleString()}\n\n`; if (formData.refinedMemories) { text += `=== 核心记忆 ===\n`; Object.entries(formData.refinedMemories).sort().forEach(([k, v]) => { text += `[${k}]: ${v}\n`; }); text += `\n=== 详细日志 ===\n`; } let currentYear = '', currentMonth = ''; sortedMemories.forEach(mem => { const match = mem.date.match(/(\d{4})[-/年](\d{1,2})/); if (match) { const y = match[1], m = match[2]; if (y !== currentYear) { text += `\n[ ${y}年 ]\n`; currentYear = y; currentMonth = ''; } if (m !== currentMonth) { text += `\n-- ${parseInt(m)}月 --\n\n`; currentMonth = m; } } text += `${mem.date} ${mem.mood ? `(#${mem.mood})` : ''}\n${mem.summary}\n\n--------------------------\n\n`; }); setExportText(text); setShowExportModal(true); navigator.clipboard.writeText(text).then(() => addToast('内容已自动复制到剪贴板', 'info')).catch(() => {}); };
@@ -684,36 +611,63 @@ const Character: React.FC = () => {
   const handleImportMemories = async () => { 
       if (!importText.trim() || !apiConfig.apiKey) { addToast('请检查输入内容或 API 设置', 'error'); return; } 
       if (!formData) return;
+      if (importLengthInfo.overLimit) {
+          const message = getExternalMemoryOverLimitMessage(importText);
+          setImportStatus(message);
+          addToast(`内容超过 5 万字，建议分 ${importLengthInfo.suggestedBatches} 批导入`, 'error');
+          return;
+      }
       
       const targetId = formData.id; // LOCK ID
       setIsProcessingMemory(true); 
-      setImportStatus('正在链接神经云端进行清洗...'); 
+      setImportStatus('准备清洗：只整理时间和结构，不压缩内容…');
+      trackEvent('执行记忆导入清洗');
       
       try { 
-          const prompt = `Task: Convert this text log into a JSON array. Format: [{ "date": "YYYY-MM-DD", "summary": "...", "mood": "..." }] Text: ${importText.substring(0, 8000)}`; 
-          const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` }, body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.1 }) }, 0);
-          let content = extractContent(data);
-          content = content.replace(/```json/g, '').replace(/```/g, '').trim(); 
-          const firstBracket = content.indexOf('['); 
-          const lastBracket = content.lastIndexOf(']'); 
-          if (firstBracket !== -1 && lastBracket !== -1) { content = content.substring(firstBracket, lastBracket + 1); } 
-          let parsed; try { parsed = JSON.parse(content); } catch (e) { throw new Error('解析返回数据失败'); } 
-          let targetArray = Array.isArray(parsed) ? parsed : (parsed.memories || parsed.data); 
-          
-          if (Array.isArray(targetArray)) { 
-              const newMems = targetArray.map((m: any) => ({ id: `mem-${Date.now()}-${Math.random()}`, date: m.date || '未知', summary: m.summary || '无内容', mood: m.mood || '记录' })); 
-              
-              if (editingIdRef.current === targetId) {
-                  handleChange('memories', [...(formData.memories || []), ...newMems]); 
-                  setShowImportModal(false); 
-                  addToast(`成功导入 ${newMems.length} 条记忆`, 'success'); 
-              } else {
-                  // Background update
-                  const currentMems = characters.find(c => c.id === targetId)?.memories || [];
-                  updateCharacter(targetId, { memories: [...currentMems, ...newMems] });
-                  addToast('后台任务完成：导入记忆已保存', 'success');
-              }
-          } else { throw new Error('结构错误'); } 
+          const result = await extractExternalMemoryText(
+              importText,
+              targetId,
+              formData.name,
+              userProfile.name,
+              {
+                  baseUrl: apiConfig.baseUrl,
+                  apiKey: apiConfig.apiKey,
+                  model: apiConfig.model,
+              },
+              stage => setImportStatus(stage),
+          );
+          const failedBatch = result.batches.find(batch => !batch.ok);
+          if (failedBatch) {
+              throw new Error(
+                  `第 ${failedBatch.index}/${failedBatch.total} 批未能无损清洗：${failedBatch.error || '完整性校验失败'}。本次没有写入任何记忆`,
+              );
+          }
+          if (result.memories.length === 0) {
+              throw new Error('没有整理出可导入的记忆');
+          }
+
+          const pad2 = (value: number) => String(value).padStart(2, '0');
+          const newMems: MemoryFragment[] = result.memories.map(memory => {
+              const date = new Date(memory.createdAt);
+              return {
+                  id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  date: `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`,
+                  // content 是保真清洗后的完整事件，不再二次概括成短 summary。
+                  summary: memory.content,
+                  mood: memory.mood || '记录',
+              };
+          });
+          if (editingIdRef.current === targetId) {
+              handleChange('memories', [...(formData.memories || []), ...newMems]);
+              setShowImportModal(false);
+              setImportText('');
+              addToast(`成功导入 ${newMems.length} 条记忆`, 'success');
+          } else {
+              // Background update
+              const currentMems = characters.find(c => c.id === targetId)?.memories || [];
+              updateCharacter(targetId, { memories: [...currentMems, ...newMems] });
+              addToast(`后台任务完成：已保存 ${newMems.length} 条导入记忆`, 'success');
+          }
       } catch (e: any) { setImportStatus(`错误: ${e.message || '未知错误'}`); addToast('记忆清洗失败', 'error'); } finally { setIsProcessingMemory(false); } 
   };
   
@@ -723,6 +677,7 @@ const Character: React.FC = () => {
         const targetId = formData.id; // LOCK ID
         setIsBatchProcessing(true);
         setBatchProgress('Initializing...');
+        trackEvent('执行批量记忆总结');
         
         try {
             const msgs = await DB.getMessagesByCharId(targetId, true);
@@ -844,6 +799,7 @@ const Character: React.FC = () => {
       
       const targetId = formData.id; // LOCK ID
       setIsGeneratingImpression(true);
+      trackEvent('生成角色印象', { type });
       try {
           const charName = formData.name;
           const boundUser = userProfile;
@@ -961,11 +917,9 @@ ${isInitialGeneration ? `
                   messages: [{ role: "user", content: prompt }],
                   max_tokens: 8000,
                   temperature: 0.5,
-                  // 印象 prompt 体量大（含完整上下文 + 记忆 + 近期聊天），非流式下要等
-                  // 整段思考链 + JSON 全生成完才返回首字节，常超 60s 撞上中转站空闲超时被
-                  // 掐断（NetworkError）。开流式让连接持续有数据，绕开空闲超时；
-                  // safeResponseJson 会把 SSE 流拼回完整对象，下游 extractContent 无需改动。
-                  stream: true
+                  // 与「设置 → API → 流式输出」保持一致，不在印象功能里强制覆盖用户选择。
+                  // 流式响应由 safeResponseJson 拼回完整对象，下游 extractContent 无需改动。
+                  stream: apiConfig.stream === true
               })
           }, 0);
           let content = extractContent(data);
@@ -990,15 +944,29 @@ ${isInitialGeneration ? `
       }
   };
 
-  const confirmDeleteCharacter = async () => {
-      if (deleteConfirmTarget) {
-          try {
-              await deleteCharacter(deleteConfirmTarget);
+  // 真正执行删除。名下有 amsg2 任务的角色 deleteCharacter 会先 await 云端清理，
+  // 清不掉返回 cloud-cleanup-failed 且本地未删 → 转进「重试 / 仍然删除」弹窗；
+  // force=true 是用户在那个弹窗里选了「仍然删除」，放行本地删除。
+  const runDeleteCharacter = async (targetId: string, force = false) => {
+      setIsDeleting(true);
+      try {
+          const result = await deleteCharacter(targetId, force ? { force: true } : undefined);
+          if (result.status === 'cloud-cleanup-failed') {
               setDeleteConfirmTarget(null);
-              addToast('角色及其后端上下文、记忆、日记和心跳均已删除', 'success');
-          } catch (error) {
-              addToast('角色删除失败，前端内容已保留：' + (error instanceof Error ? error.message : '未知错误'), 'error');
+              setCloudCleanupFailTarget(targetId);
+              return;
           }
+          setDeleteConfirmTarget(null);
+          setCloudCleanupFailTarget(null);
+          addToast('连接已断开', 'success');
+      } finally {
+          setIsDeleting(false);
+      }
+  };
+
+  const confirmDeleteCharacter = () => {
+      if (deleteConfirmTarget && !isDeleting) {
+          void runDeleteCharacter(deleteConfirmTarget);
       }
   };
 
@@ -1022,6 +990,8 @@ ${isInitialGeneration ? `
 
       // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
       if (!(await confirmExportSafety(exportData))) return;
+
+      trackEvent('导出角色卡');
 
       const json = JSON.stringify(exportData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
@@ -1137,6 +1107,7 @@ ${isInitialGeneration ? `
               } as CharacterProfile;
 
               await DB.saveCharacter(newChar);
+              trackEvent('导入角色卡');
               // 不要调用 addCharacter()——它不是"刷新"，而是真的新建一个空白
               // "New Character" 并写进 DB，reload 后就会多出一张空白卡。
               // 导入的角色已经存进了 DB（上一行），reload 时 OSContext 会从
@@ -1169,11 +1140,8 @@ ${isInitialGeneration ? `
                        <h1 className="text-[30px] font-serif font-bold tracking-wide leading-tight text-slate-800">神经链接</h1>
                        <p className="text-xs text-violet-400/90 mt-2">已建立 <span className="font-bold text-violet-500">{characters.length}</span> 个角色连接</p>
                    </div>
-                    <div className="flex gap-2 pt-1">
-                         <ToolButton label="NPC" title="NPC 关系网" onClick={() => { setNpcDraft(null); setShowNpcModal(true); }}>
-                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.1 9.1 0 0 0 3.74-.48 3 3 0 0 0-4.68-2.72m.94 3.2v-.94c0-.87-.34-1.7-.94-2.26M15 7.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM5.94 15.52a3 3 0 0 0-4.68 2.72 9.1 9.1 0 0 0 3.74.48m.94-3.2A5.98 5.98 0 0 1 12 12a5.98 5.98 0 0 1 6.06 3.52M15 19.5a9.05 9.05 0 0 1-6 0" /></svg>
-                         </ToolButton>
-                         <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
+                   <div className="flex gap-3 pt-1">
+                        <ToolButton label="分组" title="角色分组管理" onClick={() => { setShowGroupModal(true); trackEvent('打开角色分组管理弹窗'); }}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                             </svg>
@@ -1306,11 +1274,11 @@ ${isInitialGeneration ? `
                        <button onClick={() => { setActiveCharacterId(formData.id); openApp(AppID.Chat); }} className="text-xs px-3 py-1.5 bg-primary text-white rounded-full font-bold shadow-sm shadow-primary/30 flex items-center gap-1 active:scale-95 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M3.105 2.288a.75.75 0 0 0-.826.95l1.414 4.926H16.5a.75.75 0 0 1 0 1.5H3.693l-1.414 4.926a.75.75 0 0 0 .826.95 28.897 28.897 0 0 0 15.293-7.155.75.75 0 0 0 0-1.114A28.897 28.897 0 0 0 3.105 2.288Z" /></svg>发消息</button>
                    </div>
                    <div className="flex gap-6 text-sm font-medium text-slate-400 pl-1">
-                       <button onClick={() => setDetailTab('identity')} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('memory')} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('impression')} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('plates')} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('chibi')} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('identity'); trackEvent('切换角色详情标签页', { tab: 'identity' }); }} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('memory'); trackEvent('切换角色详情标签页', { tab: 'memory' }); }} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('impression'); trackEvent('切换角色详情标签页', { tab: 'impression' }); }} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('plates'); trackEvent('切换角色详情标签页', { tab: 'plates' }); }} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('chibi'); trackEvent('切换角色详情标签页', { tab: 'chibi' }); }} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                    </div>
                  </div>
                </div>
@@ -1499,7 +1467,7 @@ ${isInitialGeneration ? `
                                            <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认关。关闭时不注入任何生活记录内容，连代记指令的用法都不会教给角色。</p>
                                        </div>
                                        <button
-                                           onClick={() => handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled)}
+                                           onClick={() => { handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled); trackEvent('开启角色生活记录注入', { state: formData.lifeRecordEnabled ? 'off' : 'on' }); }}
                                            className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${formData.lifeRecordEnabled ? 'bg-primary' : 'bg-slate-200'}`}
                                        >
                                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData.lifeRecordEnabled ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
@@ -1695,7 +1663,7 @@ ${isInitialGeneration ? `
                    {detailTab === 'memory' && (
                        <div className="space-y-4 animate-fade-in">
                            <div className="flex justify-center gap-2 mb-4">
-                               <button onClick={() => setShowBatchModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
+                               <button onClick={() => { setShowBatchModal(true); trackEvent('打开批量记忆总结弹窗'); }} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
                                <button onClick={() => setShowImportModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">导入/清洗</button>
                                <button onClick={handleExportPreview} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">备份</button>
                            </div>
@@ -1729,7 +1697,7 @@ ${isInitialGeneration ? `
                    )}
 
                    {detailTab === 'chibi' && formData.id && (
-                       <ChibiShelfPanel charId={formData.id} onOpen={() => setShowChibiStudio(true)} />
+                       <ChibiShelfPanel charId={formData.id} onOpen={() => { setShowChibiStudio(true); trackEvent('打开QQ捏人工坊'); }} />
                    )}
 
                    {detailTab === 'plates' && formData.id && (
@@ -1753,8 +1721,27 @@ ${isInitialGeneration ? `
        )}
 
        {/* Modals ... */}
-       <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl shadow-lg shadow-primary/30 flex items-center justify-center gap-2">{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : '开始执行'}</button></>}>
-           <div className="space-y-3"><div className="text-xs text-slate-400 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">AI 将自动整理乱序文本为记忆档案。</div>{importStatus && <div className="text-xs text-primary font-medium">{importStatus}</div>}<textarea value={importText} onChange={e => setImportText(e.target.value)} placeholder="在此粘贴文本..." className="w-full h-32 bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm text-slate-700 resize-none focus:ring-2 focus:ring-primary/20 transition-all"/></div>
+       <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory || importLengthInfo.overLimit} className={`flex-1 py-3 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2 ${importLengthInfo.overLimit ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-primary shadow-primary/30'}`}>{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : importLengthInfo.overLimit ? '请先分批' : '开始执行'}</button></>}>
+           <div className="space-y-3">
+               <div className="text-xs text-slate-400 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">
+                   适合从其它应用“搬家”。最多 5 万字，字数只在本地统计；AI 只整理时间与事件结构，不摘要、不合并、不省略原有细节。5 万字以内会自动分批，无需手动切。
+               </div>
+               {importStatus && <div className="text-xs text-primary font-medium">{importStatus}</div>}
+               <textarea
+                   value={importText}
+                   onChange={e => setImportText(e.target.value)}
+                   placeholder="在此粘贴从别处带来的记忆文本…"
+                   className="w-full h-40 bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm text-slate-700 resize-none focus:ring-2 focus:ring-primary/20 transition-all"
+               />
+               {importLengthInfo.overLimit && (
+                   <div className="text-xs leading-relaxed rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-700">
+                       {getExternalMemoryOverLimitMessage(importText)}
+                   </div>
+               )}
+               <div className={`text-right text-[10px] ${importLengthInfo.overLimit ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
+                   {importLengthInfo.count.toLocaleString()} / {EXTERNAL_MEMORY_MAX_CHARS.toLocaleString()} 字（本地统计）
+               </div>
+           </div>
        </Modal>
 
        <Modal isOpen={showBatchModal} title="批量记忆总结" onClose={() => { setShowBatchModal(false); setShowPromptEditor(false); }} footer={
@@ -1931,71 +1918,6 @@ ${isInitialGeneration ? `
         </Modal>
 
         {/* 角色分组管理 */}
-        <Modal isOpen={showNpcModal} title="NPC 关系网" onClose={() => { setShowNpcModal(false); setNpcDraft(null); }}>
-            {npcDraft ? (
-                <div className="space-y-4 max-h-[65vh] overflow-y-auto no-scrollbar pr-1">
-                    <div className="flex items-center gap-3">
-                        <label className="w-16 h-16 rounded-full overflow-hidden bg-violet-50 border border-violet-100 shrink-0 cursor-pointer flex items-center justify-center text-xl text-violet-300">
-                            {npcDraft.avatar ? <img src={npcDraft.avatar} alt="" className="w-full h-full object-cover" /> : '＋'}
-                            <input type="file" accept="image/*" className="hidden" onChange={async e => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                try {
-                                    const avatar = await processImage(file);
-                                    setNpcDraft(current => current ? { ...current, avatar } : current);
-                                } catch { addToast('头像处理失败', 'error'); }
-                            }} />
-                        </label>
-                        <div className="flex-1 space-y-2">
-                            <input value={npcDraft.name} onChange={e => setNpcDraft({ ...npcDraft, name: e.target.value })} placeholder="NPC 名字" className="w-full px-3 py-2.5 rounded-xl bg-slate-100 text-sm outline-none" />
-                            <input value={npcDraft.avatar || ''} onChange={e => setNpcDraft({ ...npcDraft, avatar: e.target.value })} placeholder="头像 URL（或点击左侧上传）" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-xs outline-none" />
-                        </div>
-                    </div>
-                    <textarea value={npcDraft.persona} onChange={e => setNpcDraft({ ...npcDraft, persona: e.target.value })} placeholder="简单人设：身份、性格或需要记住的特点" rows={3} className="w-full px-3 py-2.5 rounded-xl bg-slate-100 text-sm outline-none resize-none" />
-                    <div className="rounded-2xl border border-violet-100 p-3 space-y-2">
-                        <div className="text-xs font-bold text-slate-500">和用户的关系</div>
-                        <input value={npcDraft.userRelation} onChange={e => setNpcDraft({ ...npcDraft, userRelation: e.target.value })} placeholder="例如：室友、同学、姐姐" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-sm outline-none" />
-                        <div className="flex items-center gap-3 text-xs text-slate-400"><span>好感</span><input type="range" min="0" max="100" value={npcDraft.userAffinity} onChange={e => setNpcDraft({ ...npcDraft, userAffinity: Number(e.target.value) })} className="flex-1 accent-violet-500" /><span className="w-8 text-right tabular-nums">{npcDraft.userAffinity}</span></div>
-                    </div>
-                    <div className="space-y-2">
-                        <div className="text-xs font-bold text-slate-500">和角色的关系（选择后才会注入该角色）</div>
-                        {characters.map(character => {
-                            const relation = npcDraft.characterRelations.find(item => item.charId === character.id);
-                            return <div key={character.id} className="rounded-2xl border border-slate-100 p-3 bg-white">
-                                <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                    <input type="checkbox" checked={!!relation} onChange={e => {
-                                        const next = e.target.checked
-                                            ? [...npcDraft.characterRelations, { charId: character.id, relation: '', affinity: 50 }]
-                                            : npcDraft.characterRelations.filter(item => item.charId !== character.id);
-                                        setNpcDraft({ ...npcDraft, characterRelations: next });
-                                    }} className="accent-violet-500" />
-                                    <img src={character.avatar} alt="" className="w-7 h-7 rounded-full object-cover" />{character.name}
-                                </label>
-                                {relation && <div className="mt-2 space-y-2 pl-7">
-                                    <input value={relation.relation} onChange={e => setNpcDraft({ ...npcDraft, characterRelations: npcDraft.characterRelations.map(item => item.charId === character.id ? { ...item, relation: e.target.value } : item) })} placeholder="例如：同事、朋友、看不顺眼的人" className="w-full px-3 py-2 rounded-xl bg-slate-100 text-sm outline-none" />
-                                    <div className="flex items-center gap-3 text-xs text-slate-400"><span>好感</span><input type="range" min="0" max="100" value={relation.affinity} onChange={e => setNpcDraft({ ...npcDraft, characterRelations: npcDraft.characterRelations.map(item => item.charId === character.id ? { ...item, affinity: Number(e.target.value) } : item) })} className="flex-1 accent-violet-500" /><span className="w-8 text-right tabular-nums">{relation.affinity}</span></div>
-                                </div>}
-                            </div>;
-                        })}
-                    </div>
-                    <div className="flex gap-2 sticky bottom-0 bg-white pt-2">
-                        <button onClick={() => setNpcDraft(null)} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold">返回</button>
-                        <button onClick={saveNpcDraft} className="flex-1 py-3 rounded-2xl bg-violet-500 text-white font-bold">保存</button>
-                    </div>
-                </div>
-            ) : (
-                <div className="space-y-3 max-h-[60vh] overflow-y-auto no-scrollbar">
-                    <button onClick={() => setNpcDraft(newNpcDraft())} className="w-full py-3 rounded-2xl border border-dashed border-violet-300 text-violet-500 font-bold text-sm">＋ 新增 NPC</button>
-                    {(userProfile.npcNetwork || []).length === 0 && <div className="py-8 text-center text-xs text-slate-400">还没有 NPC。这里只记录关系，不需要写很长的人设。</div>}
-                    {(userProfile.npcNetwork || []).map(npc => <div key={npc.id} className="flex items-center gap-3 p-3 rounded-2xl border border-slate-100 bg-slate-50">
-                        <div className="w-11 h-11 rounded-full overflow-hidden bg-violet-100 shrink-0 flex items-center justify-center text-violet-400">{npc.avatar ? <img src={npc.avatar} alt="" className="w-full h-full object-cover" /> : npc.name.slice(0, 1)}</div>
-                        <button onClick={() => setNpcDraft({ ...npc, characterRelations: npc.characterRelations.map(item => ({ ...item })) })} className="flex-1 min-w-0 text-left"><div className="font-bold text-sm text-slate-700 truncate">{npc.name}</div><div className="text-xs text-slate-400 truncate">和你：{npc.userRelation || '未定义'} · 关联 {npc.characterRelations.length} 个角色</div></button>
-                        <button onClick={() => deleteNpc(npc)} className="p-2 text-slate-300 hover:text-red-400">删除</button>
-                    </div>)}
-                </div>
-            )}
-        </Modal>
-
         <Modal isOpen={showGroupModal} title="角色分组管理" onClose={() => { setShowGroupModal(false); setNewGroupName(''); }}>
             <div className="space-y-3">
                 <div className="flex gap-2">
@@ -2038,8 +1960,8 @@ ${isInitialGeneration ? `
         <Modal
             isOpen={!!deleteConfirmTarget}
             title="断开连接"
-            onClose={() => setDeleteConfirmTarget(null)} 
-            footer={<div className="flex gap-2 w-full"><button onClick={() => setDeleteConfirmTarget(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">保留</button><button onClick={confirmDeleteCharacter} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200">确认断开</button></div>}
+            onClose={() => setDeleteConfirmTarget(null)}
+            footer={<div className="flex gap-2 w-full"><button onClick={() => setDeleteConfirmTarget(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">保留</button><button onClick={confirmDeleteCharacter} disabled={isDeleting} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200 disabled:opacity-50">{isDeleting ? '断开中...' : '确认断开'}</button></div>}
         >
             <div className="flex flex-col items-center gap-3 py-4">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12 text-slate-300"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
@@ -2049,6 +1971,32 @@ ${isInitialGeneration ? `
                     <span className="text-[10px] text-slate-400">仅对 ta 可见的专属表情分类也会一并删除。</span>
                 </p>
             </div>
+        </Modal>
+
+        {/* 云端 amsg2 任务没清干净时删除会被拦下（不然已删角色的推送之后还会弹出来），
+            在这里给出重试或强行放行的选择。 */}
+        <Modal
+            isOpen={!!cloudCleanupFailTarget}
+            title="云端还有任务没清掉"
+            onClose={() => setCloudCleanupFailTarget(null)}
+            footer={<div className="flex gap-2 w-full">
+                <button
+                    onClick={() => { if (cloudCleanupFailTarget && !isDeleting) void runDeleteCharacter(cloudCleanupFailTarget); }}
+                    disabled={isDeleting}
+                    className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-bold disabled:opacity-50"
+                >{isDeleting ? '重试中...' : '重试'}</button>
+                <button
+                    onClick={() => { if (cloudCleanupFailTarget && !isDeleting) void runDeleteCharacter(cloudCleanupFailTarget, true); }}
+                    disabled={isDeleting}
+                    className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200 disabled:opacity-50"
+                >仍然删除</button>
+            </div>}
+        >
+            <p className="text-sm text-slate-600 leading-relaxed py-2">
+                ta 名下还有主动消息 2.0 任务没能在云端取消（可能是断网或 Worker 没响应），角色暂时没有删除。<br/>
+                <span className="text-xs text-red-400 font-bold">选「仍然删除」的话，残留的任务之后可能仍会到点推送</span>
+                <span className="text-xs text-slate-400">——届时可去设置里「清除云端状态」兜底。</span>
+            </p>
         </Modal>
     </div>
   );

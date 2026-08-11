@@ -44,9 +44,13 @@ export const DATE_VOICE_GUIDE = `4. **语音情绪（跟立绘分开）**: \`[em
  * 时间，但只有"星期 + 时:分"，缺日期，而且没必要让 prompt 构建依赖 React 状态。
  */
 const getRealTimeStr = (tz?: string): string => {
-    const now = nowInTimeZone(tz);
+    // formatDate 自己会按 tz 折算，所以这里要喂真实时刻。
+    // nowInTimeZone 返回的 Date 是「本地 getter 读出来正好是角色墙上时间」的形式，
+    // 它的绝对时间戳已经被挪过一次——再交给 formatDate 就会多减一个时差。
+    const realNow = Date.now();
+    const wallClock = nowInTimeZone(tz, new Date(realNow));
     const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    return `${ChatPrompts.formatDate(now.getTime(), tz)} ${days[now.getDay()]}`;
+    return `${ChatPrompts.formatDate(realNow, tz)} ${days[wallClock.getDay()]}`;
 };
 
 /** 线下时间感知开关：默认开启，显式关掉后见面 prompt 不再注入时间。 */
@@ -601,9 +605,8 @@ ${observeBlock}`;
 
 /**
  * 历史构建（send / reroll 共用）：
- * 1. 开了记忆宫殿 → 按高水位线过滤掉已被向量记忆替代的旧消息（chat 是在 DB 层做的；
- *    这里 allMsgs 用 includeProcessed=true 因为见面记录展示 + injectMemoryPalace
- *    还需要全集，所以手动过一遍）。
+ * 1. 开了记忆宫殿 → 按高水位线过滤掉已被向量记忆替代的旧消息。调用方传入
+ *    includeProcessed=true 的最近窗口，避免 DateApp 为一次见面把全角色历史读进内存。
  * 2. 复用 ChatPrompts.buildMessageHistory 压缩各类卡片。
  * 3. 排除最后一条（待重发的 user msg），由调用方单独追加带 System Note 的版本。
  */
@@ -612,13 +615,20 @@ const buildDateHistory = (
     char: CharacterProfile,
     userProfile: UserProfile | null | undefined,
     emojis: Emoji[],
+    useVisionDescriptions: boolean = false,
 ): ApiMessage[] => {
     const limit = char.contextLimit || 500;
     const hwm = parseInt(localStorage.getItem(`mp_lastMsgId_${char.id}`) || '0', 10);
     const palaceFiltered = hwm > 0 ? allMsgs.filter(m => m.id > hwm) : allMsgs;
     const historyForBuild = palaceFiltered.slice(0, -1);
     const { apiMessages } = ChatPrompts.buildMessageHistory(
-        historyForBuild, limit, char, userProfile || ({} as UserProfile), emojis,
+        historyForBuild,
+        limit,
+        char,
+        userProfile || ({} as UserProfile),
+        emojis,
+        undefined,
+        { useVisionDescriptions },
     );
     return apiMessages;
 };
@@ -636,6 +646,7 @@ export const DatePrompts = {
         userProfile: UserProfile;
         allMsgs: Message[];
         emojis: Emoji[];
+        useVisionDescriptions?: boolean;
     }): { messages: ApiMessage[] } => {
         const { char, userProfile, allMsgs, emojis } = input;
         const charTz = resolveCharTimeZone(char);
@@ -647,7 +658,13 @@ export const DatePrompts = {
         const gapHint = getTimeGapHint(lastMsg?.timestamp, charTz);
 
         const { apiMessages } = ChatPrompts.buildMessageHistory(
-            allMsgs, peekLimit, char, userProfile || ({} as UserProfile), emojis,
+            allMsgs,
+            peekLimit,
+            char,
+            userProfile || ({} as UserProfile),
+            emojis,
+            undefined,
+            { useVisionDescriptions: input.useVisionDescriptions === true },
         );
         const recentMsgs = flattenHistoryToText(apiMessages);
 
@@ -689,7 +706,7 @@ ${extraBlock ? `\n${extraBlock}` : ''}${isObserveOn(char) ? `\n${buildObserveBlo
 
     /**
      * Session（send / reroll 共用）。
-     * allMsgs 须为 includeProcessed=true 的全量消息，且最后一条是本轮要重新追加的
+     * allMsgs 须为 includeProcessed=true 的最近消息窗口，且最后一条是本轮要重新追加的
      * user 消息（send：刚落库的输入；reroll：触发上一条 AI 回复的那条）。
      */
     buildSessionPayload: async (input: {
@@ -699,10 +716,17 @@ ${extraBlock ? `\n${extraBlock}` : ''}${isObserveOn(char) ? `\n${buildObserveBlo
         emojis: Emoji[];
         userText: string;
         variant: 'send' | 'reroll';
+        useVisionDescriptions?: boolean;
     }): Promise<{ messages: ApiMessage[] }> => {
         const { char, userProfile, allMsgs, emojis, userText, variant } = input;
 
-        const historyMsgs = buildDateHistory(allMsgs, char, userProfile, emojis);
+        const historyMsgs = buildDateHistory(
+            allMsgs,
+            char,
+            userProfile,
+            emojis,
+            input.useVisionDescriptions === true,
+        );
 
         // 向量召回挂到 char.memoryPalaceInjection，buildCoreContext 会读取
         await injectMemoryPalace(char, allMsgs, undefined, userProfile?.name);

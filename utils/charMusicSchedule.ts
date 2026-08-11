@@ -10,6 +10,8 @@
  */
 
 import { CharacterProfile, CharCurrentListening, CharPlaylistSong, DailySchedule, ScheduleSlot } from '../types';
+import { getLocalDateKey } from './localDate';
+import { getScheduleWallClock } from './scheduleTime';
 
 const LISTENING_KEYWORDS = [
     '听歌', '听音乐', '戴耳机', '戴上耳机', '戴着耳机', '耳机',
@@ -48,17 +50,14 @@ const slotStartToDate = (slot: ScheduleSlot, baseDate: Date): Date => {
 };
 
 /**
- * 基于 (today + slot.startTime + charId) 种子从 char 歌单里稳定抽一首。
- * 同一 slot 期间永远是同一首歌，不会跳。
+ * 抽样池：按歌单顺序去重取前 MAX_SAMPLED_SONGS 首。
+ *
+ * 单独 export 是给主动消息用的——fire_pack 把这份池子随包带给 worker，worker 到点用
+ * 下面同一个 pickSongFromPool 抽，抽出来的跟角色在聊天里说的是同一首。
  */
-const pickSongForSlot = (
-    char: CharacterProfile,
-    slot: ScheduleSlot,
-    today: string,
-): CharPlaylistSong | null => {
+export const buildSongPool = (char: CharacterProfile): CharPlaylistSong[] => {
     const p = char.musicProfile;
-    if (!p) return null;
-
+    if (!p) return [];
     const pool: CharPlaylistSong[] = [];
     const seen = new Set<number>();
     for (const pl of p.playlists) {
@@ -70,9 +69,21 @@ const pickSongForSlot = (
         }
         if (pool.length >= MAX_SAMPLED_SONGS) break;
     }
-    if (pool.length === 0) return null;
+    return pool;
+};
 
-    const seedStr = `${today}-${slot.startTime}-${char.id}`;
+/**
+ * 基于 (today + slot.startTime + charId) 种子从池子里稳定抽一首。
+ * 同一 slot 期间永远是同一首歌，不会跳。
+ */
+export const pickSongFromPool = <T,>(
+    pool: T[],
+    slotStartTime: string,
+    today: string,
+    charId: string,
+): T | null => {
+    if (pool.length === 0) return null;
+    const seedStr = `${today}-${slotStartTime}-${charId}`;
     let h = 0;
     for (const ch of seedStr) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
     return pool[h % pool.length];
@@ -93,11 +104,12 @@ export function computeCurrentListening(
 ): CharCurrentListening | null {
     if (!char.musicProfile) return null;
 
-    const slot = getCurrentSlot(schedule, now);
+    const wallNow = getScheduleWallClock(char, now);
+    const slot = getCurrentSlot(schedule, wallNow);
     if (!slot || !slotIsListening(slot)) return null;
 
-    const today = now.toISOString().slice(0, 10);
-    const song = pickSongForSlot(char, slot, today);
+    const today = getLocalDateKey(wallNow);
+    const song = pickSongFromPool(buildSongPool(char), slot.startTime, today, char.id);
     if (!song) return null;
 
     return {
@@ -106,6 +118,6 @@ export function computeCurrentListening(
         artists: song.artists,
         albumPic: song.albumPic,
         vibe: slot.innerThought || slot.description || undefined,
-        startedAt: slotStartToDate(slot, now).getTime(),
+        startedAt: slotStartToDate(slot, wallNow).getTime(),
     };
 }

@@ -13,10 +13,16 @@
 
 **用户侧（不需要电脑/部署）：** SullyOS → 设置 → 实时感知 → 小红书：
 - 服务器 URL 已默认 `https://sullymeow.ccwu.cc/api`，一般无需改。
-- 粘贴浏览器登录小红书后的完整 cookie（含 `a1` 和 `web_session`），点测试连接。
+- 粘贴浏览器登录 `xiaohongshu.com` 或 `rednote.com` 后的完整 cookie（含 `a1` 和
+  `web_session`），点测试连接。Lite 会分别探测国内与全球后端并自动选择，不依赖
+  `gid`、`bRequestId` 等可能随域名和灰度版本变化的字段。
 
 cookie 存在本地，每次请求经 `X-Xhs-Cookie` 头发给 Worker；Worker 无状态，
 一个部署服务所有用户。
+
+国内小红书和全球 RedNote 是两套不共享会话的后端：前者请求
+`edith.xiaohongshu.com`，后者请求 `webapi.rednote.com`。当前 RedNote 支持搜索、
+浏览、详情、点赞、收藏和评论；图片发布仍只对已验证的国内后端开放。
 
 ## 原理
 
@@ -45,3 +51,38 @@ node verify.mjs   # 期望 10 passed, 0 failed —— 直接测 worker/index.js 
 | `test/oracle.py` | Python 参考 oracle（确定性向量） |
 | `test/vectors.json` | 参考输出 |
 | `test/verify.mjs` | 导入 `worker/index.js` 内嵌实现并逐字节比对 |
+## Spider Session v3 comments (default on)
+
+This is an isolated, browserless experiment derived from the public protocol behavior in
+`cv-cat/Spider_XHS` as of 2026-07-25. It does not replace the normal Lite detail path.
+The Worker keeps no account or session database: the browser persists an opaque state containing
+only an `a1` hash tag, `loadts`, counters, and a b1 seed. The raw Cookie remains in the existing
+local SullyOS configuration.
+
+Safety rules:
+
+- The normal `/api/get-feed-detail` path never calls the protected comment endpoint.
+- The experiment requires both `X-Xhs-Experiment-Ack: spider-v3-isolated-cookie` and
+  `acknowledge_risk: true`.
+- Each invocation makes at most one comment request. HTTP 406 opens a per-Cookie circuit breaker;
+  there is no automatic retry or strategy rotation.
+- The default `no-client-hints` strategy removes `sec-ch-ua*` and `x-mns`.
+  `browser-hints` and `legacy-transport` are explicit one-shot A/B controls only.
+- Responses use `Cache-Control: no-store`. Use a disposable test account first.
+
+The client now enables this path by default whenever a Lite detail response has no comments.
+Opening a note automatically patches its comment section; callers do not need a per-note `load_all_comments` flag or a separate API key.
+
+Optional A/B strategy:
+
+```js
+localStorage.setItem('os_xhs_spider_v3_strategy', 'no-client-hints');
+// Other explicit values: 'browser-hints', 'legacy-transport'
+```
+
+Reset the client-owned state and circuit breaker before another isolated trial:
+
+```js
+localStorage.removeItem('os_xhs_spider_v3_session');
+localStorage.removeItem('os_xhs_spider_v3_circuit');
+```

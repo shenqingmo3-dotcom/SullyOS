@@ -70,13 +70,97 @@ describe('classifyLLMOutput', () => {
     }
   });
 
+  it('转账金额容错: 带单位 / 千分位 / 冒号后空格 (老正则 `(\\d+)` 全漏)', () => {
+    for (const [input, amount] of [
+      ['[[ACTION:TRANSFER:520元]]', 520],
+      ['[[ACTION:TRANSFER:1,999]]', 1999],
+      ['[[ACTION:TRANSFER: 520]]', 520],
+      ['[[ACTION:TRANSFER:520.00]]', 520],
+    ] as Array<[string, number]>) {
+      const r = classifyLLMOutput(input);
+      expect(r.kind, input).toBe('finish');
+      if (r.kind === 'finish') {
+        expect(r.directives, input).toEqual([{ type: 'transfer', amount }]);
+        expect(r.cleanedText, input).toBe('');
+      }
+    }
+  });
+
+  it('金额解析不出来 → 不产生 directive, 标签照剥 (跟客户端同语义)', () => {
+    const r = classifyLLMOutput('[[ACTION:TRANSFER:很多]]随便花');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([]);
+      expect(r.cleanedText).toBe('随便花');
+    }
+  });
+
+  it('模仿历史日志的 [系统: ...] → transfer directive (正文剥净, 客户端重放)', () => {
+    const r = classifyLLMOutput('[系统: 你向阿桃转账 1999]拿去花');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([{ type: 'transfer', amount: 1999 }]);
+      expect(r.cleanedText).toBe('拿去花');
+      expect(r.sanitizedBody).toBe('拿去花');
+    }
+  });
+
+  it('新 kv 形态 [[ACTION:TRANSFER|to=user|amount=520]] → directive (worker 与客户端共用一份解析)', () => {
+    const r = classifyLLMOutput('[[ACTION:TRANSFER|to=user|amount=520]]拿去');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([{ type: 'transfer', amount: 520 }]);
+      expect(r.cleanedText).toBe('拿去');
+    }
+  });
+
+  it('复读历史的 [[记录:TRANSFER|...]] → 零 directive, 正文剥净 (幂等哨兵)', () => {
+    const r = classifyLLMOutput('[[记录:TRANSFER|to=user|amount=1999|status=待处理]]拿去花');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([]);
+      expect(r.cleanedText).toBe('拿去花');
+      expect(r.sanitizedBody).toBe('拿去花');
+    }
+  });
+
+  it('to=char 伪造 kv → 零 directive, 标签照剥', () => {
+    const r = classifyLLMOutput('[[ACTION:TRANSFER|to=char|amount=520]]收到');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([]);
+      expect(r.cleanedText).toBe('收到');
+    }
+  });
+
+  it('方向伪造的日志 (用户→角色) 不产生 directive, 也不进正文', () => {
+    const r = classifyLLMOutput('[系统: 阿桃向你转账 1999]我收下啦');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([]);
+      expect(r.cleanedText).toBe('我收下啦');
+    }
+  });
+
+  it('收/退回执 → transfer_accept / transfer_return directive (老实现在 push 路径直接丢失)', () => {
+    const accept = classifyLLMOutput('[[ACTION:TRANSFER_ACCEPT]]谢谢你');
+    if (accept.kind === 'finish') {
+      expect(accept.directives).toEqual([{ type: 'transfer_accept' }]);
+      expect(accept.cleanedText).toBe('谢谢你');
+    }
+    const ret = classifyLLMOutput('[系统: 你退回了阿桃的转账 520]我不能要');
+    if (ret.kind === 'finish') {
+      expect(ret.directives).toEqual([{ type: 'transfer_return' }]);
+      expect(ret.cleanedText).toBe('我不能要');
+    }
+  });
+
   it('D6+ finish + 多个 directives', () => {
     const r = classifyLLMOutput('收到[[ACTION:POKE]] 转你[[ACTION:TRANSFER:100]]');
     if (r.kind === 'finish') {
       expect(r.cleanedText).toBe('收到 转你');
+      // 转账在 SIDE_EFFECT_TAGS 之前抽 (它要先把正文里的日志形态挖掉), 所以排在 poke 前面。
+      // 数组顺序只影响客户端重建出的标签串; 落库顺序由 chatParser 决定 (POKE 恒在转账之前执行)。
       expect(r.directives).toEqual([
-        { type: 'poke' },
         { type: 'transfer', amount: 100 },
+        { type: 'poke' },
       ]);
     }
   });
@@ -187,6 +271,105 @@ describe('classifyLLMOutput', () => {
       const types = r.directives.map(d => d.type);
       expect(types).toContain('notion_write_diary');
       expect(types).toContain('feishu_write_diary');
+    }
+  });
+});
+
+describe('classifyLLMOutput — LIFE / NEWS_CARD', () => {
+  it('[[LIFE:...]] → life_record directive, 正文剥干净', () => {
+    const r = classifyLLMOutput('你今天吃药了吗\n[[LIFE:MED|布洛芬]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('你今天吃药了吗');
+      expect(r.sanitizedBody).toBe('你今天吃药了吗');
+      expect(r.directives).toEqual([{ type: 'life_record', body: 'MED|布洛芬' }]);
+    }
+  });
+
+  it('无参形态 [[LIFE:PERIOD_START]] 一样收', () => {
+    const r = classifyLLMOutput('记下了[[LIFE:PERIOD_START]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('记下了');
+      expect(r.directives).toEqual([{ type: 'life_record', body: 'PERIOD_START' }]);
+    }
+  });
+
+  it('一条消息里多个 LIFE → 逐个收', () => {
+    const r = classifyLLMOutput('[[LIFE:MED|布洛芬]][[LIFE:EXERCISE|跑步|30分钟]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'life_record', body: 'MED|布洛芬' },
+        { type: 'life_record', body: 'EXERCISE|跑步|30分钟' },
+      ]);
+    }
+  });
+
+  it('[[NEWS_CARD: 来源|标题]] → news_card directive, 前后空格归一', () => {
+    const r = classifyLLMOutput('刷到条新闻\n[[NEWS_CARD: 微博|某某官宣 ]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('刷到条新闻');
+      expect(r.sanitizedBody).toBe('刷到条新闻');
+      expect(r.directives).toEqual([{ type: 'news_card', body: '微博|某某官宣' }]);
+    }
+  });
+
+  it('省略来源的 [[NEWS_CARD: 标题]] 也收', () => {
+    const r = classifyLLMOutput('[[NEWS_CARD: 某某官宣]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('');
+      expect(r.directives).toEqual([{ type: 'news_card', body: '某某官宣' }]);
+    }
+  });
+});
+
+// 复述型模型经常把整条消息重写一遍 (先说一遍再"总结"一遍), 同一个标签就出现两次。
+// 客户端重放不去重, 放过去就是同一笔钱转两次账。
+describe('classifyLLMOutput — 同一条消息里重复的副作用只出一个 directive', () => {
+  it('两个一模一样的转账标签 → 只出一个 transfer directive', () => {
+    const r = classifyLLMOutput('给你买奶茶[[ACTION:TRANSFER:520]]\n刚刚给你转了[[ACTION:TRANSFER:520]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([{ type: 'transfer', amount: 520 }]);
+    }
+  });
+
+  it('金额不同的两笔仍然是两件事, 都留', () => {
+    const r = classifyLLMOutput('[[ACTION:TRANSFER:520]][[ACTION:TRANSFER:1314]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'transfer', amount: 520 },
+        { type: 'transfer', amount: 1314 },
+      ]);
+    }
+  });
+
+  it('重复的日程 / 生活记录同样只留第一个', () => {
+    const r = classifyLLMOutput(
+      '[[ACTION:ADD_EVENT|面试|2026-08-03]][[LIFE:MED|布洛芬]]\n'
+      + '再说一遍：[[ACTION:ADD_EVENT|面试|2026-08-03]][[LIFE:MED|布洛芬]]',
+    );
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'add_event', title: '面试', date: '2026-08-03' },
+        { type: 'life_record', body: 'MED|布洛芬' },
+      ]);
+    }
+  });
+
+  it('参数不同的小红书动作不会被误吞', () => {
+    const r = classifyLLMOutput('[[XHS_LIKE: n1]][[XHS_LIKE: n1]][[XHS_LIKE: n2]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'xhs_like', noteId: 'n1' },
+        { type: 'xhs_like', noteId: 'n2' },
+      ]);
     }
   });
 });

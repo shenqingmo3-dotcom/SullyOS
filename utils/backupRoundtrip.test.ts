@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
+import JSZip from 'jszip';
 import { DB, openDB } from './db';
-import { encodeVectorsForBackup } from './memoryPalace/db';
+import { encodeVectorsForBackup, encodeVectorsForBackupChunked, MemoryVectorDB } from './memoryPalace/db';
 import { writeV2Backup, assembleV2Backup, shardFileName, type ShardLimits } from './backupFormat';
+import { ActiveMsgStore } from './activeMsgStore';
 
 // fake-indexeddb 已通过 test-setup.ts 注入。
 // 这组用例走「真实链路」：writeV2Backup → assembleV2Backup → DB.importFullData，钉死 v2 改造
@@ -22,7 +25,11 @@ class FakeFile {
 class FakeZip {
     files = new Map<string, string | Uint8Array>();
     file(name: string): FakeFile | null;
-    file(name: string, data: string | Uint8Array, options?: { base64?: boolean }): void;
+    file(name: string, data: string | Uint8Array, options?: {
+        base64?: boolean;
+        compression?: 'STORE' | 'DEFLATE';
+        compressionOptions?: { level?: number };
+    }): void;
     file(name: string, data?: string | Uint8Array): FakeFile | null | void {
         if (data === undefined) {
             if (!this.files.has(name)) return null;
@@ -48,7 +55,7 @@ async function seedStore(name: string, records: any[]): Promise<void> {
 
 beforeEach(async () => {
     // 清掉本组会断言/写入的 store，避免 importFullData 跨用例残留串味
-    for (const s of ['gallery', 'themes', 'user_profile', 'characters', 'messages', 'memory_vectors']) {
+    for (const s of ['gallery', 'themes', 'user_profile', 'characters', 'messages', 'memory_nodes', 'memory_vectors']) {
         await seedStore(s, []);
     }
 });
@@ -75,6 +82,84 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
         const ids = (await DB.getRawStoreData('gallery')).map((g: any) => g.id).sort();
         // 旧 'old' 被 clear、5 条全部还原（老的「逐片喂 importFullData」写法只会剩最后一片 → 这里会挂）
         expect(ids).toEqual(['g0', 'g1', 'g2', 'g3', 'g4']);
+    });
+    it('MCP 配置作为 v2 元数据完整组装并由全量导入恢复', async () => {
+        const mcpLocal = {
+            'aetheros.mcp.servers': '[{"id":"srv-test","name":"测试 MCP"}]',
+            'aetheros.mcp.useNativeTools': 'false',
+        };
+        const zip = new FakeZip();
+        const manifest = await writeV2Backup(zip, { mcpLocal } as any, {});
+        const data: any = await assembleV2Backup(zip, manifest);
+        expect(data.mcpLocal).toEqual(mcpLocal);
+        localStorage.removeItem('aetheros.mcp.servers');
+        localStorage.removeItem('aetheros.mcp.useNativeTools');
+        await DB.importFullData(data);
+        expect(localStorage.getItem('aetheros.mcp.servers')).toBe(mcpLocal['aetheros.mcp.servers']);
+        expect(localStorage.getItem('aetheros.mcp.useNativeTools')).toBe('false');
+        localStorage.removeItem('aetheros.mcp.servers');
+        localStorage.removeItem('aetheros.mcp.useNativeTools');
+    });
+
+    // ─── 主动消息 2.0 的全局配置 ───
+    // 它存在独立的 ActiveMsg 库里，不在主库那份 store 清单内。曾经整份漏在备份外：
+    // 同一台设备上恢复看不出问题（那个库没被动过），换设备就是 Worker 地址、共享密钥、
+    // 一键部署生成的 master key 全丢，主动消息和即时对话得从头配。
+    it('主动消息 2.0 全局配置随备份往返：Worker 地址与 master key 都回得来', async () => {
+        await ActiveMsgStore.saveGlobalConfig({
+            userId: 'u-amsg-roundtrip',
+            workerUrl: 'https://amsg.example.workers.dev',
+            serverToken: 'token-abc',
+            masterKey: 'master-key-xyz',
+            initializedAt: 1700000000000,
+            instantChatEnabled: true,
+        });
+
+        const exported = await DB.exportFullData();
+        expect(exported.amsg2GlobalConfig?.workerUrl).toBe('https://amsg.example.workers.dev');
+
+        const zip = new FakeZip();
+        const manifest = await writeV2Backup(zip, { ...exported } as any, {});
+        const data: any = await assembleV2Backup(zip, manifest);
+
+        // 换设备 / 清了浏览器数据：这台机器上什么都没配过
+        await ActiveMsgStore.saveGlobalConfig({
+            userId: '', workerUrl: '', serverToken: undefined,
+            masterKey: undefined, initializedAt: undefined, instantChatEnabled: undefined,
+        });
+        expect((await ActiveMsgStore.getGlobalConfig()).workerUrl).toBe('');
+
+        await DB.importFullData(data);
+
+        const restored = await ActiveMsgStore.getGlobalConfig();
+        expect(restored.workerUrl).toBe('https://amsg.example.workers.dev');
+        expect(restored.serverToken).toBe('token-abc');
+        // master key 一换，之前加密进 D1 的任务就全解不开，而 worker 里的值读不回来
+        expect(restored.masterKey).toBe('master-key-xyz');
+        expect(restored.userId).toBe('u-amsg-roundtrip');
+        expect(restored.initializedAt).toBe(1700000000000);
+        expect(restored.instantChatEnabled).toBe(true);
+    });
+
+    it('instantChatSupported 不随备份还原：留空等重新探一次，不照抄过期结论', async () => {
+        await ActiveMsgStore.saveGlobalConfig({
+            workerUrl: 'https://amsg.example.workers.dev',
+            instantChatSupported: false, // 备份那会儿那台 Worker 还是旧版
+        });
+        const exported = await DB.exportFullData();
+
+        // 这台机器上的 Worker 早就更新过了
+        await ActiveMsgStore.saveGlobalConfig({ workerUrl: '', instantChatSupported: true });
+        await DB.importFullData({ ...exported } as any);
+
+        // 照抄回 false 会把即时对话白挡在门外，直到用户手动去重开开关
+        expect((await ActiveMsgStore.getGlobalConfig()).instantChatSupported).toBeUndefined();
+    });
+
+    it('没配过 Worker 的用户：备份里干脆不出现这一项', async () => {
+        await ActiveMsgStore.saveGlobalConfig({ workerUrl: '', masterKey: undefined });
+        const exported = await DB.exportFullData();
+        expect(exported.amsg2GlobalConfig).toBeUndefined();
     });
 
     it('media_only 补丁：文字角色字段 + 文字消息存活，只有媒体被更新（R4·F1）', async () => {
@@ -145,6 +230,44 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
         expect(profile.perCharAvatars).toEqual(userProfile.perCharAvatars);
     });
 
+    it('AI 原文范围设置随角色备份完整往返', async () => {
+        const char = {
+            id: 'ctx1',
+            name: '上下文角色',
+            avatar: '',
+            description: '',
+            systemPrompt: '',
+            memories: [],
+            contextRangePolicyVersion: 1,
+            contextRangeMode: 'manual',
+            contextLimit: 1200,
+            contextUserStartMessageId: 345,
+            memoryPalaceWaterline: {
+                preset: 'custom',
+                hotZoneSize: 80,
+                bufferThreshold: 30,
+            },
+        };
+        const zip = new FakeZip();
+        const manifest = await writeV2Backup(zip, { characters: [char] } as any, {});
+        const data = await assembleV2Backup(zip, manifest);
+
+        await DB.importFullData(data as any);
+
+        const restored = (await DB.getRawStoreData('characters')).find((c: any) => c.id === 'ctx1');
+        expect(restored).toMatchObject({
+            contextRangePolicyVersion: 1,
+            contextRangeMode: 'manual',
+            contextLimit: 1200,
+            contextUserStartMessageId: 345,
+            memoryPalaceWaterline: {
+                preset: 'custom',
+                hotZoneSize: 80,
+                bufferThreshold: 30,
+            },
+        });
+    });
+
     it('formatVersion 3 在组装阶段 abort，DB 未发生任何写（test 12）', async () => {
         await seedStore('gallery', [{ id: 'keep', url: 'x' }]);
         const zip = new FakeZip();
@@ -165,7 +288,157 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
     });
 });
 
+const LARGE_VECTOR_COUNT = 4500;
+const LARGE_VECTOR_DIMENSIONS = 1024;
+
+function largeVectorMeta(row: number) {
+    return {
+        memoryId: `memory_${row}`,
+        charId: `char_${row % 3}`,
+        dimensions: LARGE_VECTOR_DIMENSIONS,
+        model: row % 2 === 0 ? 'BAAI/bge-m3' : 'Pro/BAAI/bge-m3',
+    };
+}
+
+function makeLargeVector(row: number): Float32Array {
+    const vector = new Float32Array(LARGE_VECTOR_DIMENSIONS);
+    for (let d = 0; d < vector.length; d++) {
+        vector[d] = (((row * 31 + d * 17) % 1009) - 504) / 504;
+    }
+    return vector;
+}
+
+function updateVectorDigest(
+    hash: ReturnType<typeof createHash>,
+    meta: ReturnType<typeof largeVectorMeta>,
+    bytes: Uint8Array,
+) {
+    hash.update(`${meta.memoryId}\0${meta.charId}\0${meta.dimensions}\0${meta.model}\0`);
+    hash.update(bytes);
+}
+
+function numericMemoryOrder(a: { memoryId: string }, b: { memoryId: string }) {
+    return Number(a.memoryId.slice('memory_'.length)) - Number(b.memoryId.slice('memory_'.length));
+}
+
+async function seedLargeVectorLibrary(): Promise<string> {
+    const expected = createHash('sha256');
+    const db = await openDB();
+    const CHUNK_SIZE = 25;
+    for (let start = 0; start < LARGE_VECTOR_COUNT; start += CHUNK_SIZE) {
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(['memory_nodes', 'memory_vectors'], 'readwrite');
+            const nodeStore = tx.objectStore('memory_nodes');
+            const vectorStore = tx.objectStore('memory_vectors');
+            const end = Math.min(start + CHUNK_SIZE, LARGE_VECTOR_COUNT);
+            for (let row = start; row < end; row++) {
+                const meta = largeVectorMeta(row);
+                const f32 = makeLargeVector(row);
+                const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+                updateVectorDigest(expected, meta, bytes);
+                nodeStore.put({
+                    id: meta.memoryId,
+                    charId: meta.charId,
+                    content: `第 ${row} 条记忆`,
+                    room: 'living_room',
+                    tags: [],
+                    importance: 5,
+                    embedded: true,
+                    createdAt: row,
+                    lastAccessedAt: row,
+                    accessCount: 0,
+                });
+                vectorStore.put({
+                    ...meta,
+                    // 两种历史存储形态各占一半，确保 number[] 与 Uint8Array 都逐字节无损。
+                    vector: row % 2 === 0 ? Array.from(f32) : bytes,
+                });
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    }
+    return expected.digest('hex');
+}
+
+function digestStoredVectors(vectors: any[]): string {
+    const hash = createHash('sha256');
+    for (const vector of [...vectors].sort(numericMemoryOrder)) {
+        const f32 = vector.vector instanceof Float32Array
+            ? vector.vector
+            : vector.vector instanceof Uint8Array
+                ? new Float32Array(vector.vector.buffer, vector.vector.byteOffset, vector.vector.byteLength >>> 2)
+                : new Float32Array(vector.vector);
+        updateVectorDigest(
+            hash,
+            {
+                memoryId: vector.memoryId,
+                charId: vector.charId,
+                dimensions: vector.dimensions,
+                model: vector.model,
+            },
+            new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength),
+        );
+    }
+    return hash.digest('hex');
+}
+
 describe('v2 真实链路：向量二进制旁路', () => {
+    it('4500×1024 真 ZIP → importFullData → 检索读取：数量、关联、元数据和全部 Float32 字节零变化', async () => {
+        const expectedDigest = await seedLargeVectorLibrary();
+        const sourceNodes = await DB.getRawStoreData('memory_nodes');
+
+        const payload = await encodeVectorsForBackupChunked(async (onBatch) => {
+            await DB.streamRawStoreData('memory_vectors', item => onBatch([item]));
+        });
+        expect(payload.index).toHaveLength(LARGE_VECTOR_COUNT);
+        expect(payload.bin.byteLength).toBe(LARGE_VECTOR_COUNT * LARGE_VECTOR_DIMENSIONS * 4);
+
+        const zip = new JSZip();
+        await writeV2Backup(zip as any, { memoryNodes: sourceNodes }, { vectors: payload, mode: 'text_only' });
+        const archive = await zip.generateAsync({
+            type: 'uint8array',
+            streamFiles: true,
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 },
+        });
+        const loaded = await JSZip.loadAsync(archive);
+        const manifest = JSON.parse(await loaded.file('manifest.json')!.async('string'));
+        const data: any = await assembleV2Backup(loaded as any, manifest);
+
+        expect(data.memoryVectors).toHaveLength(LARGE_VECTOR_COUNT);
+        expect(data.memoryNodes).toHaveLength(LARGE_VECTOR_COUNT);
+        // 每条必须是独立 buffer；否则写入 IDB 时可能把整根 17.6 MiB bin 为每条重复克隆。
+        expect(new Set(data.memoryVectors.map((v: any) => v.vector.buffer)).size).toBe(LARGE_VECTOR_COUNT);
+
+        await seedStore('memory_nodes', [{ id: 'stale', charId: 'stale', content: '应被清除' }]);
+        await seedStore('memory_vectors', [{
+            memoryId: 'stale', charId: 'stale', dimensions: 1, model: 'old', vector: new Uint8Array(4),
+        }]);
+        await DB.importFullData(data);
+
+        const restoredNodes = await DB.getRawStoreData('memory_nodes');
+        const restoredRaw = await DB.getRawStoreData('memory_vectors');
+        expect(restoredNodes).toHaveLength(LARGE_VECTOR_COUNT);
+        expect(restoredRaw).toHaveLength(LARGE_VECTOR_COUNT);
+        expect(restoredRaw.every((v: any) => v.vector instanceof Uint8Array)).toBe(true);
+        expect(digestStoredVectors(restoredRaw)).toBe(expectedDigest);
+
+        const nodeById = new Map(restoredNodes.map((node: any) => [node.id, node]));
+        for (const vector of restoredRaw) {
+            expect(nodeById.get(vector.memoryId)?.charId).toBe(vector.charId);
+        }
+
+        // 再走实际检索侧公开读取 API：应解码成 Float32Array，仍与导出前全量哈希相同。
+        const searchSideVectors = (
+            await Promise.all(['char_0', 'char_1', 'char_2'].map(charId => MemoryVectorDB.getAllByCharId(charId)))
+        ).flat();
+        expect(searchSideVectors).toHaveLength(LARGE_VECTOR_COUNT);
+        expect(searchSideVectors.every(v => v.vector instanceof Float32Array)).toBe(true);
+        expect(digestStoredVectors(searchSideVectors)).toBe(expectedDigest);
+    }, 30_000);
+
     it('向量 clear-once：目标独有的旧向量被清、备份的向量落库、逐值一致（test 10 + 二进制往返）', async () => {
         // 目标已有 vA、vB（存储形态 Uint8Array）
         const toU8 = (vals: number[]) => { const f = new Float32Array(vals); return new Uint8Array(f.buffer, f.byteOffset, f.byteLength); };
@@ -177,7 +450,7 @@ describe('v2 真实链路：向量二进制旁路', () => {
         // 备份只含 vA（新值）+ vC，不含 vB
         const payload = encodeVectorsForBackup([
             { memoryId: 'vA', charId: 'c1', vector: toU8([1, 2, 3, 4]) },
-            { memoryId: 'vC', charId: 'c2', vector: toU8([5, 6, 7, 8]) },
+            { memoryId: 'vC', charId: 'story-theater:backup-entry', vector: toU8([5, 6, 7, 8]) },
         ]);
         const zip = new FakeZip();
         const manifest = await writeV2Backup(zip, { memoryNodes: [{ id: 'n1' }] }, { vectors: payload });
@@ -191,6 +464,7 @@ describe('v2 真实链路：向量二进制旁路', () => {
         // 逐值一致，且 vA 是新值不是旧值
         expect(vecValues(byId.get('vA'))).toEqual([1, 2, 3, 4]);
         expect(vecValues(byId.get('vC'))).toEqual([5, 6, 7, 8]);
+        expect(byId.get('vC').charId).toBe('story-theater:backup-entry');
         // 落库形态是 Uint8Array（紧凑存储）
         expect(byId.get('vA').vector).toBeInstanceOf(Uint8Array);
     });
