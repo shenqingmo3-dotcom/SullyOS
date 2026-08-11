@@ -480,3 +480,11 @@
 - APP Token 仍是服务器内部密钥，不要求手机用户自行填写；手机首次连接应使用服务器生成的 15 分钟一次性配对码。
 - 设置页同时恢复了旧二改已有但被上游页面替换掉的 3 个管理入口：为其他设备生成一次性配对码、查看/关闭 Web Push、从副 API 自动发现模型；这些属于操作入口缺失，不计入上述 10 类核心运行断链。
 - 最终验证：前端 226 个测试文件、3175 项测试全部通过；后端 11 个测试文件、38 项测试全部通过，后端 typecheck/build 与前端 6 个 Worker bundle、Vite 生产构建通过。390×844 手机视口验证设置页、heartbeat、四项工具与 NPC 入口无错位，控制台无 error。
+
+## 23. 二改闭环修复版线上发布（2026-08-12）
+
+- 功能提交 `b12c7e95` 已推送到原远端 `sharkos` 分支；本轮没有后端源码或数据库迁移变化，因此只替换现有 VPS 的静态前端，没有重建 API、PostgreSQL 或 heartbeat Worker。
+- 线上主资源为 `assets/index-BX5X_UxJ.js`；旧前端回滚包为 `/home/ubuntu/sullyos-frontend.rollback-b12c7e95-before.tar.gz`。
+- `https://goldenbite.icu/health` 正常，`www.goldenbite.icu` 继续以 301 跳转主域名。线上 390×844 实际页面确认生产调试信息已消失，自主后端未配对状态下能看到 heartbeat、黑 X、小红书、通用 MCP 和 iPhone 屏幕查看入口，控制台无 error。
+- heartbeat Worker 继续使用已验证的 `sullyos-backend:sharkos-5f0682e2` 镜像并保持运行；API/Worker 最近日志未发现 error、fatal、panic 或 unhandled。
+- 已从服务器生成一次 15 分钟有效的一次性手机配对码；配对码不写入 Git 或交接文档，过期后应在已配对设备点击“生成配对码”，或由服务器重新生成。
