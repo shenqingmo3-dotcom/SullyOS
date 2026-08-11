@@ -443,7 +443,7 @@
 
 ## 19. SharkOS 首次正式测试已部署（2026-08-11）
 
-- 线上与远端 `sharkos` 分支最终版本为 `94fa4ffd88c4546b1d8269e5fc2b14b17d20c4e1`；VPS 后端镜像标识为 `sharkos-94fa4ffd`，正式前端主资源为 `assets/index-DsRV8KfH.js`。
+- 线上应用代码对应的功能修复提交为 `94fa4ffd88c4546b1d8269e5fc2b14b17d20c4e1`；VPS 后端镜像标识为 `sharkos-94fa4ffd`，正式前端主资源为 `assets/index-DsRV8KfH.js`。后续仅文档提交不会改变该线上镜像标识。
 - 部署前已生成 PostgreSQL dump 与 SHA-256 校验文件；同时保留 `/opt/sullyos-backend.rollback-4aec9394` 和 `/opt/sullyos-frontend.rollback-4aec9394` 两套文件级回滚副本。没有执行 `docker compose down -v`，数据库卷和证书卷均未删除。
 - 后端迁移、HTTPS、API 鉴权和 PostgreSQL 生产健康检查均通过；`https://www.goldenbite.icu/` 以 301 跳转至主域名，`https://goldenbite.icu/health` 返回正常。
 - 正式网页已实际打开验收：SharkOS 桌面可加载，见面页显示“玩法与预设改为酒馆式楼层”“Tavern compatible”，并明确支持直接导入 SillyTavern Chat Completion 预设；浏览器控制台无 error。
