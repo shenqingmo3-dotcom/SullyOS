@@ -317,8 +317,10 @@ ${recentDiaryAvoidance}
 正文通常 150～500 字，标题像本人随手写下的，简短自然，不要概括全文。
 ${input.instruction ? `可参考的轻量灵感（不要照抄成回应）：${input.instruction}` : ''}
 
+可以额外留下 0～2 张“画面卡片”，每张只用一句具体描述记录亲历却没有拍下来的画面。它不是照片，不能声称真的拍摄或上传了图片。
+
 只返回 JSON，不要 Markdown：
-{"title":"日记标题","content":"完整日记正文","paperStyle":"plain|grid|dot|lined|dark|pink"}`;
+{"title":"日记标题","content":"完整日记正文","paperStyle":"plain|grid|dot|lined|dark|pink","sceneCards":["一句具体画面描述"]}`;
     const diaryMessages = [...context.messages, { role: 'user' as const, content: prompt }];
     let completion = await createChatCompletion({
       messages: diaryMessages,
@@ -334,7 +336,7 @@ ${input.instruction ? `可参考的轻量灵感（不要照抄成回应）：${i
           { role: 'assistant', content: malformed },
           {
             role: 'user',
-            content: '上一条输出不是可解析的 JSON。保留日记内容但修正格式；只返回一个合法 JSON 对象，必须包含 title、content、paperStyle，不要代码围栏、json 前缀、解释或尾随文字。',
+            content: '上一条输出不是可解析的 JSON。保留日记内容但修正格式；只返回一个合法 JSON 对象，必须包含 title、content、paperStyle，可选 sceneCards 字符串数组；不要代码围栏、json 前缀、解释或尾随文字。',
           },
         ],
         temperature: 0.45,
@@ -355,6 +357,7 @@ ${input.instruction ? `可参考的轻量灵感（不要照抄成回应）：${i
         diaryDate,
         paperStyle: generated.paperStyle,
         authorType: 'assistant',
+        sceneCards: generated.sceneCards,
       };
       const event = await client.query<{ id: string }>(
         `INSERT INTO conversation_events
@@ -375,7 +378,7 @@ ${input.instruction ? `可参考的轻量灵感（不要照抄成回应）：${i
          RETURNING id`,
         [context.agentId, context.conversationId, eventId, externalId, generated.title,
           generated.content, diaryDate, generated.paperStyle,
-          JSON.stringify({ source: 'manual-diary-trigger' })],
+          JSON.stringify({ source: 'manual-diary-trigger', sceneCards: generated.sceneCards })],
       );
       const diaryId = diary.rows[0]?.id;
       if (!diaryId) {

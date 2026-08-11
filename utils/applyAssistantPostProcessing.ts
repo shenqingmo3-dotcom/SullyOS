@@ -49,6 +49,7 @@ import {
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
+import { extractInteractionModeDirective } from './interactionMode';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -417,6 +418,13 @@ export async function applyAssistantPostProcessing(
         reasoningContent: pushReasoningContent,
         messageTimestamp,
     } = ctx;
+    const interactionModeResult = extractInteractionModeDirective(rawAiContent);
+    rawAiContent = interactionModeResult.content;
+    if (interactionModeResult.directive && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('interaction-mode-directive', {
+            detail: { charId: char.id, directive: interactionModeResult.directive },
+        }));
+    }
     const { baseUrl, headers, effectiveApi } = api;
     // 拟人打字延迟：流式预览已实时展示过气泡时（instantRender）跳过，避免二次慢放
     const typingPause = (ms: number): Promise<void> =>

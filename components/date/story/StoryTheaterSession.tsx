@@ -65,6 +65,11 @@ const textFromHistory = (messages: Message[], identityName: string): string => b
 
 const STORY_PAGE_SIZE = 10;
 
+const swipeCandidatesFor = (message: Message): string[] => {
+    const stored = message.metadata?.theaterSwipeCandidates;
+    return Array.isArray(stored) && stored.length > 0 ? stored.map(String) : [message.content];
+};
+
 const normalizeAffinityInput = (value: any, actor?: CharacterProfile): StoryAffinityInput | undefined => {
     if (!value || typeof value !== 'object') return undefined;
     const delta = Math.max(-100, Math.min(100, Math.round(Number(value.delta) || 0)));
@@ -349,6 +354,20 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         const mirrorIds = Object.values((message.metadata?.theaterMirrorIds || {}) as Record<string, number>).map(Number).filter(id => Number.isFinite(id) && id > 0);
         return [...new Set([message.id, ...mirrorIds])];
     }, []);
+    const selectSwipe = useCallback(async (message: Message, direction: -1 | 1) => {
+        const candidates = swipeCandidatesFor(message);
+        if (candidates.length < 2 || mutatingMessage) return;
+        const currentIndex = Math.max(0, Math.min(candidates.length - 1, Number(message.metadata?.theaterSwipeIndex) || 0));
+        const nextIndex = (currentIndex + direction + candidates.length) % candidates.length;
+        setMutatingMessage(true);
+        try {
+            await Promise.all(relatedMessageIds(message).map(id => DB.updateMessage(id, candidates[nextIndex])));
+            await DB.updateMessageMetadata(message.id, previous => ({ ...previous, theaterSwipeCandidates: candidates, theaterSwipeIndex: nextIndex }));
+            await loadMessages();
+        } finally {
+            setMutatingMessage(false);
+        }
+    }, [loadMessages, mutatingMessage, relatedMessageIds]);
     const saveMessageEdit = useCallback(async () => {
         if (!editingMessage || !editDraft.trim() || mutatingMessage) return;
         setMutatingMessage(true);
@@ -563,7 +582,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         }
     }, [addToast, apiConfig, callCompletion, entry, loadMessages, mask.name, memoryPalaceConfig, onEntryChange, threadId]);
 
-    const send = useCallback(async (rerollTarget?: Message) => {
+    const send = useCallback(async (rerollTarget?: Message, control?: { text: string; hideUser?: boolean }) => {
         if (sending || actors.length === 0) return;
         setSending(true);
         setRerollingId(rerollTarget?.id || null);
@@ -575,7 +594,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const isReroll = Boolean(rerollTarget && latest?.id === rerollTarget.id && latest.role === 'assistant' && !mirrorArchived(latest, entry));
             if (rerollTarget && !isReroll) return;
             const openingPrompt = `请直接写出「${entry.title}」的第一幕。${entry.premise ? `剧情介绍：${entry.premise}` : '没有额外剧情介绍，请根据角色、世界与预设自然建立场景。'}直接开始，不要求补充信息，也不要替当前由你执笔的身份做重大决定。`;
-            const typedText = input.trim();
+            const typedText = control?.text.trim() || input.trim();
             const rerollIndex = isReroll ? before.findIndex(message => message.id === rerollTarget?.id) : -1;
             const previousUser = rerollIndex > 0 ? [...before.slice(0, rerollIndex)].reverse().find(message => message.role === 'user') : undefined;
             const assistantOpening = !isReroll && before.length === 0 && entry.openingMode === 'assistant' && !typedText;
@@ -591,12 +610,14 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const affinityInputs = savedAffinityInputs.length > 0 ? savedAffinityInputs : rerollAffinityInputs.length > 0 ? rerollAffinityInputs : draftAffinityInputs;
             const userMessageId = isReroll
                 ? (previousUser?.id || 0)
+                : control?.hideUser
+                    ? 0
                 : assistantOpening
                     ? 0
                     : retry
                         ? latest.id
                         : await saveCentralAndMirrors('user', text, affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {});
-            if (!isReroll && !assistantOpening) await loadMessages();
+            if (!isReroll && !assistantOpening && !control?.hideUser) await loadMessages();
 
             const current = (await DB.getMessagesByCharId(threadId, true))
                 .filter(message => message.metadata?.source === 'story_theater')
@@ -662,14 +683,25 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const prefill = compiled.assistantPrefill?.content || '';
             const content = prefill && !generated.startsWith(prefill) ? `${prefill}${generated}` : generated;
             if (isReroll && rerollTarget) {
-                const mirrorIds = Object.values((rerollTarget.metadata?.theaterMirrorIds || {}) as Record<string, number>).map(Number).filter(Boolean);
-                await DB.deleteMessages([rerollTarget.id, ...mirrorIds]);
+                const candidates = [...swipeCandidatesFor(rerollTarget), content];
+                await Promise.all(relatedMessageIds(rerollTarget).map(id => DB.updateMessage(id, content)));
+                await DB.updateMessageMetadata(rerollTarget.id, previous => ({
+                    ...previous,
+                    theaterPromptTokens: promptTokenCount,
+                    theaterPromptTokensExact: promptTokenCountExact,
+                    theaterSwipeCandidates: candidates,
+                    theaterSwipeIndex: candidates.length - 1,
+                    ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
+                }));
+            } else {
+                await saveCentralAndMirrors('assistant', content, {
+                    theaterPromptTokens: promptTokenCount,
+                    theaterPromptTokensExact: promptTokenCountExact,
+                    theaterSwipeCandidates: [content],
+                    theaterSwipeIndex: 0,
+                    ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
+                });
             }
-            await saveCentralAndMirrors('assistant', content, {
-                theaterPromptTokens: promptTokenCount,
-                theaterPromptTokensExact: promptTokenCountExact,
-                ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
-            });
             setInput('');
             setAffinityDrafts({});
             setShowAffinityInput(false);
@@ -689,7 +721,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             setSending(false);
             setRerollingId(null);
         }
-    }, [actors, addToast, affinityDrafts, affinityEnabled, applyActorMemoryPipeline, archiveIfNeeded, buildActorContexts, buildMaskMemoryContext, callCompletion, effectivePreset, entry, independentRecall, input, loadMessages, mask, promptIdentityName, saveCentralAndMirrors, selectedBooks, sending, threadId]);
+    }, [actors, addToast, affinityDrafts, affinityEnabled, applyActorMemoryPipeline, archiveIfNeeded, buildActorContexts, buildMaskMemoryContext, callCompletion, effectivePreset, entry, independentRecall, input, loadMessages, mask, promptIdentityName, relatedMessageIds, saveCentralAndMirrors, selectedBooks, sending, threadId]);
 
     const archivedCount = messages.filter(message => mirrorArchived(message, entry)).length;
     const pendingRetryInput = getPendingStoryRetryInput(messages);
@@ -705,7 +737,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         <header className='story-safe-header shrink-0 bg-stone-100/95 backdrop-blur border-b border-slate-200 z-10'>
             <div className='h-16 px-4 flex items-center gap-3'>
                 <button onClick={onBack} className='w-9 h-9 rounded-full grid place-items-center'><ArrowLeft size={20} /></button>
-                <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Story theater</div><h1 className='font-serif font-semibold truncate'>{entry.title}</h1></div>
+                <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Meeting · Tavern play</div><h1 className='font-serif font-semibold truncate'>{entry.title}</h1></div>
                 {onOpenVectorMemory && <button onClick={onOpenVectorMemory} className='w-9 h-9 rounded-full grid place-items-center text-violet-600' title='本剧情向量记忆' aria-label='本剧情向量记忆'><Database size={18} /></button>}
                 <StoryAppearanceButton />
                 <button onClick={onEdit} className='w-9 h-9 rounded-full grid place-items-center'><GearSix size={19} /></button>
@@ -762,7 +794,13 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                         }
                         if (message.role === 'user') return <section key={message.id} {...pressHandlersFor(message)} className='pl-4 border-l-2 border-violet-300'><div className='text-[9px] tracking-[.16em] font-bold text-violet-500'>你写下</div><p className='mt-2 text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p></section>;
                         const isLatest = message.id === messages[messages.length - 1]?.id;
-                        return <article key={message.id} {...pressHandlersFor(message)}><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} />{isLatest && <div className='mt-4 flex items-center justify-end gap-2'><span className='w-1.5 h-1.5 rounded-full bg-violet-400' /><button disabled={sending} onClick={() => void send(message)} className='inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'>{rerollingId === message.id ? <SpinnerGap size={12} className='animate-spin' /> : <ArrowClockwise size={12} />}换一种写法</button></div>}</article>;
+                        const swipeCandidates = swipeCandidatesFor(message);
+                        const swipeIndex = Math.max(0, Math.min(swipeCandidates.length - 1, Number(message.metadata?.theaterSwipeIndex) || 0));
+                        return <article key={message.id} {...pressHandlersFor(message)}><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} />{isLatest && <div className='mt-4 flex flex-wrap items-center justify-end gap-2'>
+                            {swipeCandidates.length > 1 && <div className='inline-flex items-center rounded-full border border-slate-200 bg-white'><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, -1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='上一个回复版本'><CaretLeft size={13} /></button><span className='min-w-8 text-center text-[9px] font-bold text-slate-400'>{swipeIndex + 1}/{swipeCandidates.length}</span><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, 1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='下一个回复版本'><CaretRight size={13} /></button></div>}
+                            <button disabled={sending || mutatingMessage} onClick={() => void send(undefined, { text: '请紧接上一层正文自然继续，不重复已经发生的内容，也不要代替用户侧身份作重大决定。', hideUser: true })} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'><ArrowBendDownRight size={12} />继续</button>
+                            <button disabled={sending || mutatingMessage} onClick={() => void send(message)} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'>{rerollingId === message.id ? <SpinnerGap size={12} className='animate-spin' /> : <ArrowClockwise size={12} />}重生成</button>
+                        </div>}</article>;
                     })}
                 </div>
                 {archivedCount > 0 && <div className='mt-10 flex items-center justify-center gap-2 text-[9px] text-slate-400'><Archive size={13} />{archivedCount} 条旧内容已归档，仍会通过所选记忆方式参与续写</div>}
@@ -802,7 +840,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                     <textarea value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void send(); } }} disabled={sending} rows={2} placeholder={pendingRetryInput ? '留空并点击推进，可继续上次中断' : canWriteOpening ? '也可以先写一句；留空推进则由故事开场' : '写下动作、对白、时间跳转，或你希望故事发生的事……'} className='min-h-12 max-h-36 flex-1 px-2 py-2 bg-transparent text-sm leading-6 resize-none outline-none disabled:opacity-50' />
                     <button onClick={() => void send()} disabled={sending || (!input.trim() && !pendingRetryInput && !canWriteOpening)} title={!input.trim() && pendingRetryInput ? '继续上次中断' : canWriteOpening && !input.trim() ? '让故事先开场' : '推进'} className='story-send-button self-end w-11 h-11 shrink-0 rounded-xl bg-slate-900 text-white grid place-items-center disabled:opacity-30'>{sending ? <SpinnerGap size={18} className='animate-spin' /> : <PaperPlaneTilt size={18} weight='fill' />}</button>
                 </div>
-                <div className='mt-2 text-center text-[9px] text-slate-400'>Ctrl / ⌘ + Enter 推进 · 长按楼层可编辑或删除</div>
+                <div className='mt-2 text-center text-[9px] text-slate-400'>Ctrl / ⌘ + Enter 发送 · 回复可继续、重生成与左右切换 · 长按楼层可编辑</div>
             </div>
         </footer>
         {showQuickPreset && <StoryQuickPresetPanel

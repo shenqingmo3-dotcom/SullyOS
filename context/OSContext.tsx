@@ -12,7 +12,6 @@ import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sul
 import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetting } from '../utils/storyTheaterBackup';
 import { createV2ArrayFieldWriter, writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked } from '../utils/memoryPalace/db';
-import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
 import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
@@ -2489,10 +2488,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
       };
 
-      ProactiveChat.onTrigger((charId: string) => {
-          void runProactive(charId);
-      });
-
       // 「彼方」自主登入 —— 独立调度，复用同一批 refs 拿最新状态
       const runVR = async (charId: string, room?: string, letterId?: string) => {
           const char = charactersRef.current.find(c => c.id === charId);
@@ -2585,8 +2580,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           .catch(() => {});
 
       return () => {
-          // Cleanup: detach proactive listeners when OSContext unmounts (unlikely but safe)
-          ProactiveChat.onTrigger(() => {});
           VRScheduler.onTrigger(() => {});
           WorldScheduler.onTrigger(() => {});
           window.removeEventListener('world-reroll-request', onRerollRequest as EventListener);
@@ -3010,6 +3003,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return updated;
     });
   };
+  useEffect(() => {
+    const handleInteractionModeDirective = (event: Event) => {
+      const detail = ((event as CustomEvent).detail || {}) as {
+        charId?: string;
+        directive?: { mode?: 'online' | 'offline'; location?: string; distance?: string };
+      };
+      if (!detail.charId || !detail.directive?.mode) return;
+      void updateCharacter(detail.charId, (character) => ({
+        interactionMode: detail.directive!.mode,
+        interactionScene: {
+          ...(character.interactionScene || {}),
+          ...(detail.directive?.location ? { location: detail.directive.location } : {}),
+          ...(detail.directive?.distance ? { distance: detail.directive.distance } : {}),
+          changedAt: Date.now(),
+          changedBy: 'assistant',
+        },
+      }));
+    };
+    window.addEventListener('interaction-mode-directive', handleInteractionModeDirective);
+    return () => window.removeEventListener('interaction-mode-directive', handleInteractionModeDirective);
+  }, [updateCharacter]);
   const deleteCharacter = async (id: string, options?: { force?: boolean }): Promise<DeleteCharacterResult> => {
     const target = characters.find(c => c.id === id);
     // 主动消息 2.0 的任务活在用户自己的 worker 上，不随本地角色删除消失：留着的话

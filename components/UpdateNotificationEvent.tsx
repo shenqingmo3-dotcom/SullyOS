@@ -389,7 +389,6 @@ const Amsg2UpdatePopup: React.FC<UpdatePopupProps> = ({ onDone, onExit }) => {
  * 已读各记各的 key——点掉其中一条不影响另一条还会不会露面。
  */
 const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.ReactNode }[] = [
-    { key: UPDATE_NOTIFICATION_KEY_2026_08_03, render: (props) => <Amsg2UpdatePopup {...props} /> },
     { key: UPDATE_NOTIFICATION_KEY_2026_08_02, render: (props) => <StoryPremierePopup {...props} /> },
 ];
 

@@ -476,14 +476,69 @@ export const resolveStoryPresetDocument = (
     };
 };
 
+const SILLYTAVERN_MARKERS: Record<string, NonNullable<StoryTheaterPresetPrompt['marker']>> = {
+    worldInfoBefore: 'world_before',
+    charDescription: 'characters',
+    charPersonality: 'characters',
+    scenario: 'scenario',
+    personaDescription: 'user',
+    worldInfoAfter: 'world_after',
+    dialogueExamples: 'examples',
+    chatHistory: 'history',
+};
+
+const normalizeSillyTavernDocument = (value: any, fallbackName: string): StoryTheaterPresetDocument => {
+    if (!value || !Array.isArray(value.prompts)) throw new Error('不是受支持的酒馆 Chat Completion 预设');
+    const promptById = new Map<string, any>();
+    value.prompts.forEach((prompt: any, index: number) => promptById.set(String(prompt?.identifier || prompt?.id || `prompt_${index + 1}`), prompt));
+    const orderBlock = Array.isArray(value.prompt_order)
+        ? value.prompt_order.find((block: any) => Array.isArray(block?.order)) || value.prompt_order[0]
+        : undefined;
+    const orderedRefs = Array.isArray(orderBlock?.order) ? orderBlock.order : [];
+    const orderedIds = orderedRefs.map((item: any) => String(item?.identifier || item?.id || '')).filter(Boolean);
+    const ids = [...orderedIds, ...[...promptById.keys()].filter(id => !orderedIds.includes(id))];
+    const enabledById = new Map(orderedRefs.map((item: any) => [String(item?.identifier || item?.id || ''), item?.enabled !== false]));
+    const prompts = ids.map((id, index): StoryTheaterPresetPrompt | null => {
+        const source = promptById.get(id);
+        if (!source) return null;
+        const marker = SILLYTAVERN_MARKERS[id];
+        return {
+            id: `st_${id || index + 1}`,
+            name: String(source.name || id || `提示词 ${index + 1}`),
+            enabled: enabledById.has(id) ? enabledById.get(id) === true : source.enabled !== false,
+            role: normalizeRole(source.role),
+            content: String(source.content || ''),
+            ...(marker ? { marker } : {}),
+        };
+    }).filter((prompt): prompt is StoryTheaterPresetPrompt => Boolean(prompt));
+    if (prompts.length === 0) throw new Error('酒馆预设中没有可用提示词');
+    return {
+        schema: 'sullyos.story-preset',
+        version: 1,
+        name: String(value.name || value.preset_name || fallbackName || '酒馆预设'),
+        description: String(value.description || '由 SillyTavern Chat Completion 预设适配'),
+        generation: {
+            temperature: clampNumber(value.temperature, 0, 2, 0.9),
+            topP: clampNumber(value.top_p, 0, 1, 1),
+            frequencyPenalty: clampNumber(value.frequency_penalty, -2, 2, 0),
+            presencePenalty: clampNumber(value.presence_penalty, -2, 2, 0),
+            maxTokens: Math.round(clampNumber(value.openai_max_tokens ?? value.max_tokens, 256, 32000, 8000)),
+        },
+        prompts,
+        assistantPrefill: String(value.assistant_prefill || value.assistantPrefill || ''),
+    };
+};
+
 export const parseStoryTheaterPreset = (rawText: string, sourceFileName: string, now: number = Date.now()): StoryTheaterPreset => {
     if (rawText.length > 5 * 1024 * 1024) throw new Error('预设超过 5 MB，请先移除内嵌素材或脚本数据');
     let data: Record<string, any>;
     try { data = JSON.parse(rawText); } catch { throw new Error('不是有效的 JSON 预设'); }
     const fileBase = sourceFileName.replace(/\.json$/i, '').trim() || '导入预设';
-    if (data.schema !== 'sullyos.story-preset') throw new Error('只接受糯米机剧情预设（schema: sullyos.story-preset）');
-    const document = normalizeDocument(data, fileBase);
-    return { id: makeStoryTheaterId(), name: document.name, sourceFileName, format: 'sullyos-story-preset', document, createdAt: now, updatedAt: now };
+    const native = data.schema === 'sullyos.story-preset';
+    const sillyTavern = !native && Array.isArray(data.prompts) && Array.isArray(data.prompt_order);
+    if (!native && !sillyTavern) throw new Error('只接受 SharkOS 见面预设或 SillyTavern Chat Completion 预设');
+    const document = native ? normalizeDocument(data, fileBase) : normalizeSillyTavernDocument(data, fileBase);
+    return { id: makeStoryTheaterId(), name: document.name, sourceFileName, format: native ? 'sullyos-story-preset' : 'sillytavern-chat-completion', document, createdAt: now, updatedAt: now };
 };
 
 export const createBlankStoryPreset = (name = '新剧情预设', now = Date.now()): StoryTheaterPreset => ({

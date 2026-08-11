@@ -730,6 +730,13 @@ export interface UserScheduleEntry {
 
 export type TogetherMediaType = 'novel' | 'movie';
 
+export interface TogetherReaderPreferences {
+    fontFamily: 'serif' | 'sans' | 'kai';
+    fontSize: number;
+    lineHeight: number;
+    background: 'ivory' | 'paper' | 'mint' | 'rose' | 'night';
+}
+
 export interface TogetherLibraryItem {
     id: string;
     type: TogetherMediaType;
@@ -740,6 +747,21 @@ export interface TogetherLibraryItem {
     createdAt: number;
     updatedAt: number;
     lastPosition?: number;
+    readerPreferences?: TogetherReaderPreferences;
+}
+
+export interface TogetherAnnotation {
+    id: string;
+    itemId: string;
+    sessionId: string;
+    segmentIndex: number;
+    startOffset: number;
+    endOffset: number;
+    quote: string;
+    comment: string;
+    author: 'user' | 'character';
+    createdAt: number;
+    replyToId?: string;
 }
 
 export interface TogetherSessionMessage {
@@ -748,6 +770,8 @@ export interface TogetherSessionMessage {
     content: string;
     createdAt: number;
     progress?: number;
+    annotationId?: string;
+    quote?: string;
 }
 
 export interface TogetherSession {
@@ -761,6 +785,7 @@ export interface TogetherSession {
     progress: number;
     interactionMode: InteractionMode;
     messages: TogetherSessionMessage[];
+    annotations?: TogetherAnnotation[];
     summary?: string;
     cinema?: {
         roomId: string;
@@ -2184,7 +2209,7 @@ export interface StoryTheaterPreset {
     id: string;
     name: string;
     sourceFileName?: string;
-    format: 'sullyos-story-preset';
+    format: 'sullyos-story-preset' | 'sillytavern-chat-completion';
     document: StoryTheaterPresetDocument;
     builtIn?: boolean;
     createdAt: number;
@@ -2941,7 +2966,9 @@ export interface StickerData {
     x: number;
     y: number;
     rotation: number;
-    scale?: number; 
+    scale?: number;
+    kind?: 'sticker' | 'photo' | 'scene-card';
+    caption?: string;
 }
 
 export interface DiaryPage {
@@ -3312,6 +3339,15 @@ export interface Task {
     isCompleted: boolean;
     completedAt?: number;
     createdAt: number;
+    /** 时光契约 2.0：用户日程。角色日程仍以 DailySchedule 为唯一来源。 */
+    scheduleDate?: string;
+    startTime?: string;
+    endTime?: string;
+    repeatWeekly?: boolean;
+    repeatDays?: number[];
+    excludedDates?: string[];
+    location?: string;
+    note?: string;
 }
 
 export interface Anniversary {
@@ -3321,6 +3357,8 @@ export interface Anniversary {
     charId: string;
     aiThought?: string;
     lastThoughtGeneratedAt?: number;
+    /** auto：未来倒数、过去累计；也可由用户显式固定。 */
+    countMode?: 'auto' | 'countdown' | 'countup';
 }
 
 export interface SocialComment {

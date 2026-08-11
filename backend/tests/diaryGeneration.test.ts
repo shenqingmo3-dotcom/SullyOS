@@ -29,6 +29,15 @@ describe('diary generation helpers', () => {
     expect(parsed).toMatchObject({ title: '无题', content: '鞋带松了一次。', paperStyle: 'grid' });
   });
 
+  it('keeps up to two short scene cards for visual diary decoration', () => {
+    const parsed = parseGeneratedDiaryCompletion(completion(
+      '{"title":"Morning","content":"I watered the herbs.","paperStyle":"dot","sceneCards":["Light on the mint leaves","A cup beside the window"]}',
+    ));
+    expect(parsed).toMatchObject({
+      sceneCards: ['Light on the mint leaves', 'A cup beside the window'],
+    });
+  });
+
   it('rejects malformed JSON-shaped output instead of displaying it as diary prose', () => {
     expect(parseGeneratedDiaryCompletion(completion(
       'json\n{"title":"坏掉了","content":"没有闭合"',

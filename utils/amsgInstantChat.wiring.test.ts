@@ -91,15 +91,10 @@ describe('useChatAI 的分流接缝', () => {
     // 跟 veto 一样只报不拦（那条 return 的守卫在下面「留痕只此一处」那条里）。
   });
 
-  it('角色级即时对话开关吃进路由判定（char-disabled 静默走本地，不留 veto trace）', () => {
+  it('SharkOS 不让上游主动消息 2.0 接管聊天路由', () => {
     const routing = routingSrc();
-    // readiness 判定必须带上 char：角色单独关了的话 ready 直接为 false，veto trace 的
-    // 条件（instantChatOn && …）够不到它。不带 char 的话角色关了照上云——旧行为回潮。
-    expect(routing).toContain('resolveInstantChatReadiness(char)');
-    // 也不许给 char-disabled 单开留痕分支：那是用户的主动选择，和「全局没开」同一待遇，
-    // 每条消息刷一遍 warn 就成骚扰了。查的是带引号的字面量——真要按它分支绕不开这个比较；
-    // 注释里提一嘴不算。
-    expect(routing).not.toContain("'char-disabled'");
+    expect(routing).toContain("= { ready: false, reason: 'disabled' }");
+    expect(routing).not.toContain('resolveInstantChatReadiness(char)');
   });
 
   it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
@@ -234,9 +229,9 @@ describe('useChatAI 的分流接缝', () => {
     expect(branchSrc()).toMatch(/showError\(/);
   });
 
-  it('受理成功那一轮不再打脏重传 fire_pack', () => {
-    expect(branchSrc()).toContain('instantChatAccepted = true');
-    expect(chatAiSrc).toMatch(/if \(!instantChatAccepted\) \{[\s\S]{0,200}markAmsgStateDirty\(/);
+  it('停用路由后不会把当前聊天误判为云端生成', () => {
+    expect(routingSrc()).toContain('const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured');
+    expect(routingSrc()).toContain("= { ready: false, reason: 'disabled' }");
   });
 
   // 情绪评估跟着这一轮一起上云：用户发完就能关页面，评估在 worker 里跑完，结果随
@@ -250,11 +245,8 @@ describe('useChatAI 的分流接缝', () => {
     expect(chatAiSrc).toMatch(/const fireLocalEmotionEval = \(emotionEvalEnabled && !cloudGenRoute/);
   });
 
-  it('不在这条路上开活跃会话租约（生成不在本机跑，没人需要它举手）', () => {
-    // 租约那句排在分支的 return 之后，走这条路根本到不了。
-    const leaseAt = chatAiSrc.indexOf('startAmsgChatPresence(char.id');
-    expect(leaseAt).toBeGreaterThan(chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD));
-    expect(branchSrc()).not.toContain('startAmsgChatPresence');
+  it('SharkOS 聊天不再开启上游主动消息活跃会话租约', () => {
+    expect(chatAiSrc).not.toContain('startAmsgChatPresence(char.id');
   });
 });
 

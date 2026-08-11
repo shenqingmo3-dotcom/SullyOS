@@ -47,6 +47,10 @@ export const TogetherStore = {
         });
     },
     saveSession: (session: TogetherSession) => put(SESSIONS, session),
+    async latestOpenSession(itemId: string, charId: string): Promise<TogetherSession | null> {
+        const sessions = await this.listSessions(charId);
+        return sessions.find(session => session.itemId === itemId && !session.endedAt) || null;
+    },
     async listSessions(charId?: string): Promise<TogetherSession[]> {
         const db = await openDB();
         const store = db.transaction(SESSIONS, 'readonly').objectStore(SESSIONS);

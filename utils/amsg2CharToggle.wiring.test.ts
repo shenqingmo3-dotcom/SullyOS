@@ -40,7 +40,8 @@ describe('角色级开关只有一处判定', () => {
     expect(modal).not.toMatch(/enabled\s*\?\?\s*(true|false)/);
   });
 
-  it('工具注入门走同一个判定', () => {
-    expect(chatAI).toMatch(/amsg2ToolsInjected = isAmsg2EnabledForChar\(char\)/);
+  it('SharkOS 聊天固定不注入上游主动消息 2.0 工具', () => {
+    expect(chatAI).toMatch(/amsg2ToolsInjected = false/);
+    expect(chatAI).not.toMatch(/amsg2ToolsInjected = isAmsg2EnabledForChar\(char\)/);
   });
 });

@@ -30,6 +30,7 @@ import { injectWorldbookDepthEntries, resolveWorldbookEntries } from './worldboo
 import { normalizeTranslationLangLabel } from './translationLang';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { materializeVisionDescriptions } from './visionApi';
+import { buildInteractionModePrompt } from './interactionMode';
 
 export { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 
@@ -291,7 +292,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         input.timelyByWorker ? { timelyByWorker: true } : undefined,
     );
     let systemPrompt = parts.stable;
-    let volatileTail = parts.volatileState;
+    let volatileTail = `${parts.volatileState}\n\n${buildInteractionModePrompt(char, userProfile?.name || '用户')}`;
 
     // ── 4. 双语指令注入 ───────────────────────────────────
     const sourceLang = normalizeTranslationLangLabel(translationConfig?.sourceLang);

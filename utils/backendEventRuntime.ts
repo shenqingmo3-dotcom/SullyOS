@@ -4,6 +4,7 @@ import type {
     DiaryComment,
     DiaryEntry,
     Message,
+    StickerData,
 } from '../types';
 import { getBackendEventCursor, getBackendEvents, getBackendPhonePeekImage, loadBackendChatConfig } from './backendClient';
 import { putImageBlob } from './blobRef';
@@ -45,6 +46,24 @@ function eventTimestamp(event: BackendConversationEventRecord): number {
 function metadataString(event: BackendConversationEventRecord, key: string): string {
     const value = event.metadata?.[key];
     return typeof value === 'string' ? value : '';
+}
+
+function diarySceneCards(event: BackendConversationEventRecord): StickerData[] {
+    const value = event.metadata?.sceneCards;
+    if (!Array.isArray(value)) return [];
+    return value
+        .filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+        .slice(0, 2)
+        .map((caption, index) => ({
+            id: `scene-${event.id}-${index}`,
+            url: '',
+            kind: 'scene-card',
+            caption: caption.trim().slice(0, 120),
+            x: 30 + index * 42,
+            y: 72 - index * 10,
+            rotation: index === 0 ? -4 : 5,
+            scale: 0.9,
+        }));
 }
 
 function platformShareMessage(
@@ -117,7 +136,7 @@ function diaryFromBackendEvent(event: BackendConversationEventRecord): DiaryEntr
         title: metadataString(event, 'title'),
         primaryAuthor: 'character',
         userPage: { text: '', paperStyle: 'grid', stickers: [] },
-        charPage: { text: content, paperStyle, stickers: [] },
+        charPage: { text: content, paperStyle, stickers: diarySceneCards(event) },
         comments: [],
         timestamp,
         isArchived: false,
@@ -161,7 +180,9 @@ async function persistDiaryEntry(
             charPage: {
                 text: event.content?.trim() || existing.charPage?.text || '',
                 paperStyle: metadataString(event, 'paperStyle') || existing.charPage?.paperStyle || 'plain',
-                stickers: existing.charPage?.stickers || [],
+                stickers: existing.charPage?.stickers?.some(sticker => sticker.kind === 'scene-card')
+                    ? existing.charPage.stickers
+                    : [...(existing.charPage?.stickers || []), ...diarySceneCards(event)],
             },
             backendDiaryId: backendDiaryId || existing.backendDiaryId,
         }

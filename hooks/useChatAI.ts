@@ -5,7 +5,6 @@ import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
 import { KeepAlive } from '../utils/keepAlive';
-import { ProactiveChat } from '../utils/proactiveChat';
 import { ContextBuilder } from '../utils/context';
 import { ChatParser } from '../utils/chatParser';
 // 思考链 / HTML / MCD / memoryPalace 注入已下沉到 chatRequestPayload；这里不再直接调用
@@ -40,17 +39,15 @@ import {
     findNewStreamPreviewHandoverIds,
 } from '../utils/streamPreview';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
-import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
-import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
-import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
+import { getPendingTasks } from '../utils/amsg2Tasks';
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { getInstantChatPending, resolveInstantChatReadiness, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
+import { getInstantChatPending, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
-import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
+import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool } from '../utils/amsg2ToolBridge';
 import { shouldSendThinkingParams } from '../utils/thinkingGate';
 import { routeMiniAppToolCall } from '../utils/miniAppToolRoute';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
@@ -62,6 +59,7 @@ import {
     getMemoryPalaceHighWaterMarkForContext,
     loadCharacterContextRange,
 } from '../utils/chatContextRange';
+import { currentInteractionMode, inferExplicitUserMode } from '../utils/interactionMode';
 
 // ─── 云端情绪评估的安全网定时器（模块级，按角色）───
 // 为什么不放 hook 里：结论（emotionDone）是全局事件，用户切了角色、离开聊天页之后
@@ -728,9 +726,29 @@ export const useChatAI = ({
         // charForGen 只是本地浅拷贝（清空 buff 字段），不落 DB，不影响角色持久化的情绪状态——
         // 紧接着重跑的情绪评估会基于新回复覆写出新的 buff/innerState。
         const skipEmotionInjection = !!opts?.skipEmotionInjection;
-        const charForGen: CharacterProfile = skipEmotionInjection
+        const baseCharForGen: CharacterProfile = skipEmotionInjection
             ? { ...char, buffInjection: '', activeBuffs: [] }
             : char;
+        const latestUserText = [...currentMsgs].reverse().find(message => message.role === 'user')?.content;
+        const explicitInteractionMode = typeof latestUserText === 'string' ? inferExplicitUserMode(latestUserText) : null;
+        const interactionModeChanged = explicitInteractionMode && explicitInteractionMode !== currentInteractionMode(baseCharForGen);
+        const charForGen: CharacterProfile = interactionModeChanged
+            ? {
+                ...baseCharForGen,
+                interactionMode: explicitInteractionMode,
+                interactionScene: {
+                    ...(baseCharForGen.interactionScene || {}),
+                    changedAt: Date.now(),
+                    changedBy: 'user',
+                },
+            }
+            : baseCharForGen;
+        if (interactionModeChanged) {
+            void updateCharacter(char.id, {
+                interactionMode: explicitInteractionMode,
+                interactionScene: charForGen.interactionScene,
+            });
+        }
 
         setIsTyping(true);
         setStreamingBubbles([]);
@@ -846,7 +864,11 @@ export const useChatAI = ({
             // 带上 char：角色单独关了即时对话（reason char-disabled）时 ready 直接为
             // false，和「全局没开」同一待遇——下面那条 veto trace 的条件够不到它，
             // 静默走本地。那是用户的主动选择，每条消息刷一遍 warn 就成骚扰了。
-            const instantChatReadiness = await resolveInstantChatReadiness(char);
+            // SharkOS 保留自己的 Instant Push / heartbeat Worker；上游 AMSG2 即时对话不参与聊天路由。
+            const instantChatReadiness: {
+                ready: boolean;
+                reason?: 'disabled' | 'char-disabled' | 'no-worker-url' | 'worker-outdated' | 'config-unreadable';
+            } = { ready: false, reason: 'disabled' };
             const instantChatOn = instantChatReadiness.ready;
             const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured;
             // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，三种原因去向不同：
@@ -1129,10 +1151,9 @@ export const useChatAI = ({
             //    Gemini 等会直接 400 INVALID_ARGUMENT —— 表现就是"开了思考链的角色一点单就报错,
             //    换个没开思考链的角色就好"。工具循环优先, 思考链这一轮让步。
             const toolModeActive = payload.flags.luckinChatActive || payload.flags.mcdActive || payload.flags.luckinActive || payload.flags.mcpChatActive;
-            // 主动消息 2.0 的工具本轮会不会注入：thinking 门要先知道这件事（工具在下面才真正
-            // 拼进 tools，但参数取舍必须现在就定）。角色级开关关掉的不注入——否则被用户显式
-            // 关掉的功能会被角色一次工具调用重新打开。
-            const amsg2ToolsInjected = isAmsg2EnabledForChar(char) && await isAmsg2GlobalReady();
+            // 上游 AMSG2 已从 SharkOS 产品面与聊天能力中移除。自主消息继续走现有
+            // Instant Push / heartbeat Worker，不向角色暴露第三套排程工具。
+            const amsg2ToolsInjected = false;
             if (shouldSendThinkingParams({
                 thinkingActive: !!payload.flags.thinkingActive,
                 legacyToolModeActive: !!toolModeActive,
@@ -1438,15 +1459,6 @@ export const useChatAI = ({
             // 主请求即将发出 → 立即并行发射情绪评估（错峰延迟已按用户要求取消，见定义处注释）。
             fireLocalEmotionEval?.();
 
-            // 同角色活跃会话租约：本地 fetch 路径本轮真实消息已落库、模型请求即将发出，
-            // 启动心跳告诉 worker「正在和这个角色聊」——到点的 expire AI 任务据此 skip，
-            // 别在用户正聊时又弹主动消息。instant push 路径在上方已 return，天然不重复开 lease。
-            // 只对已排程 AI 任务的角色开租约：其余角色没有 worker 消费，开了纯浪费还刷 warn。
-            const amsg2Cfg = char.activeMsg2Config;
-            if (amsg2Cfg?.enabled && hasActiveAiTask(amsg2Cfg)) {
-                startAmsgChatPresence(char.id, getLastRealUserMessageAt(contextMsgs));
-            }
-
             let data: any;
             try {
                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -1526,7 +1538,7 @@ export const useChatAI = ({
                         // 先分流执行, 否则会落进下面的「畸形调用」分支被吃掉, 而续写请求
                         // 又不带 tools, 角色「点单时顺手排个提醒」就永远不会生效。
                         const route = routeMiniAppToolCall(fname, args);
-                        if (route === 'amsg2') {
+                        if (amsg2ToolsInjected && route === 'amsg2') {
                             await runAmsg2ToolCall(tc, fname, args, loopMessages);
                             continue;
                         }
@@ -1636,7 +1648,7 @@ export const useChatAI = ({
                         // 先分流执行, 否则会落进下面的「畸形调用」分支被吃掉, 而续写请求
                         // 又不带 tools, 角色「点单时顺手排个提醒」就永远不会生效。
                         const route = routeMiniAppToolCall(fname, args);
-                        if (route === 'amsg2') {
+                        if (amsg2ToolsInjected && route === 'amsg2') {
                             await runAmsg2ToolCall(tc, fname, args, loopMessages);
                             continue;
                         }
@@ -1760,7 +1772,7 @@ export const useChatAI = ({
                             continue;
                         }
                         // 主动消息 2.0 工具
-                        if (AMSG2_TOOL_NAMES.has(fname)) {
+                        if (amsg2ToolsInjected && AMSG2_TOOL_NAMES.has(fname)) {
                             await runAmsg2ToolCall(tc, fname, args, loopMessages);
                             continue;
                         }
@@ -1997,9 +2009,6 @@ export const useChatAI = ({
         } finally {
             KeepAlive.stop();
             setIsTyping(false);
-            // 本轮生成结束（成功/失败/中断都经过）→ 停止本地续租；远端靠 45s TTL 自然失效。
-            // 未开过租约（instant push / 非 amsg2 角色）时是幂等 no-op。
-            stopAmsgChatPresence(char.id);
             // 全局横幅熄灭（成功/失败/instant 均经过这里；OSContext 同时借它兜底刷新，
             // 覆盖 catch 里落库的错误系统消息）。
             announceChatGen(CHAT_GEN_EVENTS.replyEnd, { charId: char.id, charName: char.name });
@@ -2014,20 +2023,6 @@ export const useChatAI = ({
             setSearchStatus('');
             setDiaryStatus('');
             setXhsStatus('');
-
-            // 满血主动消息：一轮聊完把该角色标脏，fire_pack 随即批量同步到 worker 的
-            // client_state（未配 amsg2 任务的角色在 markDirty 内直接忽略，零成本）。
-            // 本轮角色自己排过任务时 char 快照上的清单已经过期，得用工具会话里的最新那份
-            // 打脏——否则本轮新建的首个任务过不了 markDirty 的 hasActiveAiTask 门，
-            // fire_pack 会停在排程那一刻、少掉角色排完之后说的这段。
-            // 即时对话受理成功那一轮跳过：那次 POST 已经把这一轮的 fire_pack（还多带了
-            // chat 段）传上去了，这里再打脏就是同样的内容再走一趟网络。
-            if (!instantChatAccepted) {
-                markAmsgStateDirty({
-                    char: { ...char, activeMsg2Config: amsg2Session.getConfig() },
-                    userProfile, groups, realtimeConfig,
-                });
-            }
 
             // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
             // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；
@@ -2104,24 +2099,6 @@ export const useChatAI = ({
         }
     };
 
-
-
-    // ─── Proactive Messaging Controls ───
-    // NOTE: The actual proactive trigger handler is registered globally in OSContext
-    // so it works even when Chat is not open. These are just start/stop helpers.
-
-    const startProactiveChat = (intervalMinutes: number) => {
-        if (!char) return;
-        ProactiveChat.start(char.id, intervalMinutes);
-    };
-
-    const stopProactiveChat = () => {
-        if (!char) return;
-        ProactiveChat.stop(char.id);
-    };
-
-    const isProactiveActive = char ? ProactiveChat.isActiveFor(char.id) : false;
-
     return {
         isTyping,
         streamingBubbles,
@@ -2140,9 +2117,6 @@ export const useChatAI = ({
         tokenBreakdown,
         setLastTokenUsage, // Allow manual reset if needed
         triggerAI,
-        startProactiveChat,
-        stopProactiveChat,
-        isProactiveActive,
         lastSystemPrompt,
         evolvedNarrative,
     };

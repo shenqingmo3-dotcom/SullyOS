@@ -9,7 +9,8 @@ import {
     LifeSimState, HandbookEntry, Tracker, TrackerEntry, HotNewsSnapshot,
     LifeRecord, MedPlan, LifeRecordSettings, CharacterGroup,
     VRWorldNovel, VRNovelAnnotation, CustomCreatorPart, VRMusicRoomState, VRGuestbookState, VRScript, VRStagedPlay, VRLetter,
-    WorldProfile, WorldEpisode, StoryTheaterEntry, StoryTheaterPreset, StoryTheaterMask
+    WorldProfile, WorldEpisode, StoryTheaterEntry, StoryTheaterPreset, StoryTheaterMask,
+    BackendConversationEventRecord
 } from '../types';
 import { exportPostOfficeLocal, importPostOfficeLocal } from './vrWorld/postOffice';
 import { exportSignalLocal, importSignalLocal } from './vrWorld/signal';
@@ -26,7 +27,9 @@ const DB_NAME = 'AetherOS_Data';
 // v68：character_groups 角色分组（神经链接"文件夹"，见 types.ts CharacterGroup）。
 // v69：见面·剧情条目与糯米机原生预设。正文继续复用 messages 表，避免再造会话存储。
 // v70：剧场面具箱（原创人物面具）；角色面具仍只存 characterId，不复制神经链接资料。
-const DB_VERSION = 70;
+// v71：一起看书架与共读/影院会话。影院 MCP 与一起读共用会话表，保证结束时可写回记忆。
+// v72：恢复二改后端事件与同步队列 store，保证角色日记/便签事件幂等回流。
+const DB_VERSION = 72;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
@@ -83,6 +86,10 @@ const STORE_LIFE_SETTINGS = 'life_record_settings'; // 生活记录设置单例�
 const STORE_STORY_THEATERS = 'story_theaters';       // 见面·剧情条目（消息用 story-theater:${id}）
 const STORE_STORY_THEATER_PRESETS = 'story_theater_presets'; // 糯米机原生剧情预设
 const STORE_STORY_THEATER_MASKS = 'story_theater_masks'; // 剧场原创人物面具
+const STORE_TOGETHER_ITEMS = 'together_items'; // 一起看书架（目前为 TXT 小说）
+const STORE_TOGETHER_SESSIONS = 'together_sessions'; // 共读与影院 MCP 会话
+const STORE_BACKEND_SYNC_QUEUE = 'backend_sync_queue';
+const STORE_BACKEND_EVENTS = 'backend_events';
 
 // API 调用记录：保留近 5 天，超期丢弃；再加一个硬上限防止异常情况撑爆
 const API_CALL_LOG_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
@@ -346,6 +353,23 @@ export const openDB = (): Promise<IDBDatabase> => {
       createStore(STORE_STORY_THEATERS, { keyPath: 'id' });
       createStore(STORE_STORY_THEATER_PRESETS, { keyPath: 'id' });
       createStore(STORE_STORY_THEATER_MASKS, { keyPath: 'id' });
+      createStore(STORE_TOGETHER_ITEMS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_TOGETHER_SESSIONS)) {
+          const togetherStore = db.createObjectStore(STORE_TOGETHER_SESSIONS, { keyPath: 'id' });
+          togetherStore.createIndex('itemId', 'itemId', { unique: false });
+          togetherStore.createIndex('charId', 'charId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_BACKEND_SYNC_QUEUE)) {
+          const queueStore = db.createObjectStore(STORE_BACKEND_SYNC_QUEUE, { keyPath: 'key' });
+          queueStore.createIndex('charId', 'charId', { unique: false });
+          queueStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_BACKEND_EVENTS)) {
+          const eventStore = db.createObjectStore(STORE_BACKEND_EVENTS, { keyPath: 'id' });
+          eventStore.createIndex('sequenceId', 'sequenceId', { unique: true });
+          eventStore.createIndex('charId', 'charId', { unique: false });
+          eventStore.createIndex('eventType', 'eventType', { unique: false });
+      }
 
       createStore(STORE_HOTNEWS, { keyPath: 'id' });
 
@@ -789,6 +813,53 @@ export const DB = {
             resolve(newId);
         };
         request.onerror = () => reject(request.error);
+    });
+  },
+
+  saveBackendEvent: async (
+    event: BackendConversationEventRecord,
+    message?: Omit<Message, 'id' | 'timestamp'> & { timestamp?: number },
+  ): Promise<{ created: boolean; messageId?: number }> => {
+    const db = await openDB();
+    const storeNames = message ? [STORE_BACKEND_EVENTS, STORE_MESSAGES] : [STORE_BACKEND_EVENTS];
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeNames, 'readwrite');
+      const eventStore = transaction.objectStore(STORE_BACKEND_EVENTS);
+      let created = false;
+      let messageId: number | undefined;
+
+      const existingRequest = eventStore.get(event.id);
+      existingRequest.onsuccess = () => {
+        if (existingRequest.result) return;
+        created = true;
+        eventStore.add(event);
+        if (message) {
+          const { timestamp: suppliedTimestamp, ...payload } = message;
+          const addMessageRequest = transaction.objectStore(STORE_MESSAGES).add({
+            ...payload,
+            timestamp: typeof suppliedTimestamp === 'number' ? suppliedTimestamp : Date.now(),
+          });
+          addMessageRequest.onsuccess = () => { messageId = addMessageRequest.result as number; };
+        }
+      };
+      existingRequest.onerror = () => reject(existingRequest.error);
+      transaction.oncomplete = () => resolve({ created, messageId });
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to store backend event'));
+      transaction.onabort = () => reject(transaction.error || new Error('Backend event transaction aborted'));
+    });
+  },
+
+  getBackendEventsByCharId: async (charId: string, limit = 200): Promise<BackendConversationEventRecord[]> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_BACKEND_EVENTS, 'readonly');
+      const request = transaction.objectStore(STORE_BACKEND_EVENTS).index('charId').getAll(charId);
+      request.onsuccess = () => resolve(
+        (request.result as BackendConversationEventRecord[])
+          .sort((a, b) => b.sequenceId - a.sequenceId)
+          .slice(0, Math.max(1, limit)),
+      );
+      request.onerror = () => reject(request.error);
     });
   },
 
@@ -1493,6 +1564,43 @@ export const DB = {
       });
   },
 
+  getDiaryByBackendId: async (charId: string, backendDiaryId: string): Promise<DiaryEntry | null> => {
+      if (!backendDiaryId) return null;
+      const diaries = await DB.getDiariesByCharId(charId);
+      return diaries.find(diary => diary.backendDiaryId === backendDiaryId) || null;
+  },
+
+  getDiaryById: async (id: string): Promise<DiaryEntry | null> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_DIARIES, 'readonly');
+          const request = transaction.objectStore(STORE_DIARIES).get(id);
+          request.onsuccess = () => resolve((request.result as DiaryEntry | undefined) || null);
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  mergeDiaryComment: async (
+      charId: string,
+      backendDiaryId: string,
+      comment: NonNullable<DiaryEntry['comments']>[number],
+  ): Promise<{ diary: DiaryEntry | null; changed: boolean }> => {
+      const diary = await DB.getDiaryByBackendId(charId, backendDiaryId);
+      if (!diary) return { diary: null, changed: false };
+      const comments = diary.comments || [];
+      const duplicate = comments.some(item =>
+          item.id === comment.id
+          || Boolean(item.backendCommentId && comment.backendCommentId && item.backendCommentId === comment.backendCommentId),
+      );
+      if (duplicate) return { diary, changed: false };
+      const updated: DiaryEntry = {
+          ...diary,
+          comments: [...comments, comment].sort((a, b) => a.createdAt - b.createdAt),
+      };
+      await DB.saveDiary(updated);
+      return { diary: updated, changed: true };
+  },
+
   saveDiary: async (diary: DiaryEntry): Promise<void> => {
       const db = await openDB();
       const transaction = db.transaction(STORE_DIARIES, 'readwrite');
@@ -1610,6 +1718,17 @@ export const DB = {
           const req = store.get(id);
           req.onsuccess = () => resolve(req.result || null);
           req.onerror = () => reject(req.error);
+      });
+  },
+
+  getAllDailySchedules: async (): Promise<DailySchedule[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_DAILY_SCHEDULE)) return [];
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_DAILY_SCHEDULE, 'readonly');
+          const request = transaction.objectStore(STORE_DAILY_SCHEDULE).getAll();
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
       });
   },
 
@@ -2982,6 +3101,7 @@ export const DB = {
           STORE_WORLDS, STORE_WORLD_EPISODES,
           'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
           'room_plates', 'digest_reports',
+          STORE_BACKEND_SYNC_QUEUE, STORE_BACKEND_EVENTS,
           'memory_batches', 'pixel_home_assets', 'pixel_home_layouts'
       ].filter(name => db.objectStoreNames.contains(name));
 

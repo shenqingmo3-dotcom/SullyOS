@@ -19,55 +19,15 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { findExternalLinks } from './check-lockfile-links-core.js';
+
+export { findExternalLinks } from './check-lockfile-links-core.js';
 
 /**
  * 从 lockfile 文本里找出所有指向仓库外的 link 依赖。
  * @param {string} lockfileText pnpm-lock.yaml 的完整内容
  * @returns {{ line: number, importer: string, target: string, raw: string }[]}
  */
-export function findExternalLinks(lockfileText) {
-  const violations = [];
-  let inImporters = false;
-  let currentImporter = '.';
-
-  lockfileText.split('\n').forEach((line, index) => {
-    // 进入 importers: 段
-    if (/^importers:\s*$/.test(line)) {
-      inImporters = true;
-      currentImporter = '.';
-      return;
-    }
-    // 碰到下一个顶层键（packages: / snapshots: ...）就离开 importers 段
-    if (inImporters && /^[^\s#]/.test(line)) {
-      inImporters = false;
-    }
-    if (!inImporters) return;
-
-    // 缩进 2 空格的键是 importer 目录，形如 `  .:` 或 `  worker/instant-push:`
-    const importerMatch = line.match(/^ {2}(\S.*?):\s*$/);
-    if (importerMatch) {
-      currentImporter = importerMatch[1].replace(/['"]/g, '');
-      return;
-    }
-
-    const linkMatch = line.match(/link:(\S+)/);
-    if (!linkMatch) return;
-
-    const target = linkMatch[1].replace(/['"]/g, '');
-    const resolved = path.posix.normalize(path.posix.join(currentImporter, target));
-    if (resolved.startsWith('..')) {
-      violations.push({
-        line: index + 1,
-        importer: currentImporter,
-        target,
-        raw: line.trim(),
-      });
-    }
-  });
-
-  return violations;
-}
-
 function main() {
   const lockfilePath = process.argv[2] ?? 'pnpm-lock.yaml';
   let text;

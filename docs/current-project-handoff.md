@@ -399,3 +399,44 @@
 - 修复同一轮聊天先切换互动模式再调用 MCP 时，活动卡片和影院记忆仍使用旧角色状态的问题。
 - 加固影院后台 runtime 停止后的异步检查，避免组件状态变化后旧轮询继续发言或重复归档；影院测试已改用官方 `room.status`、`playback`、`newMessages` 返回结构。
 - 复核后前端完整测试、生产构建、后端 TypeScript 检查和后端完整测试均通过。真实 Open Watch Cinema 房间端到端联调仍保留为部署前的外部验收项。
+
+## 16. SharkOS 视觉与玩法 v0（2026-08-11）
+
+当前实际工作分支为 `codex/sharkos-upstream-sync`，基线提交为 `caf28f52 merge: sync latest SullyOS upstream`。本节记录尚未提交、尚未部署的本地改动；不要把它误写成线上 `goldenbite.icu` 已更新。
+
+- 开屏已改为柔和莫兰迪金、奶油白中心与轻微纸张颗粒，显示 `SharkOS / 欢迎回家`，不再使用高饱和放射线。
+- 普通聊天重新接通线上/线下状态：`+` 工具栏第一项一键切换，用户明确说“转线下/转线上”也会切换；AI 可用隐藏指令自主切换，控制标记在统一后处理里吞掉，本地回复与 Worker 推回消息使用同一处理路径。
+- `+` 工具栏第二项“见面”进入本体剧情模式改造出的酒馆玩法；支持导入 SillyTavern Chat Completion 预设、继续、重生成和候选左右切换。原版见面记忆、水位线、归档与 Memory Palace 管线没有改。
+- 上游主动消息 1.0、2.0 的聊天工具栏入口、调试面板、设置入口和初始化路由已移除/停用；SharkOS 自己的 Instant Push、Web Push、heartbeat Worker 和角色心跳开关必须保留。
+- “一起看”桌面入口已恢复；App 内当前是 TXT 共读，包含头像气泡、字体/字号/行距/背景、选中文字批注、角色读取批注、结束总结与前后端记忆同步。电影继续在 Open Watch Cinema 外部网页观看，角色通过 MCP 进房间，不新增影院跳转页。
+- IndexedDB 升至 v71，补建 `together_items` 与 `together_sessions` 及索引，修复旧库/测试库调用影院 MCP 时 `No objectStore named together_sessions`。
+- 日程 App 改名“日程与纪念”，月历为薄荷绿（用户）与浅莫兰迪金（角色），支持周重复、单日取消、角色日程共同展示和倒数/纪念日；加入少量 🦈、🦊、🧇、甜品、风景与植物贴纸。
+- 日记改为柔粉/薄荷手作拼贴方向，用户可添加照片与贴纸，角色可生成带画面描述的拍立得卡片；贴纸库已加入 🦈、🦊、🧇、甜品、风景和植物类素材。
+- v0 预览图片保存在 Codex 可视化目录，不在仓库与用户数据中：`sharkos-opening-v0.png`、`together-reader-v0.png`、`journal-editor-v0.png`。预览专用路由和假书籍数据已经删除。
+- 生产 Vite 构建通过（5210 modules）。`interactionMode` 3 项测试、影院记忆 1 项测试、统一后处理 21 项测试通过。影院测试最初暴露 v71 缺表问题，修复后复跑通过。
+- 根项目 `tsc --noEmit` 仍有 MemoryPalace、ThemeMaker、MessageItem、backendEventRuntime、vite proxy 等上游/既有类型错误；本轮一度新增的 `useChatAI` 字面量比较错误已经修复。最终交付前仍应以生产构建、相关测试与手机手工验收共同判断。
+
+仍未完成/不要遗忘：真实手机比例下逐页手工验收、日记贴纸面板密度微调、见面酒馆预设真实导入试跑、真实影院 MCP 房间联调，以及之后的域名/VPS 部署。NPC 关系网沿用前文目标，不属于本次视觉 v0 已完成范围。
+
+## 17. 日记二改基线恢复与薄荷便签 v0（2026-08-11）
+
+第 16 节中“日记改为柔粉/薄荷手作拼贴”的表述已过时：当时 `apps/JournalApp.tsx` 实际是在上游合并后退回的旧交换日记实现上叠加样式，不能作为二改完成状态。
+
+- 日记功能重新以提交 `77250050` 为功能基线：用户日记与角色日记是两条独立记录，只有 `user` 和 `character` 两位作者，互动统一通过便签评论完成。
+- 恢复后端日记拉取/写入、heartbeat 角色日记、手动测试生成、便签回复、聊天卡片同步、删除链路和记忆归档；旧双页交换日记仍会无损拆为两篇独立日记。
+- 日记本选择页与日记列表改为薄荷绿便签条，作者使用用户/当前角色头像和姓名区分，不再使用第三种 AI 身份或“已回复”状态。
+- 用户日记支持照片与 emoji 贴纸；角色日记只读，可从后端日记 metadata 接收 0～2 张文字画面卡片，不伪装成真实照片。
+- App 名称由“交换日记”改为“日记”。本节改动当前只在本地工作树，尚未部署到 `goldenbite.icu`。
+
+本轮最终验证：前端日记迁移、后端事件存储与聊天卡片共 7 项测试通过；后端日记提示词、生成与删除共 10 项测试通过；后端 TypeScript 检查、6 个 Worker bundle 和 Vite 生产构建均通过。已在 390×844 的手机视口检查日记本入口、空日记列表和编辑器，控制台无 error，预览图保存为 `journal-mint-shelf-v0.png`、`journal-mint-list-v0.png`、`journal-mint-editor-v0.png`。线上版本仍未覆盖。
+
+## 18. SharkOS 单一工作树收口与首次正式测试候选（2026-08-11）
+
+- 以 `C:\Users\86130\Documents\sullyos` 为唯一 SharkOS 修改地；二改提交 `77250050` 已确认是当前 `codex/sharkos-upstream-sync` 历史祖先，不再把旧 worktree 当作另一套产品继续开发。
+- 上游合并后丢失的二改后端入口已在设置页恢复为“SharkOS 自主后端”：后端地址/配对、模型池与路由、Web Push、按角色 heartbeat 开关、工具设置，以及角色/聊天/完整 Memory Palace 快照同步与 reconcile 均复用既有二改接口。
+- 同一权威手机重复执行完整同步不会复制 Memory Palace：记忆、事件盒、门牌、关系、期待、摘要、向量、批次与主题盒按 `(agent_id, external_id)` upsert；聊天按来源消息 ID upsert；成功分片后用同一 `snapshotId` reconcile 清理旧迁移副本。当前手机必须是权威完整数据源，不要从另一台不完整设备执行全量 reconcile。
+- “见面”已验证真实兼容 SillyTavern Chat Completion 预设：读取 `prompts`、`prompt_order`、顺序、开关、role、生成参数与 assistant prefill，并把角色卡、用户设定、世界书、场景、示例和楼层历史放入对应插槽。会话保留酒馆式继续、重生成、回复候选左右切换、楼层编辑与删除；原版见面记忆、归档和 Memory Palace 规则不变。
+- 上游主动消息 1.0/2.0 的可见入口、聊天路由与工具注入保持关闭；SharkOS 自己的 Instant Push、Web Push、后端 heartbeat Worker 和角色心跳开关保留。
+- 日记最终采用二改独立作者结构与薄荷便签 UI；一起读、日程与纪念日、开屏、线上/线下统一状态和 MCP 卡片等本轮修改与该结构一起进入同一发布候选。
+- 自动验证结果：根项目 223 个测试文件、3155 项测试全部通过；酒馆预设专项 40/40；后端 11 个测试文件、37 项测试全部通过；后端 typecheck/build、6 个 Worker bundle 与 Vite 生产构建全部通过。
+- `goldenbite.icu` 的实际 VPS 覆盖必须以服务器命令、容器状态和 `/health` 结果为准；仅 Git push 不等于已发布。

@@ -6,6 +6,7 @@ const generatedDiaryPayloadSchema = z.object({
   title: z.string().trim().max(500).default(''),
   content: z.string().trim().min(1).max(20_000),
   paperStyle: paperStyleSchema.default('plain'),
+  sceneCards: z.array(z.string().trim().min(1).max(120)).max(2).default([]),
 });
 
 export type GeneratedDiaryPayload = z.infer<typeof generatedDiaryPayloadSchema>;

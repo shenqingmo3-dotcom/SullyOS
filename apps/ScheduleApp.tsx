@@ -1,603 +1,481 @@
-
-
-
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+    ArrowLeft,
+    ArrowRight,
+    CalendarBlank,
+    Clock,
+    Heart,
+    MapPin,
+    Plus,
+    Repeat,
+    Sparkle,
+    X,
+} from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { Task, Anniversary, CharacterProfile } from '../types';
-import Modal from '../components/os/Modal';
-import { ContextBuilder } from '../utils/context';
-import { safeResponseJson } from '../utils/safeApi';
-import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
-import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
-import { getCalendarDayDifference, getLocalDateKey } from '../utils/localDate';
-import { useLocalDateKey } from '../hooks/useLocalDateKey';
-import { trackEvent } from '../utils/analytics';
+import { Anniversary, DailySchedule, Task } from '../types';
 
-const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
-const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
+const MONTH_NAMES = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 
-type ThemeMode = 'cyber' | 'soft' | 'minimal';
+type CalendarEvent = {
+    id: string;
+    owner: 'user' | 'character';
+    title: string;
+    startTime: string;
+    endTime?: string;
+    location?: string;
+    note?: string;
+    repeat?: boolean;
+    adjusted?: boolean;
+    avatar?: string;
+    task?: Task;
+};
 
-// Theme Configuration Definitions
-const THEMES: Record<ThemeMode, any> = {
-    cyber: {
-        id: 'cyber',
-        bg: 'bg-[#0f172a]',
-        text: 'text-slate-200',
-        textSub: 'text-slate-500',
-        accent: 'text-cyan-400',
-        border: 'border-cyan-900/30',
-        card: 'bg-slate-900/50 backdrop-blur-md border border-slate-700/50',
-        buttonPrimary: 'bg-cyan-600 hover:bg-cyan-500 text-white rounded-none skew-x-[-10deg]',
-        font: 'font-mono',
-        iconDone: 'text-green-500',
-        decoLine: 'bg-slate-800',
-        modalBg: 'bg-[#0f172a] border border-cyan-500',
-        input: 'bg-slate-800 text-white border-none rounded-none',
-        label: 'QUEST LOG',
-        eventLabel: 'SERVER EVENTS'
-    },
-    soft: {
-        id: 'soft',
-        bg: 'bg-[#fff0f5]', // Lavender Blush
-        text: 'text-slate-700',
-        textSub: 'text-slate-400',
-        accent: 'text-pink-500',
-        border: 'border-pink-100',
-        card: 'bg-white/80 backdrop-blur-xl rounded-[2rem] shadow-sm border border-white',
-        buttonPrimary: 'bg-pink-400 hover:bg-pink-500 text-white rounded-2xl shadow-lg shadow-pink-200',
-        font: 'font-sans',
-        iconDone: 'text-pink-400',
-        decoLine: 'bg-pink-200',
-        modalBg: 'bg-white/90 rounded-[2.5rem]',
-        input: 'bg-pink-50 text-slate-700 border border-pink-100 rounded-xl',
-        label: '心愿单',
-        eventLabel: '纪念日'
-    },
-    minimal: {
-        id: 'minimal',
-        bg: 'bg-[#eef2f6]', // Classic Neumorphism base
-        text: 'text-slate-600',
-        textSub: 'text-slate-400',
-        accent: 'text-indigo-500',
-        border: 'border-transparent',
-        // Neumorphism Outer Shadow
-        card: 'bg-[#eef2f6] rounded-2xl shadow-[6px_6px_12px_#d1d9e6,-6px_-6px_12px_#ffffff]',
-        // Neumorphism Pressed State simulation for buttons usually, but here flat prompt
-        buttonPrimary: 'bg-[#eef2f6] text-slate-600 font-bold rounded-xl shadow-[6px_6px_12px_#d1d9e6,-6px_-6px_12px_#ffffff] active:shadow-[inset_4px_4px_8px_#d1d9e6,inset_-4px_-4px_8px_#ffffff]',
-        font: 'font-sans',
-        iconDone: 'text-slate-400',
-        decoLine: 'bg-slate-300',
-        modalBg: 'bg-[#eef2f6] rounded-2xl shadow-2xl',
-        input: 'bg-[#eef2f6] text-slate-700 rounded-xl shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]',
-        label: 'Focus',
-        eventLabel: 'Timeline'
-    }
+const pad = (value: number) => String(value).padStart(2, '0');
+const toDateKey = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+const fromDateKey = (key: string) => {
+    const [year, month, day] = key.split('-').map(Number);
+    return new Date(year, month - 1, day);
+};
+const sameMonth = (date: Date, month: Date) => date.getFullYear() === month.getFullYear() && date.getMonth() === month.getMonth();
+const mondayDayIndex = (date: Date) => (date.getDay() + 6) % 7;
+const minuteOf = (time = '09:00') => {
+    const [hour, minute] = time.split(':').map(Number);
+    return (hour || 0) * 60 + (minute || 0);
 };
 
 const ScheduleApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, characterGroups } = useOS();
-    const localDateKey = useLocalDateKey();
+    const {
+        closeApp,
+        characters,
+        activeCharacterId,
+        userProfile,
+        addToast,
+    } = useOS();
+
+    const todayKey = toDateKey(new Date());
+    const [selectedDate, setSelectedDate] = useState(todayKey);
+    const [visibleMonth, setVisibleMonth] = useState(() => {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), 1);
+    });
+    const [selectedCharId, setSelectedCharId] = useState(activeCharacterId || characters[0]?.id || '');
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
-    const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
-    
-    // Processing State for feedback
-    const [processingTaskIds, setProcessingTaskIds] = useState<Set<string>>(new Set());
+    const [dailySchedules, setDailySchedules] = useState<DailySchedule[]>([]);
+    const [activeView, setActiveView] = useState<'calendar' | 'anniversary'>('calendar');
+    const [composer, setComposer] = useState<'schedule' | 'anniversary' | null>(null);
 
-    // Theme State
-    const [currentThemeMode, setCurrentThemeMode] = useState<ThemeMode>('cyber');
-    const theme = THEMES[currentThemeMode];
+    const [title, setTitle] = useState('');
+    const [startTime, setStartTime] = useState('09:00');
+    const [endTime, setEndTime] = useState('10:00');
+    const [location, setLocation] = useState('');
+    const [note, setNote] = useState('');
+    const [repeatWeekly, setRepeatWeekly] = useState(false);
+    const [anniversaryDate, setAnniversaryDate] = useState(selectedDate);
 
-    // Add Modal States
-    const [showTaskModal, setShowTaskModal] = useState(false);
-    const [showAnniModal, setShowAnniModal] = useState(false);
-
-    // Forms
-    const [newTaskTitle, setNewTaskTitle] = useState('');
-    const [newTaskSupervisor, setNewTaskSupervisor] = useState<string>(activeCharacterId || '');
-    const [supervisorGroupId, setSupervisorGroupId] = useState<string>(GROUP_FILTER_ALL); // 选监督人的分组筛选
-
-    const [newAnniTitle, setNewAnniTitle] = useState('');
-    const [newAnniDate, setNewAnniDate] = useState('');
-    const [newAnniChar, setNewAnniChar] = useState<string>(activeCharacterId || '');
-    const [anniCharGroupId, setAnniCharGroupId] = useState<string>(GROUP_FILTER_ALL); // 纪念日关联对象的分组筛选
-
-    useEffect(() => {
-        loadData();
-        // Load theme from local storage if needed, defaulting to cyber
-        const saved = localStorage.getItem('schedule_app_theme');
-        if (saved && THEMES[saved as ThemeMode]) {
-            setCurrentThemeMode(saved as ThemeMode);
-        }
-    }, []);
-
-    const toggleTheme = () => {
-        const modes: ThemeMode[] = ['cyber', 'soft', 'minimal'];
-        const nextIndex = (modes.indexOf(currentThemeMode) + 1) % modes.length;
-        const nextMode = modes[nextIndex];
-        setCurrentThemeMode(nextMode);
-        localStorage.setItem('schedule_app_theme', nextMode);
-        trackEvent('切换日程界面主题', { theme: nextMode });
-    };
+    const selectedCharacter = characters.find(character => character.id === selectedCharId) || characters[0];
 
     const loadData = async () => {
-        const [t, a] = await Promise.all([DB.getAllTasks(), DB.getAllAnniversaries()]);
-        setTasks(t.sort((a, b) => b.createdAt - a.createdAt));
-        setAnniversaries(a.sort((a, b) => a.date.localeCompare(b.date)));
+        const [storedTasks, storedAnniversaries, storedSchedules] = await Promise.all([
+            DB.getAllTasks(),
+            DB.getAllAnniversaries(),
+            DB.getAllDailySchedules(),
+        ]);
+        setTasks(storedTasks);
+        setAnniversaries(storedAnniversaries);
+        setDailySchedules(storedSchedules);
     };
 
-    // --- AI Logic ---
+    useEffect(() => {
+        void loadData();
+    }, []);
 
-    const generateTaskReward = async (task: Task) => {
-        const supervisor = characters.find(c => c.id === task.supervisorId);
-        if (!supervisor || !apiConfig.apiKey) {
-            addToast('任务已完成', 'success');
-            return;
-        }
+    useEffect(() => {
+        if (!selectedCharId && characters[0]?.id) setSelectedCharId(characters[0].id);
+    }, [characters, selectedCharId]);
 
-        // FEEDBACK: Show loading state immediately
-        // Note: The caller handles setting processingTaskIds, but we can also add a toast
-        addToast(`${supervisor.name} 正在确认你的成果...`, 'info');
+    const monthDays = useMemo(() => {
+        const first = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
+        const start = new Date(first);
+        start.setDate(first.getDate() - mondayDayIndex(first));
+        return Array.from({ length: 42 }, (_, index) => {
+            const date = new Date(start);
+            date.setDate(start.getDate() + index);
+            return date;
+        });
+    }, [visibleMonth]);
 
-        try {
-            // 1. Build Persona Context
-            // RESTORED: Full context
-            await injectMemoryPalace(supervisor, undefined, task.title);
-            const baseContext = ContextBuilder.buildCoreContext(supervisor, userProfile);
+    const userEventsForDate = (dateKey: string): CalendarEvent[] => {
+        const date = fromDateKey(dateKey);
+        const dayIndex = date.getDay();
+        const stored = tasks.filter(task => {
+            if (task.isCompleted || task.excludedDates?.includes(dateKey)) return false;
+            if (task.repeatWeekly) return (task.repeatDays || []).includes(dayIndex);
+            const taskDate = task.scheduleDate || task.deadline?.slice(0, 10);
+            return taskDate === dateKey;
+        }).map(task => ({
+            id: task.id,
+            owner: 'user' as const,
+            title: task.title,
+            startTime: task.startTime || '09:00',
+            endTime: task.endTime,
+            location: task.location,
+            note: task.note,
+            repeat: task.repeatWeekly,
+            avatar: userProfile.avatar,
+            task,
+        }));
 
-            const userPrompt = `
-### 场景：任务完成 (Task Completed)
-用户 (${userProfile.name}) 刚刚在现实生活中完成了一个任务/契约： "${task.title}"。
-你是监督人。
+        const legacy = (userProfile.weeklySchedule || [])
+            .filter(entry => entry.daysOfWeek.includes(dayIndex))
+            .map(entry => ({
+                id: `legacy-${entry.id}`,
+                owner: 'user' as const,
+                title: entry.title,
+                startTime: entry.startTime,
+                endTime: entry.endTime,
+                location: entry.location,
+                note: entry.note,
+                repeat: true,
+                avatar: userProfile.avatar,
+            }));
 
-### 任务
-请根据你的人设，对用户完成任务这一行为做出反应。
-- 如果你是严厉的：勉强认可，或者催促下一个。
-- 如果你是温柔的：给予温暖的夸奖。
-- 如果你是傲娇的：别扭地表示一下。
-- **关键**：不要问我用什么语气，**你自己**根据你的人设决定。
-
-**输出要求**:
-- 仅输出一句话（类似气泡通知）。
-- **必须使用用户常用语言**。
-- 不要有引号。`;
-
-            // 2. Separate System and User roles
-            const messages = [
-                { role: "system", content: baseContext },
-                { role: "user", content: userPrompt }
-            ];
-
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: messages,
-                    temperature: 0.9, 
-                    max_tokens: 8000 
-                })
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`API Error ${response.status}: ${errorText.slice(0, 100)}`);
-            }
-
-            const data = await safeResponseJson(response);
-            
-            // Extract content, handling potential reasoning_content or empty standard content
-            let text = data.choices?.[0]?.message?.content?.trim();
-            if (!text && data.choices?.[0]?.message?.reasoning_content) {
-                // If standard content is empty but model "thought" about it, try to use thought or fallback
-                console.warn("AI returned empty content but has reasoning.");
-            }
-            
-            if (text) {
-                text = text.replace(/^["']|["']$/g, '');
-                addToast(`${supervisor.name}: ${text}`, 'success');
-                // Inject into Chat Memory (Localized & Personalized)
-                await DB.saveMessage({
-                    charId: supervisor.id,
-                    role: 'system',
-                    type: 'text',
-                    content: `[系统: ${userProfile.name} 完成了任务 "${task.title}"。${supervisor.name} 评价道: "${text}"]`
-                });
-            } else {
-                console.warn("AI returned empty content", data);
-                addToast('任务完成 (AI 未返回评价)', 'success');
-            }
-
-        } catch (e: any) {
-            console.error("Task Reward Error:", e);
-            addToast(`评价生成失败: ${e.message}`, 'error');
-        }
+        return [...stored, ...legacy];
     };
 
-    const generateAnniversaryThought = async (anni: Anniversary) => {
-        const char = characters.find(c => c.id === anni.charId);
-        if (!char || !apiConfig.apiKey) return;
+    const characterScheduleForDate = (dateKey: string) => dailySchedules.find(schedule => (
+        schedule.charId === selectedCharacter?.id && schedule.date === dateKey
+    ));
 
-        // Check cache (24h)
-        if (anni.aiThought && anni.lastThoughtGeneratedAt && (Date.now() - anni.lastThoughtGeneratedAt < 24 * 60 * 60 * 1000)) {
-            return;
-        }
-
-        // FEEDBACK: Show loading state if explicit call
-        if (Date.now() - (anni.lastThoughtGeneratedAt || 0) > 10000) {
-             addToast(`${char.name} 正在查阅日历...`, 'info');
-        }
-
-        const daysDiff = getCalendarDayDifference(getLocalDateKey(), anni.date) ?? 0;
-        const dayText = daysDiff > 0 ? `还有 ${daysDiff} 天` : (daysDiff === 0 ? '就是今天!' : `已经过去 ${Math.abs(daysDiff)} 天了`);
-
-        // RESTORED: Full context
-        await injectMemoryPalace(char, undefined, anni.title);
-        const baseContext = ContextBuilder.buildCoreContext(char, userProfile);
-
-        const userPrompt = `
-### 场景：纪念日提醒
-事件: "${anni.title}"
-时间状态: ${dayText}
-
-### 任务
-请根据你的人设，针对这个日期发表一句简短的感想。
-**输出要求**:
-- 仅输出一句话。
-- **必须使用用户常用语言**。`;
-
-        const messages = [
-            { role: "system", content: baseContext },
-            { role: "user", content: userPrompt }
-        ];
-
-        try {
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: messages,
-                    temperature: 0.8,
-                    max_tokens: 8000
-                })
-            });
-
-            if (!response.ok) {
-                 const errorText = await response.text();
-                 throw new Error(`API Error ${response.status}: ${errorText.slice(0, 50)}`);
-            }
-
-            const data = await safeResponseJson(response);
-            const text = data.choices?.[0]?.message?.content?.trim().replace(/^["']|["']$/g, '');
-            
-            if (text) {
-                const updatedAnni = { ...anni, aiThought: text, lastThoughtGeneratedAt: Date.now() };
-                await DB.saveAnniversary(updatedAnni);
-                setAnniversaries(prev => prev.map(a => a.id === anni.id ? updatedAnni : a));
-            } else {
-                console.warn("AI returned empty thought", data);
-            }
-        } catch (e: any) { 
-            console.error("Anniversary Thought Error:", e);
-            // No toast for background update failure to avoid annoyance
-        }
+    const characterEventsForDate = (dateKey: string): CalendarEvent[] => {
+        const schedule = characterScheduleForDate(dateKey);
+        if (!schedule || !selectedCharacter) return [];
+        return schedule.slots.map((slot, index) => ({
+            id: `${schedule.id}-${index}`,
+            owner: 'character' as const,
+            title: slot.activity,
+            startTime: slot.startTime,
+            endTime: schedule.slots[index + 1]?.startTime,
+            location: slot.location,
+            note: slot.description,
+            adjusted: Boolean((slot as any).adjusted || (schedule as any).adjustedAt),
+            avatar: selectedCharacter.avatar,
+        }));
     };
 
-    // --- Actions ---
+    const selectedEvents = useMemo(() => (
+        [...userEventsForDate(selectedDate), ...characterEventsForDate(selectedDate)]
+            .sort((left, right) => minuteOf(left.startTime) - minuteOf(right.startTime))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    ), [selectedDate, tasks, dailySchedules, selectedCharId, userProfile.weeklySchedule]);
 
-    const handleAddTask = async () => {
-        if (!newTaskTitle.trim()) return;
+    const shiftMonth = (delta: number) => {
+        setVisibleMonth(current => new Date(current.getFullYear(), current.getMonth() + delta, 1));
+    };
+
+    const selectDay = (date: Date) => {
+        setSelectedDate(toDateKey(date));
+        if (!sameMonth(date, visibleMonth)) setVisibleMonth(new Date(date.getFullYear(), date.getMonth(), 1));
+    };
+
+    const resetComposer = () => {
+        setTitle('');
+        setStartTime('09:00');
+        setEndTime('10:00');
+        setLocation('');
+        setNote('');
+        setRepeatWeekly(false);
+        setAnniversaryDate(selectedDate);
+        setComposer(null);
+    };
+
+    const saveSchedule = async () => {
+        if (!title.trim()) return;
+        const dayIndex = fromDateKey(selectedDate).getDay();
         const task: Task = {
-            id: `task-${Date.now()}`,
-            title: newTaskTitle,
-            supervisorId: newTaskSupervisor || characters[0]?.id,
-            tone: 'gentle', // Deprecated but kept for type compatibility
+            id: `schedule-${Date.now()}`,
+            title: title.trim(),
+            supervisorId: selectedCharacter?.id || '',
+            tone: 'gentle',
             isCompleted: false,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            scheduleDate: selectedDate,
+            startTime,
+            endTime,
+            repeatWeekly,
+            repeatDays: repeatWeekly ? [dayIndex] : undefined,
+            location: location.trim() || undefined,
+            note: note.trim() || undefined,
         };
         await DB.saveTask(task);
-        setTasks(prev => [task, ...prev]);
-        setShowTaskModal(false);
-        setNewTaskTitle('');
+        setTasks(current => [...current, task]);
+        addToast(repeatWeekly ? '已加入每周日程' : '已加入今日日程', 'success');
+        resetComposer();
     };
 
-    const handleToggleTask = async (task: Task) => {
-        const updated = { ...task, isCompleted: !task.isCompleted, completedAt: !task.isCompleted ? Date.now() : undefined };
-        await DB.saveTask(updated);
-        setTasks(prev => prev.map(t => t.id === task.id ? updated : t));
-        
-        if (updated.isCompleted) {
-            // Start Visual Loading State on the Item
-            setProcessingTaskIds(prev => new Set(prev).add(task.id));
-            try {
-                await generateTaskReward(updated);
-            } finally {
-                // End Visual Loading State
-                setProcessingTaskIds(prev => {
-                    const next = new Set(prev);
-                    next.delete(task.id);
-                    return next;
-                });
-            }
-        }
-    };
-
-    const handleDeleteTask = async (id: string) => {
-        await DB.deleteTask(id);
-        setTasks(prev => prev.filter(t => t.id !== id));
-    };
-
-    const handleAddAnni = async () => {
-        if (!newAnniTitle.trim() || !newAnniDate) return;
-        const anni: Anniversary = {
-            id: `anni-${Date.now()}`,
-            title: newAnniTitle,
-            date: newAnniDate,
-            charId: newAnniChar || characters[0]?.id
+    const saveAnniversary = async () => {
+        if (!title.trim() || !anniversaryDate) return;
+        const anniversary: Anniversary = {
+            id: `anniversary-${Date.now()}`,
+            title: title.trim(),
+            date: anniversaryDate,
+            charId: selectedCharacter?.id || '',
+            countMode: 'auto',
         };
-        await DB.saveAnniversary(anni);
-        setAnniversaries(prev => [...prev, anni].sort((a, b) => a.date.localeCompare(b.date)));
-        setShowAnniModal(false);
-        setNewAnniTitle('');
-        setNewAnniDate('');
-        
-        // Remove immediate trigger to avoid double calls (useEffect will handle if it's upcoming)
+        await DB.saveAnniversary(anniversary);
+        setAnniversaries(current => [...current, anniversary]);
+        addToast('纪念日已经收好', 'success');
+        resetComposer();
     };
 
-    const handleDeleteAnni = async (id: string) => {
-        await DB.deleteAnniversary(id);
-        setAnniversaries(prev => prev.filter(a => a.id !== id));
-    };
-
-    // --- Render Helpers ---
-
-    const getDaysUntil = (dateStr: string) => {
-        return getCalendarDayDifference(localDateKey, dateStr) ?? Number.POSITIVE_INFINITY;
-    };
-
-    const upcomingAnni = useMemo(() => {
-        return anniversaries.filter(a => getDaysUntil(a.date) >= 0).sort((a, b) => a.date.localeCompare(b.date))[0];
-    }, [anniversaries, localDateKey]);
-
-    // Trigger thoughts for upcoming anniversary on load
-    useEffect(() => {
-        if (upcomingAnni) {
-            generateAnniversaryThought(upcomingAnni);
+    const deleteUserEvent = async (event: CalendarEvent) => {
+        if (!event.task) return;
+        if (event.task.repeatWeekly) {
+            const next = { ...event.task, excludedDates: [...(event.task.excludedDates || []), selectedDate] };
+            await DB.saveTask(next);
+            setTasks(current => current.map(task => task.id === next.id ? next : task));
+            addToast('只取消了这一天，之后仍会每周重复', 'success');
+            return;
         }
-    }, [upcomingAnni]);
+        await DB.deleteTask(event.task.id);
+        setTasks(current => current.filter(task => task.id !== event.task?.id));
+    };
+
+    const selectedDateObject = fromDateKey(selectedDate);
+    const monthTitle = `${visibleMonth.getFullYear()} · ${MONTH_NAMES[visibleMonth.getMonth()]}`;
+    const selectedDateTitle = `${selectedDateObject.getMonth() + 1}月${selectedDateObject.getDate()}日`;
 
     return (
-        <div className={`h-full w-full flex flex-col ${theme.font} ${theme.bg} ${theme.text} relative overflow-hidden transition-colors duration-500`}>
-             
-             {/* Tech Background Grid (Only for Cyber) */}
-             {currentThemeMode === 'cyber' && (
-                 <div className="absolute inset-0 pointer-events-none opacity-20" 
-                      style={{ 
-                          backgroundImage: 'linear-gradient(rgba(56, 189, 248, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(56, 189, 248, 0.1) 1px, transparent 1px)', 
-                          backgroundSize: '40px 40px' 
-                      }}>
-                 </div>
-             )}
-             
-             {/* Soft Background Pattern (Only for Soft) */}
-             {currentThemeMode === 'soft' && (
-                 <div className="absolute inset-0 pointer-events-none opacity-30" 
-                      style={{ 
-                          backgroundImage: 'radial-gradient(#fbcfe8 2px, transparent 2px)', 
-                          backgroundSize: '20px 20px' 
-                      }}>
-                 </div>
-             )}
+        <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#f7f3e9] text-[#34342f]">
+            <div className="pointer-events-none absolute inset-0 opacity-[0.28] [background-image:linear-gradient(rgba(83,132,118,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(83,132,118,0.08)_1px,transparent_1px)] [background-size:22px_22px]" />
 
-             {/* Header */}
-             <div className={`border-b ${theme.border} backdrop-blur-sm sticky top-0 z-20 shrink-0 relative transition-colors duration-300`} style={{ paddingTop: 'var(--safe-top)' }}>
-                <div className="pt-12 pb-4 px-6 flex items-center justify-between h-24 box-border">
-                <button onClick={closeApp} className={`p-2 -ml-2 rounded-full active:scale-90 transition-transform ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-black/5'}`}>
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-6 h-6 ${theme.accent}`}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+            <header className="relative z-20 flex items-center justify-between px-5 pb-3 pt-[max(1rem,env(safe-area-inset-top))]">
+                <button onClick={closeApp} className="grid h-11 w-11 place-items-center rounded-full border border-[#d8d2c1] bg-[#fffdf7]/90 text-[#45453e] shadow-[0_4px_16px_rgba(74,65,42,0.08)] active:scale-95" aria-label="关闭">
+                    <ArrowLeft size={20} weight="bold" />
                 </button>
-
-                {/* Tabs */}
-                <div className={`flex gap-1 p-1 rounded-lg ${currentThemeMode === 'cyber' ? 'bg-black/40 border border-cyan-900/50' : (currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : 'bg-white/50')}`}>
-                    <button onClick={() => { setActiveTab('quest'); trackEvent('切换日程标签页', { tab: 'quest' }); }} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'quest' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.label}</button>
-                    <button onClick={() => { setActiveTab('server_events'); trackEvent('切换日程标签页', { tab: 'server_events' }); }} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'server_events' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.eventLabel}</button>
+                <div className="text-center">
+                    <p className="font-serif text-[11px] tracking-[0.28em] text-[#947a35]">TIME NOTES</p>
+                    <h1 className="mt-0.5 text-[17px] font-semibold tracking-[0.18em]">日程与纪念</h1>
                 </div>
+                <button onClick={() => setComposer(activeView === 'calendar' ? 'schedule' : 'anniversary')} className="grid h-11 w-11 place-items-center rounded-full bg-[#c9bd99] text-[#504a3c] shadow-[0_7px_18px_rgba(105,94,66,0.18)] active:scale-95" aria-label="添加">
+                    <Plus size={21} weight="bold" />
+                </button>
+            </header>
 
-                {/* Right Actions */}
-                <div className="flex gap-2">
-                    {/* Theme Switcher */}
-                    <button onClick={toggleTheme} className={`p-2 rounded-full active:scale-90 transition-transform ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'bg-white/10 hover:bg-white/20'}`}>
-                        {currentThemeMode === 'cyber' && <img src={twemojiUrl('1f47e')} alt="alien" className="w-5 h-5" />}
-                        {currentThemeMode === 'soft' && <img src={twemojiUrl('1f338')} alt="blossom" className="w-5 h-5" />}
-                        {currentThemeMode === 'minimal' && <img src={twemojiUrl('26aa')} alt="circle" className="w-5 h-5" />}
-                    </button>
+            <nav className="relative z-20 mx-5 mb-3 grid grid-cols-2 rounded-full border border-[#ded8c8] bg-[#fffdf8]/80 p-1 shadow-[0_5px_20px_rgba(89,77,45,0.06)]">
+                <button onClick={() => setActiveView('calendar')} className={`h-9 rounded-full text-[13px] font-semibold tracking-wider transition ${activeView === 'calendar' ? 'bg-[#80bbaa] text-white shadow-sm' : 'text-[#77746b]'}`}>日程</button>
+                <button onClick={() => setActiveView('anniversary')} className={`h-9 rounded-full text-[13px] font-semibold tracking-wider transition ${activeView === 'anniversary' ? 'bg-[#c9bd99] text-[#504a3c] shadow-sm' : 'text-[#77746b]'}`}>纪念日</button>
+            </nav>
 
-                    {/* Add Button */}
-                    <button onClick={() => { activeTab === 'quest' ? setShowTaskModal(true) : setShowAnniModal(true); trackEvent('打开新建条目弹窗', { kind: activeTab }); }} className={`p-2 rounded-full active:scale-90 transition-transform ${theme.accent} ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-white/10'}`}>
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-                    </button>
-                </div>
-                </div>
-
-                {/* Decoration Line */}
-                {currentThemeMode === 'cyber' && <div className="absolute bottom-0 left-0 h-[1px] w-full bg-gradient-to-r from-transparent via-cyan-500/50 to-transparent"></div>}
-            </div>
-
-            <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-8 z-10">
-                
-                {/* Hero Anniversary Card */}
-                {upcomingAnni && (
-                    <div className={`w-full rounded-2xl p-5 relative overflow-hidden group transition-all duration-300 ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[inset_5px_5px_10px_#d1d9e6,inset_-5px_-5px_10px_#ffffff]' : (currentThemeMode === 'soft' ? 'bg-gradient-to-r from-pink-300 to-purple-300 text-white shadow-lg shadow-pink-200' : 'bg-gradient-to-r from-slate-900 to-slate-800 border border-purple-500/30')}`}>
-                        <div className="relative z-10">
-                            <div className="flex justify-between items-start mb-2">
-                                <div className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded ${currentThemeMode === 'minimal' ? 'text-slate-400' : 'text-white/80 bg-white/20'}`}>即将到来</div>
-                                <div className="text-3xl font-bold tracking-tighter">{getDaysUntil(upcomingAnni.date)} <span className="text-xs opacity-60 font-normal">天后</span></div>
-                            </div>
-                            <div className="text-xl font-bold mb-4">{upcomingAnni.title}</div>
-                            
-                            {/* AI Thought Bubble */}
-                            <div className={`flex items-start gap-3 p-3 rounded-xl ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[5px_5px_10px_#d1d9e6,-5px_-5px_10px_#ffffff]' : 'bg-white/20 backdrop-blur-md'}`}>
-                                <img src={characters.find(c => c.id === upcomingAnni.charId)?.avatar} className="w-8 h-8 rounded-full object-cover" />
-                                <div className={`text-xs font-medium leading-relaxed italic ${currentThemeMode === 'minimal' ? 'text-slate-500' : 'text-white/90'}`}>
-                                    "{upcomingAnni.aiThought || "加载中..."}"
+            <main className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[calc(2rem+env(safe-area-inset-bottom))]">
+                {activeView === 'calendar' ? (
+                    <>
+                        <section className="relative overflow-hidden rounded-[26px] border border-[#d9d3c3] bg-[#fffdf8] px-3 pb-4 pt-3 shadow-[0_12px_35px_rgba(80,69,39,0.10)]">
+                            <div className="absolute -right-5 top-5 h-16 w-28 rotate-[8deg] bg-[#dcefe8]/55" />
+                            <span aria-hidden="true" className="pointer-events-none absolute right-4 top-4 rotate-[9deg] text-[19px] opacity-75 drop-shadow-sm">🌿</span>
+                            <span aria-hidden="true" className="pointer-events-none absolute bottom-11 left-2 -rotate-[10deg] text-[14px] opacity-60">🦈</span>
+                            <div className="relative flex items-center justify-between px-2 pb-3">
+                                <button onClick={() => shiftMonth(-1)} className="grid h-9 w-9 place-items-center rounded-full text-[#706e65] hover:bg-[#edf5f1]"><ArrowLeft size={17} weight="bold" /></button>
+                                <div className="text-center">
+                                    <h2 className="font-serif text-[25px] font-semibold tracking-[0.04em] text-[#3f463f]">{monthTitle}</h2>
+                                    <p className="mt-0.5 text-[9px] uppercase tracking-[0.26em] text-[#9a927f]">tap a day to open it</p>
                                 </div>
+                                <button onClick={() => shiftMonth(1)} className="grid h-9 w-9 place-items-center rounded-full text-[#706e65] hover:bg-[#f6edcf]"><ArrowRight size={17} weight="bold" /></button>
                             </div>
-                        </div>
-                    </div>
-                )}
 
-                {activeTab === 'quest' && (
-                    <div className="space-y-4">
-                        <div className="flex items-center gap-2 mb-2 px-1">
-                            <div className={`w-2 h-2 rounded-full animate-pulse ${currentThemeMode === 'cyber' ? 'bg-cyan-500' : (currentThemeMode === 'soft' ? 'bg-pink-400' : 'bg-slate-400')}`}></div>
-                            <h3 className={`text-xs font-bold uppercase tracking-[0.2em] ${theme.accent}`}>进行中任务</h3>
-                        </div>
-                        
-                        {tasks.filter(t => !t.isCompleted).length === 0 && (
-                            <div className={`text-center py-12 border-2 border-dashed rounded-xl ${currentThemeMode === 'cyber' ? 'border-slate-800' : 'border-slate-200'}`}>
-                                <div className={theme.textSub}>暂无任务</div>
+                            <div className="grid grid-cols-7 border-y border-[#ded8ca] py-2 text-center text-[10px] font-semibold text-[#898477]">
+                                {WEEKDAYS.map(day => <span key={day}>{day}</span>)}
                             </div>
-                        )}
-
-                        {tasks.filter(t => !t.isCompleted).map(task => {
-                            const supervisor = characters.find(c => c.id === task.supervisorId);
-                            const isProcessing = processingTaskIds.has(task.id);
-                            
-                            return (
-                                <div key={task.id} className={`${theme.card} p-4 flex items-center gap-4 group relative overflow-hidden transition-all duration-300`}>
-                                    {/* Supervisor Icon */}
-                                    <div className="w-12 h-12 rounded-full overflow-hidden shrink-0 relative border border-white/10">
-                                        {supervisor ? <img src={supervisor.avatar} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" /> : <span className="text-xs">?</span>}
-                                        <div className={`absolute -bottom-0 -right-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${currentThemeMode === 'soft' ? 'bg-white text-pink-500' : 'bg-black text-cyan-500'}`}>!</div>
-                                    </div>
-                                    
-                                    <div className="flex-1">
-                                        <div className={`${theme.text} font-bold text-sm tracking-wide`}>{task.title}</div>
-                                        <div className={`text-[10px] ${theme.textSub} mt-1 font-mono uppercase`}>
-                                            监督人: {supervisor?.name || 'Unknown'}
-                                        </div>
-                                    </div>
-
-                                    {/* Action Button Area */}
-                                    {isProcessing ? (
-                                        <div className="flex items-center gap-2 px-2 py-2">
-                                            <div className={`w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin ${theme.accent}`}></div>
-                                            <span className={`text-[10px] font-bold animate-pulse ${theme.accent}`}>验收中...</span>
-                                        </div>
-                                    ) : (
-                                        <button 
-                                            onClick={() => handleToggleTask(task)}
-                                            className={`px-4 py-2 text-[10px] font-bold uppercase tracking-wider rounded transition-all active:scale-95 ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff] text-slate-500 active:shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : (currentThemeMode === 'soft' ? 'bg-pink-100 text-pink-500' : 'bg-cyan-900/30 text-cyan-400 border border-cyan-800')}`}
-                                        >
-                                            完成
+                            <div className="grid grid-cols-7">
+                                {monthDays.map(date => {
+                                    const dateKey = toDateKey(date);
+                                    const isSelected = dateKey === selectedDate;
+                                    const isToday = dateKey === todayKey;
+                                    const hasUser = userEventsForDate(dateKey).length > 0;
+                                    const hasCharacter = Boolean(characterScheduleForDate(dateKey)?.slots.length);
+                                    return (
+                                        <button key={dateKey} onClick={() => selectDay(date)} className={`relative flex min-h-[54px] flex-col items-center border-b border-r border-[#ebe6da] pt-2 transition last:border-r-0 ${sameMonth(date, visibleMonth) ? 'text-[#393b36]' : 'text-[#c1bdae]'} ${isSelected ? 'bg-[#f1ecdf]/90' : 'hover:bg-[#edf5f1]/65'}`}>
+                                            <span className={`grid h-7 w-7 place-items-center rounded-full text-[13px] font-semibold ${isToday ? 'ring-1 ring-[#78b6a5]' : ''} ${isSelected ? 'bg-[#9f9270] text-white ring-0' : ''}`}>{date.getDate()}</span>
+                                            <span className="mt-1 flex h-2 items-center gap-1">
+                                                {hasUser && <i className="h-1.5 w-4 rounded-full bg-[#78b6a5]" />}
+                                                {hasCharacter && <i className="h-1.5 w-4 rounded-full bg-[#c9bd99]" />}
+                                            </span>
                                         </button>
-                                    )}
-                                    
-                                    <button onClick={() => handleDeleteTask(task.id)} className="absolute top-2 right-2 text-slate-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1">×</button>
-                                </div>
-                            );
-                        })}
+                                    );
+                                })}
+                            </div>
 
-                        {tasks.filter(t => t.isCompleted).length > 0 && (
-                            <div className="pt-8 opacity-50">
-                                <h3 className={`text-xs font-bold uppercase tracking-[0.2em] px-1 mb-4 ${theme.textSub}`}>已完成</h3>
-                                {tasks.filter(t => t.isCompleted).map(task => (
-                                    <div key={task.id} className={`flex items-center gap-3 py-2 px-2 border-b ${currentThemeMode === 'cyber' ? 'border-slate-800/50' : 'border-slate-100'}`}>
-                                        <div className={`${theme.iconDone} text-xs font-mono`}>[DONE]</div>
-                                        <span className={`text-sm line-through ${theme.textSub}`}>{task.title}</span>
-                                        <button onClick={() => handleDeleteTask(task.id)} className="ml-auto text-slate-400 hover:text-red-500 text-xs">DEL</button>
-                                    </div>
+                            <div className="flex items-center justify-between px-2 pt-3 text-[10px] font-medium text-[#7d796e]">
+                                <div className="flex items-center gap-4">
+                                    <span className="flex items-center gap-1.5"><i className="h-1.5 w-5 rounded-full bg-[#78b6a5]" />你</span>
+                                    <span className="flex items-center gap-1.5"><i className="h-1.5 w-5 rounded-full bg-[#c9bd99]" />{selectedCharacter?.name || '角色'}</span>
+                                </div>
+                                <button onClick={() => selectDay(new Date())} className="rounded-full border border-[#d9d3c3] px-3 py-1.5 font-semibold">今天</button>
+                            </div>
+                        </section>
+
+                        {characters.length > 1 && (
+                            <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+                                {characters.map(character => (
+                                    <button key={character.id} onClick={() => setSelectedCharId(character.id)} className={`flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold ${character.id === selectedCharacter?.id ? 'border-[#c9bd99] bg-[#f1ecdf] text-[#655c46]' : 'border-[#dcd6c7] bg-white/70 text-[#77746b]'}`}>
+                                        <img src={character.avatar} alt="" className="h-6 w-6 rounded-full object-cover" />
+                                        {character.name}
+                                    </button>
                                 ))}
                             </div>
                         )}
-                    </div>
+
+                        <section className="relative mt-5 rounded-[26px] border border-[#d8d2c3] bg-[#fffdf9] px-4 pb-5 pt-5 shadow-[0_12px_32px_rgba(80,69,39,0.08)]">
+                            <div className="absolute left-1/2 top-0 h-5 w-24 -translate-x-1/2 -translate-y-2 rotate-[-2deg] bg-[#e8d49b]/55 shadow-sm" />
+                            <span aria-hidden="true" className="pointer-events-none absolute right-4 top-4 rotate-[7deg] text-[17px] opacity-70">🧇</span>
+                            <div className="flex items-end justify-between border-b border-[#ddd8ca] pb-3">
+                                <div>
+                                    <p className="font-serif text-[24px] font-semibold">{selectedDateTitle}</p>
+                                    <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-[#8e897d]">{selectedDateObject.toLocaleDateString('zh-CN', { weekday: 'long' })}</p>
+                                </div>
+                                <button onClick={() => setComposer('schedule')} className="flex h-9 items-center gap-1.5 rounded-full bg-[#dff1eb] px-3 text-[11px] font-semibold text-[#477e70]"><Plus size={14} weight="bold" />我的安排</button>
+                            </div>
+
+                            {selectedEvents.length ? (
+                                <div className="relative mt-4 space-y-3 before:absolute before:bottom-3 before:left-[45px] before:top-3 before:w-px before:bg-[#d8d4c9]">
+                                    {selectedEvents.map(event => (
+                                        <article key={event.id} className="relative grid grid-cols-[36px_1fr] gap-4">
+                                            <time className="pt-4 text-right font-mono text-[10px] text-[#8a867b]">{event.startTime}</time>
+                                            <div className={`relative rounded-[18px] border px-4 py-3 shadow-[0_5px_15px_rgba(75,67,44,0.06)] ${event.owner === 'character' ? 'border-[#ddd4bb] bg-[#f3efe3]' : 'border-[#b9dcd2] bg-[#e2f3ed]'}`}>
+                                                <span className={`absolute -left-[21px] top-[18px] h-2.5 w-2.5 rounded-full border-2 border-[#fffdf9] ${event.owner === 'character' ? 'bg-[#b7aa85]' : 'bg-[#78b6a5]'}`} />
+                                                <div className="flex items-start gap-3">
+                                                    {event.avatar ? <img src={event.avatar} alt="" className="h-9 w-9 shrink-0 rounded-full border-2 border-white/80 object-cover shadow-sm" /> : <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full text-xs ${event.owner === 'character' ? 'bg-[#c9bd99] text-[#504a3c]' : 'bg-[#78b6a5] text-white'}`}>{event.owner === 'character' ? '角' : '你'}</div>}
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <h3 className="truncate text-[14px] font-semibold text-[#393b36]">{event.title}</h3>
+                                                            {event.adjusted && <span className="shrink-0 rounded-full bg-white/55 px-1.5 py-0.5 text-[8px] font-semibold text-[#94772c]">已调整</span>}
+                                                            {event.repeat && <Repeat size={12} className="shrink-0 text-[#4d8b7b]" />}
+                                                        </div>
+                                                        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[#77746a]">
+                                                            <span className="flex items-center gap-1"><Clock size={11} />{event.startTime}{event.endTime ? `-${event.endTime}` : ''}</span>
+                                                            {event.location && <span className="flex items-center gap-1"><MapPin size={11} />{event.location}</span>}
+                                                        </div>
+                                                        {event.note && <p className="mt-2 text-[11px] leading-5 text-[#66645d]">{event.note}</p>}
+                                                    </div>
+                                                    {event.owner === 'user' && event.task && <button onClick={() => void deleteUserEvent(event)} className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[#7d796e] hover:bg-white/50" aria-label="取消这项日程"><X size={13} /></button>}
+                                                </div>
+                                            </div>
+                                        </article>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="flex min-h-[180px] flex-col items-center justify-center text-center">
+                                    <CalendarBlank size={30} weight="thin" className="text-[#9dbfb5]" />
+                                    <p className="mt-3 font-serif text-[16px] text-[#585a54]">这一天还留着空白</p>
+                                    <p className="mt-1 text-[10px] leading-5 text-[#999487]">可以写下你的安排；角色的日程生成后<br />也会自然地出现在这里。</p>
+                                </div>
+                            )}
+                        </section>
+                    </>
+                ) : (
+                    <section className="relative min-h-full overflow-hidden rounded-[28px] border border-[#dad3c3] bg-[#fffdf8] p-5 shadow-[0_12px_35px_rgba(80,69,39,0.10)]">
+                        <div className="absolute -right-7 -top-6 h-28 w-28 rounded-full border-[18px] border-[#dcefe8]/70" />
+                        <div className="relative border-b border-[#ddd6c6] pb-5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-[#78a99c]">our little archive</p>
+                            <h2 className="mt-2 font-serif text-[30px] font-semibold leading-tight">值得记住的日子</h2>
+                            <p className="mt-2 max-w-[260px] text-[11px] leading-5 text-[#827e73]">未来的期待会倒数，已经发生的故事会继续累计。</p>
+                        </div>
+
+                        <div className="relative mt-5 space-y-4">
+                            {anniversaries.length ? anniversaries
+                                .slice()
+                                .sort((a, b) => a.date.localeCompare(b.date))
+                                .map((anniversary, index) => {
+                                    const dayDifference = Math.round((fromDateKey(anniversary.date).getTime() - fromDateKey(todayKey).getTime()) / 86400000);
+                                    const isFuture = anniversary.countMode === 'countdown' || (anniversary.countMode !== 'countup' && dayDifference >= 0);
+                                    const character = characters.find(item => item.id === anniversary.charId) || selectedCharacter;
+                                    return (
+                                        <article key={anniversary.id} className={`relative overflow-hidden rounded-[22px] border p-4 shadow-[0_7px_18px_rgba(76,65,36,0.08)] ${index % 2 === 0 ? 'rotate-[-0.4deg] border-[#ddd4bb] bg-[#f3efe3]' : 'rotate-[0.35deg] border-[#badbd1] bg-[#e2f3ed]'}`}>
+                                            <span className="absolute right-4 top-0 h-6 w-16 -translate-y-2 rotate-[4deg] bg-white/45" />
+                                            <span aria-hidden="true" className="absolute bottom-2 right-3 rotate-[8deg] text-[16px] opacity-55">{['💌', '🌱', '🦊', '🧁', '🌄'][index % 5]}</span>
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div className="flex min-w-0 items-center gap-3">
+                                                    {character?.avatar ? <img src={character.avatar} alt="" className="h-11 w-11 rounded-full border-2 border-white/80 object-cover shadow-sm" /> : <div className="grid h-11 w-11 place-items-center rounded-full bg-[#c9bd99] text-[#504a3c]"><Heart size={20} weight="fill" /></div>}
+                                                    <div className="min-w-0">
+                                                        <p className="truncate text-[15px] font-semibold">{anniversary.title}</p>
+                                                        <p className="mt-1 font-mono text-[9px] tracking-wider text-[#777267]">{anniversary.date}</p>
+                                                    </div>
+                                                </div>
+                                                <div className="shrink-0 text-right">
+                                                    <strong className="font-serif text-[28px] font-semibold leading-none">{Math.abs(dayDifference)}</strong>
+                                                    <p className="mt-1 text-[9px] font-semibold tracking-wider text-[#817a69]">{isFuture ? '天后' : '天了'}</p>
+                                                </div>
+                                            </div>
+                                            {anniversary.aiThought && <p className="mt-4 border-t border-black/5 pt-3 text-[11px] italic leading-5 text-[#656259]">“{anniversary.aiThought}”</p>}
+                                        </article>
+                                    );
+                                }) : (
+                                    <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
+                                        <Heart size={34} weight="thin" className="text-[#a99d7c]" />
+                                        <p className="mt-4 font-serif text-[18px]">第一张纪念卡还在等你</p>
+                                        <p className="mt-2 text-[10px] leading-5 text-[#928d80]">可以记相遇、生日、约定，<br />或任何想一起等待的日子。</p>
+                                        <button onClick={() => setComposer('anniversary')} className="mt-5 rounded-full bg-[#c9bd99] px-5 py-2.5 text-[11px] font-semibold text-[#504a3c] shadow-[0_7px_17px_rgba(105,94,66,0.18)]">写下一个日子</button>
+                                    </div>
+                                )}
+                        </div>
+                    </section>
                 )}
+            </main>
 
-                {activeTab === 'server_events' && (
-                    <div className={`relative pl-6 space-y-8 before:absolute before:left-2 before:top-2 before:bottom-0 before:w-[1px] ${theme.decoLine}`}>
-                        {/* Anniversaries List */}
-                        <div>
-                             <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 ${theme.textSub}`}>时间线事件</h3>
-                             <div className="space-y-4">
-                                 {anniversaries.map(a => (
-                                     <div key={a.id} className="relative group">
-                                         <div className={`absolute -left-[20px] top-4 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-purple-500' : 'bg-pink-400'}`}></div>
-                                         <div className={`${theme.card} p-4 flex justify-between items-center transition-colors`}>
-                                             <div>
-                                                 <div className={`text-sm font-bold ${theme.text}`}>{a.title}</div>
-                                                 <div className={`text-[10px] ${theme.textSub} font-mono mt-1`}>{a.date} · {characters.find(c => c.id === a.charId)?.name}</div>
-                                             </div>
-                                             <button onClick={() => handleDeleteAnni(a.id)} className="text-slate-400 hover:text-red-400 p-2 opacity-0 group-hover:opacity-100 transition-opacity">×</button>
-                                         </div>
-                                     </div>
-                                 ))}
-                             </div>
+            {composer && (
+                <div className="absolute inset-0 z-50 flex items-end bg-[#403c32]/35" onClick={resetComposer}>
+                    <section className="w-full rounded-t-[30px] border-t border-white/80 bg-[#fffdf8] px-5 pb-[calc(1.2rem+env(safe-area-inset-bottom))] pt-4 shadow-[0_-18px_50px_rgba(66,57,35,0.16)]" onClick={event => event.stopPropagation()}>
+                        <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-[#d5d0c2]" />
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-[9px] font-semibold uppercase tracking-[0.25em] text-[#7ca99d]">{composer === 'schedule' ? 'my schedule' : 'our memory'}</p>
+                                <h2 className="mt-1 font-serif text-[23px] font-semibold">{composer === 'schedule' ? '添加我的日程' : '添加纪念日'}</h2>
+                            </div>
+                            <button onClick={resetComposer} className="grid h-9 w-9 place-items-center rounded-full bg-[#f0ece2] text-[#777268]"><X size={16} /></button>
                         </div>
 
-                        {/* Completed Tasks History Log */}
-                         <div>
-                             <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 pt-4 ${theme.textSub}`}>完成履历</h3>
-                             <div className="space-y-4">
-                                 {tasks.filter(t => t.isCompleted).sort((a,b) => (b.completedAt || 0) - (a.completedAt || 0)).map(t => (
-                                     <div key={t.id} className="relative">
-                                         <div className={`absolute -left-[20px] top-2 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-green-600' : 'bg-slate-300'}`}></div>
-                                         <div className={`text-xs ${theme.textSub} font-mono`}>[{new Date(t.completedAt || 0).toLocaleDateString()}] 任务完成</div>
-                                         <div className={`text-sm ${theme.text} font-bold mt-1 pl-1 border-l-2 ${theme.decoLine}`}>{t.title}</div>
-                                     </div>
-                                 ))}
-                             </div>
-                         </div>
-                    </div>
-                )}
+                        <div className="mt-5 space-y-3">
+                            <label className="block rounded-[18px] border border-[#dcd6c7] bg-white px-4 py-3">
+                                <span className="block text-[9px] font-semibold uppercase tracking-wider text-[#938d7f]">写点什么</span>
+                                <input autoFocus value={title} onChange={event => setTitle(event.target.value)} placeholder={composer === 'schedule' ? '例如：下午的专业课' : '例如：我们第一次见面'} className="mt-1.5 w-full bg-transparent text-[15px] font-medium outline-none placeholder:text-[#bbb5a8]" />
+                            </label>
 
-            </div>
-
-            {/* Task Modal */}
-            <Modal isOpen={showTaskModal} title={currentThemeMode === 'cyber' ? "INITIALIZE QUEST" : "新建任务"} onClose={() => setShowTaskModal(false)} footer={<button onClick={handleAddTask} className={`w-full py-3 font-bold transition-all ${theme.buttonPrimary}`}>确认添加</button>}>
-                <div className={`space-y-6 ${currentThemeMode === 'minimal' ? 'p-2' : ''}`}>
-                    <input autoFocus value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} placeholder="任务目标 (例如: 背单词)" className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
-                    
-                    <div>
-                        <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 block tracking-widest">选择监督人</label>
-                        {/* 分组筛选（没建分组时不渲染）。Modal 恒为白底，走浅色配色 */}
-                        <CharacterGroupFilterBar characters={characters} groups={characterGroups}
-                            value={supervisorGroupId} onChange={setSupervisorGroupId} className="mb-2" />
-                        <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
-                            {filterCharactersByGroup(characters, characterGroups, supervisorGroupId).map(c => (
-                                <button key={c.id} onClick={() => setNewTaskSupervisor(c.id)} className={`flex flex-col items-center gap-2 p-2 rounded-lg border transition-all min-w-[60px] ${newTaskSupervisor === c.id ? `${currentThemeMode === 'minimal' ? 'shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : 'border-current'}` : 'border-transparent opacity-50'}`}>
-                                    <img src={c.avatar} className="w-10 h-10 rounded-md object-cover" />
-                                    <span className={`text-[10px] font-bold whitespace-nowrap ${theme.text}`}>{c.name}</span>
-                                </button>
-                            ))}
+                            {composer === 'schedule' ? (
+                                <>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <label className="rounded-[18px] border border-[#badbd1] bg-[#e9f6f1] px-4 py-3">
+                                            <span className="block text-[9px] font-semibold text-[#5e8e81]">开始</span>
+                                            <input type="time" value={startTime} onChange={event => setStartTime(event.target.value)} className="mt-1 w-full bg-transparent text-[14px] font-semibold outline-none" />
+                                        </label>
+                                        <label className="rounded-[18px] border border-[#badbd1] bg-[#e9f6f1] px-4 py-3">
+                                            <span className="block text-[9px] font-semibold text-[#5e8e81]">结束</span>
+                                            <input type="time" value={endTime} onChange={event => setEndTime(event.target.value)} className="mt-1 w-full bg-transparent text-[14px] font-semibold outline-none" />
+                                        </label>
+                                    </div>
+                                    <button onClick={() => setRepeatWeekly(value => !value)} className={`flex w-full items-center justify-between rounded-[18px] border px-4 py-3 text-left ${repeatWeekly ? 'border-[#8fc5b7] bg-[#e2f3ed]' : 'border-[#ddd7c8] bg-white'}`}>
+                                        <span className="flex items-center gap-3 text-[13px] font-semibold"><Repeat size={17} className="text-[#6aa797]" />每周这一天重复</span>
+                                        <span className={`h-5 w-9 rounded-full p-0.5 transition ${repeatWeekly ? 'bg-[#78b6a5]' : 'bg-[#d9d4c8]'}`}><i className={`block h-4 w-4 rounded-full bg-white shadow-sm transition ${repeatWeekly ? 'translate-x-4' : ''}`} /></span>
+                                    </button>
+                                    <input value={location} onChange={event => setLocation(event.target.value)} placeholder="地点（可不填）" className="w-full rounded-[18px] border border-[#ddd7c8] bg-white px-4 py-3 text-[13px] outline-none" />
+                                    <input value={note} onChange={event => setNote(event.target.value)} placeholder="备注（可不填）" className="w-full rounded-[18px] border border-[#ddd7c8] bg-white px-4 py-3 text-[13px] outline-none" />
+                                </>
+                            ) : (
+                                <label className="block rounded-[18px] border border-[#ddd4bb] bg-[#f3efe3] px-4 py-3">
+                                    <span className="block text-[9px] font-semibold text-[#6f654d]">日期</span>
+                                    <input type="date" value={anniversaryDate} onChange={event => setAnniversaryDate(event.target.value)} className="mt-1 w-full bg-transparent text-[14px] font-semibold outline-none" />
+                                </label>
+                            )}
                         </div>
-                    </div>
+
+                        <button onClick={() => void (composer === 'schedule' ? saveSchedule() : saveAnniversary())} disabled={!title.trim()} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#c9bd99] text-[13px] font-semibold text-[#504a3c] shadow-[0_8px_20px_rgba(105,94,66,0.18)] disabled:opacity-40">
+                            {composer === 'schedule' ? <CalendarBlank size={17} weight="bold" /> : <Sparkle size={17} weight="fill" />}
+                            保存
+                        </button>
+                    </section>
                 </div>
-            </Modal>
-
-            {/* Anniversary Modal */}
-            <Modal isOpen={showAnniModal} title={currentThemeMode === 'cyber' ? "REGISTER EVENT" : "添加纪念日"} onClose={() => setShowAnniModal(false)} footer={<button onClick={handleAddAnni} className={`w-full py-3 font-bold transition-all ${theme.buttonPrimary}`}>保存记录</button>}>
-                <div className={`space-y-4 ${currentThemeMode === 'minimal' ? 'p-2' : ''}`}>
-                    <input value={newAnniTitle} onChange={e => setNewAnniTitle(e.target.value)} placeholder="事件名称 (例如: 第一次见面)" className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
-                    <input type="date" value={newAnniDate} onChange={e => setNewAnniDate(e.target.value)} className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
-                    
-                    <div>
-                        <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 block tracking-widest">关联对象</label>
-                        {/* 分组筛选（没建分组时不渲染）。Modal 恒为白底，走浅色配色 */}
-                        <CharacterGroupFilterBar characters={characters} groups={characterGroups}
-                            value={anniCharGroupId} onChange={setAnniCharGroupId} className="mb-2" />
-                        <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
-                            {filterCharactersByGroup(characters, characterGroups, anniCharGroupId).map(c => (
-                                <button key={c.id} onClick={() => setNewAnniChar(c.id)} className={`flex flex-col items-center gap-2 p-2 rounded-lg border transition-all min-w-[60px] ${newAnniChar === c.id ? `${currentThemeMode === 'minimal' ? 'shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : 'border-current'}` : 'border-transparent opacity-50'}`}>
-                                    <img src={c.avatar} className="w-10 h-10 rounded-md object-cover" />
-                                    <span className={`text-[10px] font-bold whitespace-nowrap ${theme.text}`}>{c.name}</span>
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-            </Modal>
+            )}
         </div>
     );
 };

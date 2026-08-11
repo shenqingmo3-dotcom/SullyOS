@@ -44,7 +44,7 @@ describe('utils 层直写 DB 后的内存回灌（事件名契约）', () => {
 
   it('MusicContext 加歌落库后广播 char-music-profile-updated（带 charId + musicProfile）', () => {
     const src = read(MUSIC_CONTEXT);
-    const fn = sliceBetween(src, 'addSongToCharPlaylist: async', '\n    };\n  }, [current');
+    const fn = sliceBetween(src, 'addSongToCharPlaylist: async', 'const value: MusicContextType');
     // 先落库再广播——反过来的话监听方拿到的 musicProfile 还没进 DB。
     expect(fn).toMatch(/DB\.saveCharacter\([\s\S]*?dispatchEvent\(new CustomEvent\('char-music-profile-updated'/);
     expect(fn).toContain('detail: { charId: cid, musicProfile: updatedProfile }');
@@ -151,19 +151,12 @@ describe('其余打脏入口接线', () => {
     }
   });
 
-  it('DateApp：轮次落库与删改处理器都打脏（对齐 Chat.tsx）', () => {
+  it('DateApp 已替换成见面剧场，不再保留旧陪伴聊天与主动消息接线', () => {
     const src = read('../apps/DateApp.tsx');
-    for (const [start, end] of [
-      ['const handleSendMessage = async', 'const handleReroll'],
-      ['const handleReroll = async', '// --- Editing & Deletion ---'],
-      ['const handleDeleteMessage = async', 'const handleDeleteMessages'],
-      ['const handleDeleteMessages = async', 'const confirmEditMessage'],
-      ['const confirmEditMessage = async', '// --- History Long Press ---'],
-      ['const handleHistoryDelete = async', 'const handleHistoryEditOpen'],
-      ['const handleHistoryEditConfirm = async', 'const onExitSession'],
-    ] as const) {
-      expect(sliceBetween(src, start, end), `${start} 里少了打脏调用`).toContain('markDateTurnDirty(');
-    }
+    expect(src).toContain("import StoryTheater from '../components/date/story/StoryTheater'");
+    expect(src).toContain('<StoryTheater onClose={closeApp} />');
+    expect(src).not.toContain('markDateTurnDirty');
+    expect(src).not.toContain('ActiveMsg');
   });
 
   it('Chat：日程编辑 / 删除 / 跨天重新生成 + 生活记录否决都打脏', () => {

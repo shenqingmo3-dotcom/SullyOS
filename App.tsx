@@ -5,7 +5,6 @@ import { MusicProvider } from './context/MusicContext';
 import PhoneShell from './components/PhoneShell';
 import BuildBadge from './components/BuildBadge';
 import DevDebugPanel from './components/DevDebugPanel';
-import Amsg2DebugPanel from './components/Amsg2DebugPanel';
 import VRBroadcast from './components/VRBroadcast';
 import WorldBroadcast from './components/WorldBroadcast';
 import ChatBroadcast from './components/ChatBroadcast';
@@ -25,7 +24,6 @@ const App: React.FC = () => {
   const shellStyle = useAbsoluteShell
     ? { height: 'var(--app-height, 100lvh)', minHeight: 'var(--app-height, 100lvh)' }
     : { height: 'var(--app-height, 100lvh)', minHeight: 'var(--app-height, 100lvh)' };
-
   return (
     <>
       <div
@@ -37,12 +35,7 @@ const App: React.FC = () => {
           style={{ transform: 'translateZ(0)' }}
         >
           <OSProvider>
-            <MusicProvider>
-              <PhoneShell />
-            </MusicProvider>
-            {/* 挂在 Provider 里面才能直接读 characters（省掉轮询 IndexedDB），
-                面板自身用 portal 渲染到 body，绕开上面那层 transform 对 fixed 定位的影响。 */}
-            <Amsg2DebugPanel />
+            <MusicProvider><PhoneShell /></MusicProvider>
           </OSProvider>
         </div>
       </div>

@@ -24,13 +24,12 @@ import { StoryAppearanceButton, StoryTheaterThemeProvider } from './StoryTheater
 import { deleteStoryTheaterData } from '../../../utils/storyTheaterDeletion';
 
 interface Props {
-    onSwitchCompanion: () => void;
     onClose: () => void;
 }
 
 type View = 'list' | 'editor' | 'session' | 'preset' | 'masks' | 'vectors';
 
-const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) => {
+const StoryTheaterContent: React.FC<Props> = ({ onClose }) => {
     const { characters, userProfile, addToast, remoteVectorConfig } = useOS();
     const [view, setView] = useState<View>('list');
     const [entries, setEntries] = useState<StoryTheaterEntry[]>([]);
@@ -58,7 +57,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
             const imported = parseStoryTheaterPreset(await file.text(), file.name);
             await DB.saveStoryTheaterPreset(imported);
             setCustomPresets(current => [imported, ...current.filter(item => item.id !== imported.id)]);
-            addToast(`已导入糯米机剧情预设「${imported.name}」`, 'success');
+            addToast(`已导入${imported.format === 'sillytavern-chat-completion' ? '酒馆' : 'SharkOS'}预设「${imported.name}」`, 'success');
             return imported;
         } catch (error: any) {
             addToast(error?.message || '预设导入失败', 'error');
@@ -86,14 +85,14 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
         await DB.saveStoryTheaterPreset(next);
         setCustomPresets(current => [next, ...current.filter(item => item.id !== next.id)]);
         setEditingPreset(next);
-        addToast('剧情预设已保存', 'success');
+        addToast('见面预设已保存', 'success');
     }, [addToast]);
 
     const copyPreset = useCallback(async (copy: StoryTheaterPreset) => {
         await DB.saveStoryTheaterPreset(copy);
         setCustomPresets(current => [copy, ...current.filter(item => item.id !== copy.id)]);
         setEditingPreset(copy);
-        addToast('已复制为可编辑的糯米机预设', 'success');
+        addToast('已复制为可编辑的 SharkOS 预设', 'success');
     }, [addToast]);
 
     const deletePreset = useCallback(async (preset: StoryTheaterPreset) => {
@@ -228,17 +227,14 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
                 <StoryAppearanceButton className='ml-auto bg-white border border-slate-200' />
                 <button onClick={() => { setMaskLocked(false); setActiveEntry({ ...createStoryTheaterDraft(), presetId: presets[0]?.id }); setView('editor'); }} className='w-10 h-10 rounded-full bg-slate-900 text-white grid place-items-center'><Plus size={19} /></button>
             </div>
-            <div className='mx-5 mb-4 grid grid-cols-2 p-1 rounded-xl bg-slate-200'>
-                <button onClick={onSwitchCompanion} className='py-2 rounded-lg text-xs font-bold text-slate-500'>陪伴</button>
-                <button className='py-2 rounded-lg bg-white shadow-sm text-xs font-bold text-violet-700'>剧情</button>
-            </div>
+            <div className='mx-5 mb-4 rounded-xl border border-violet-100 bg-white/70 px-4 py-2.5 text-[10px] leading-5 text-slate-500'>普通线上与线下对话仍在聊天中连续进行；这里用于进入一段可装载酒馆预设的沉浸式见面。</div>
         </header>
 
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-6 pb-24'>
             <div className='max-w-2xl mx-auto'>
                 <section className='story-cinema-rule pb-6 border-b border-slate-200'>
-                    <div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Your theaters</div>
-                    <div className='mt-2 flex items-end justify-between gap-5'><div><h2 className='text-3xl font-serif font-semibold'>很多条剧情，<br />各自拥有一条时间线。</h2><p className='mt-3 text-[11px] leading-5 text-slate-500'>角色在新增时一次选定。世界书、记忆与预设的改动都只发生在这只沙盒里。</p></div><FilmSlate size={48} weight='duotone' className='shrink-0 text-violet-300' /></div>
+                    <div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Your meetings</div>
+                    <div className='mt-2 flex items-end justify-between gap-5'><div><h2 className='text-3xl font-serif font-semibold'>每次见面，<br />都是一条正在发生的故事。</h2><p className='mt-3 text-[11px] leading-5 text-slate-500'>角色、世界书与原版记忆方式照旧；玩法与预设改为酒馆式楼层。</p></div><FilmSlate size={48} weight='duotone' className='shrink-0 text-violet-300' /></div>
                 </section>
 
                 <section className='py-6'>
@@ -261,10 +257,10 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
                 </section>
 
                 <section className='pt-6 border-t border-slate-200'>
-                    <div className='flex items-center justify-between'><div><div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>Native presets</div><h2 className='mt-1 text-lg font-semibold'>糯米机预设制作器</h2></div><div className='flex gap-2'><button onClick={() => importInput.current?.click()} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><UploadSimple size={17} /></button><button onClick={() => { setEditingPreset(createBlankStoryPreset()); setView('preset'); }} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><Plus size={17} /></button></div></div>
-                    <p className='mt-2 text-[10px] leading-5 text-slate-500'>仅导入与导出 <code>sullyos.story-preset</code>。不接受其它应用的 completion JSON，也不保留其字段或运行逻辑。</p>
+                    <div className='flex items-center justify-between'><div><div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>Tavern compatible</div><h2 className='mt-1 text-lg font-semibold'>见面预设</h2></div><div className='flex gap-2'><button onClick={() => importInput.current?.click()} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><UploadSimple size={17} /></button><button onClick={() => { setEditingPreset(createBlankStoryPreset('新见面预设')); setView('preset'); }} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><Plus size={17} /></button></div></div>
+                    <p className='mt-2 text-[10px] leading-5 text-slate-500'>可直接导入 SillyTavern Chat Completion 预设 JSON；提示词顺序、启用状态、角色与世界书插入位及生成参数会映射到 SharkOS。</p>
                     <input ref={importInput} type='file' accept='.json,application/json' className='hidden' onChange={async event => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) await importPreset(file); }} />
-                    <div className='mt-4 divide-y divide-slate-200'>{presets.map(preset => <div key={preset.id} className='flex items-center gap-2'><button onClick={() => { setEditingPreset(preset); setView('preset'); }} className='min-w-0 flex-1 py-3 flex items-center gap-3 text-left'><span className={`w-2 h-2 rounded-full ${preset.builtIn ? 'bg-amber-400' : 'bg-violet-500'}`} /><span className='min-w-0 flex-1 text-xs font-semibold truncate'>{preset.name}</span><span className='text-[9px] text-slate-400'>{preset.builtIn ? '内置只读' : `${preset.document.prompts.length} 条`}</span></button><button onClick={() => downloadStoryPreset(preset)} className='w-9 h-9 shrink-0 rounded-full grid place-items-center text-slate-400' title={`导出 ${preset.name}`}><DownloadSimple size={15} /></button></div>)}</div>
+                    <div className='mt-4 divide-y divide-slate-200'>{presets.map(preset => <div key={preset.id} className='flex items-center gap-2'><button onClick={() => { setEditingPreset(preset); setView('preset'); }} className='min-w-0 flex-1 py-3 flex items-center gap-3 text-left'><span className={`w-2 h-2 rounded-full ${preset.builtIn ? 'bg-amber-400' : 'bg-violet-500'}`} /><span className='min-w-0 flex-1 text-xs font-semibold truncate'>{preset.name}</span><span className='text-[9px] text-slate-400'>{preset.builtIn ? '内置只读' : preset.format === 'sillytavern-chat-completion' ? `酒馆 · ${preset.document.prompts.length} 条` : `${preset.document.prompts.length} 条`}</span></button><button onClick={() => downloadStoryPreset(preset)} className='w-9 h-9 shrink-0 rounded-full grid place-items-center text-slate-400' title={`导出 ${preset.name}`}><DownloadSimple size={15} /></button></div>)}</div>
                 </section>
             </div>
         </main>

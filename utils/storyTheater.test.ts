@@ -133,9 +133,65 @@ describe('糯米机原生剧情预设边界', () => {
         expect(resolved.prompts.find(prompt => prompt.id === 'nmj-v616-silent-preflight')?.enabled).toBe(true);
     });
 
-    it('拒绝其它应用的 prompt/completion JSON', () => {
-        expect(() => parseStoryTheaterPreset(JSON.stringify({ prompts: [], prompt_order: [] }), 'foreign.json')).toThrow('只接受糯米机剧情预设');
-        expect(() => parseStoryTheaterPreset(JSON.stringify({ model: 'x', messages: [] }), 'completion.json')).toThrow('只接受糯米机剧情预设');
+    it('导入 SillyTavern Chat Completion 预设并保留酒馆顺序、开关与插入槽位', () => {
+        const imported = parseStoryTheaterPreset(JSON.stringify({
+            name: '雨夜酒馆',
+            temperature: 1.1,
+            top_p: 0.85,
+            prompts: [
+                { identifier: 'main', name: '主提示词', role: 'system', content: '你是 {{char}}，正在和 {{user}} 见面。' },
+                { identifier: 'worldInfoBefore', name: '世界书前', role: 'system', content: '' },
+                { identifier: 'charDescription', name: '角色卡', role: 'system', content: '' },
+                { identifier: 'scenario', name: '场景', role: 'system', content: '' },
+                { identifier: 'chatHistory', name: '楼层历史', role: 'system', content: '' },
+                { identifier: 'disabled', name: '关闭项', role: 'user', content: '不应发送' },
+            ],
+            prompt_order: [{
+                character_id: 100001,
+                order: [
+                    { identifier: 'worldInfoBefore', enabled: true },
+                    { identifier: 'main', enabled: true },
+                    { identifier: 'charDescription', enabled: true },
+                    { identifier: 'scenario', enabled: true },
+                    { identifier: 'chatHistory', enabled: true },
+                    { identifier: 'disabled', enabled: false },
+                ],
+            }],
+        }), 'rain-tavern.json', 42);
+
+        expect(imported.format).toBe('sillytavern-chat-completion');
+        expect(imported.name).toBe('雨夜酒馆');
+        expect(imported.document.generation).toMatchObject({ temperature: 1.1, topP: 0.85 });
+        expect(imported.document.prompts.map(prompt => prompt.name)).toEqual([
+            '世界书前', '主提示词', '角色卡', '场景', '楼层历史', '关闭项',
+        ]);
+        expect(imported.document.prompts.find(prompt => prompt.name === '关闭项')?.enabled).toBe(false);
+
+        const compiled = compileStoryPreset({
+            preset: imported,
+            userName: '条条',
+            characterNames: ['Sully'],
+            slots: {
+                actors: 'CHARACTER_CARD',
+                persona: 'USER_PERSONA',
+                scenario: 'RAIN_SCENE',
+                worldBefore: 'WORLD_BEFORE',
+                worldAfter: '',
+                history: 'FLOOR_HISTORY',
+            },
+        });
+        const payload = compiled.messages.map(message => message.content).join('\n');
+        expect(payload).toContain('WORLD_BEFORE');
+        expect(payload).toContain('你是 Sully，正在和 条条 见面。');
+        expect(payload).toContain('CHARACTER_CARD');
+        expect(payload).toContain('RAIN_SCENE');
+        expect(payload).toContain('FLOOR_HISTORY');
+        expect(payload).not.toContain('不应发送');
+    });
+
+    it('仍拒绝既不是 SharkOS 预设也不是酒馆预设的 completion JSON', () => {
+        expect(() => parseStoryTheaterPreset(JSON.stringify({ model: 'x', messages: [] }), 'completion.json'))
+            .toThrow('只接受 SharkOS 见面预设或 SillyTavern Chat Completion 预设');
     });
 
     it('内置小剧场对外只使用“你”和“角色”的称呼', () => {

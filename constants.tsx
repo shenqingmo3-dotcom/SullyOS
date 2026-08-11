@@ -50,6 +50,7 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
   Appearance: ({ className }) => <Palette className={className} weight="regular" />,
   Date: ({ className }) => <Heart className={className} weight="regular" />,
   Journal: ({ className }) => <BookOpenText className={className} weight="regular" />,
+  Together: ({ className }) => <Books className={className} weight="regular" />,
   Schedule: ({ className }) => <SealCheck className={className} weight="regular" />,
   Room: ({ className }) => <House className={className} weight="regular" />,
   CheckPhone: ({ className }) => <DeviceMobileCamera className={className} weight="regular" />,
@@ -92,7 +93,8 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Date, name: '见面', icon: 'Date', color: 'pink' },
   { id: AppID.User, name: '档案', icon: 'User', color: 'blue' },
   { id: AppID.Bank, name: '存钱罐', icon: 'Bank', color: 'lime' }, // Hidden
-  { id: AppID.Journal, name: '交换日记', icon: 'Journal', color: 'amber' },
+  { id: AppID.Journal, name: '日记', icon: 'Journal', color: 'emerald' },
+  { id: AppID.Together, name: '一起看', icon: 'Together', color: 'emerald' },
   // { id: AppID.Handbook, name: '手账', icon: 'Handbook', color: 'fuchsia' }, // Hidden temporarily, pending update
   { id: AppID.Social, name: 'Spark', icon: 'Social', color: 'red' },
   { id: AppID.Study, name: '自习室', icon: 'Study', color: 'emerald' },
@@ -100,7 +102,7 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Novel, name: '笔友会', icon: 'Novel', color: 'amber' },
   { id: AppID.Songwriting, name: '写歌', icon: 'Songwriting', color: 'fuchsia' },
   { id: AppID.VRWorld, name: '彼方', icon: 'VRWorld', color: 'indigo' },
-  { id: AppID.Schedule, name: '时光契约', icon: 'Schedule', color: 'cyan' },
+  { id: AppID.Schedule, name: '日程与纪念', icon: 'Schedule', color: 'cyan' },
   { id: AppID.Worldbook, name: '世界书', icon: 'Worldbook', color: 'indigo' },
   { id: AppID.HotNews, name: '热点', icon: 'HotNews', color: 'red' },
   { id: AppID.FAQ, name: '使用帮助', icon: 'FAQ', color: 'indigo' },
