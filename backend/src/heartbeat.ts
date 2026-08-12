@@ -387,6 +387,15 @@ async function insertPlatformShare(input: {
     likes: candidate.likes || 0,
     retweets: candidate.retweets || 0,
   };
+  const duplicate = await input.client.query<{ id: string }>(
+    `SELECT id FROM conversation_events
+     WHERE conversation_id=$1 AND event_type='platform_share'
+       AND metadata->'share'->>'url'=$2
+       AND occurred_at >= now() - interval '30 minutes'
+     ORDER BY occurred_at DESC LIMIT 1`,
+    [input.agent.conversation_id, candidate.url],
+  );
+  if (duplicate.rows[0]?.id) return duplicate.rows[0].id;
   const event = await input.client.query<{ id: string }>(
     `INSERT INTO conversation_events
        (conversation_id, actor_type, event_type, content, metadata, idempotency_key)
@@ -663,7 +672,20 @@ async function processAgent(
       pushBody = decision.content.trim();
       pushEventType = 'proactive_message';
     } else {
-      const event = await client.query<{ id: string }>(
+      const duplicateActivity = toolResult.status === 'completed'
+        ? await client.query<{ id: string }>(
+          `SELECT id FROM conversation_events
+           WHERE conversation_id=$1 AND event_type=$2 AND content=$3
+             AND occurred_at >= now() - interval '30 minutes'
+             AND metadata->>'source'='heartbeat'
+           ORDER BY occurred_at DESC LIMIT 1`,
+          [agent.conversation_id, toolResult.eventType, toolResult.summary],
+        )
+        : { rows: [] as { id: string }[] };
+      if (duplicateActivity.rows[0]?.id) {
+        eventId = duplicateActivity.rows[0].id;
+      }
+      const event = eventId ? null : await client.query<{ id: string }>(
         `INSERT INTO conversation_events
          (conversation_id, actor_type, event_type, content, metadata, idempotency_key)
          VALUES ($1, 'assistant', $2, $3, $4::jsonb, $5)
@@ -676,7 +698,7 @@ async function processAgent(
           ...(toolResult.metadata ?? {}),
         }), `heartbeat:${runId}:explore`],
       );
-      eventId = event.rows[0]?.id;
+      eventId = eventId ?? event?.rows[0]?.id;
     }
 
     if (sharedCandidate) {

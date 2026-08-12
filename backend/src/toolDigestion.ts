@@ -53,11 +53,18 @@ function bounded(value: unknown, max: number): string {
 }
 
 export function parseToolDigestion(text: string): ToolDigestion | null {
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
+  const cleaned = text.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace < 0 || lastBrace <= firstBrace) return null;
   try {
-    const parsed = digestionSchema.safeParse(JSON.parse(text.slice(firstBrace, lastBrace + 1)));
+    const raw = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+    // 兼容副 API 把索引序列化成字符串，或省略可选字段的常见返回差异。
+    for (const key of ['shareCandidateIndex', 'likeCandidateIndex', 'repostCandidateIndex']) {
+      if (typeof raw[key] === 'string' && /^\d+$/.test(raw[key] as string)) raw[key] = Number(raw[key]);
+      if (raw[key] === '' || raw[key] === undefined) raw[key] = null;
+    }
+    const parsed = digestionSchema.safeParse(raw);
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
@@ -130,6 +137,18 @@ export async function requestToolDigestion(input: {
   const message = first && typeof first === 'object' ? (first as Record<string, unknown>).message : undefined;
   const content = message && typeof message === 'object' ? (message as Record<string, unknown>).content : '';
   const parsed = parseToolDigestion(typeof content === 'string' ? content : '');
-  if (!parsed) throw new Error('角色没有返回有效的工具结果反应。');
+  if (!parsed) {
+    const fallback = input.candidates[0];
+    if (fallback) {
+      return {
+        disposition: 'message',
+        content: `我刚看了${fallback.author ? ` ${fallback.author} 的` : ''}「${fallback.title}」，有点想跟你说说。`,
+        shareCandidateIndex: null,
+        likeCandidateIndex: null,
+        repostCandidateIndex: null,
+      };
+    }
+    throw new Error('角色没有返回有效的工具结果反应。');
+  }
   return parsed;
 }
