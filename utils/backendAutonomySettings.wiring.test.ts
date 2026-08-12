@@ -25,6 +25,15 @@ describe('SharkOS backend autonomy settings wiring', () => {
         expect(source).not.toContain('config.token.trim() && <BackendToolSettings');
     });
 
+    it('shows the backend model API form before a model pool exists', () => {
+        const source = read('../components/settings/SharkBackendSettings.tsx');
+        expect(source).toContain('后端模型 API');
+        expect(source).toContain('API 地址');
+        expect(source).toContain('API Key');
+        expect(source).toContain('保存后端模型');
+        expect(source).not.toContain('{modelPool && <div className="space-y-2 rounded-2xl bg-slate-50 p-3">');
+    });
+
     it('keeps the existing XHS autonomy permissions when importing into the backend', () => {
         const source = read('../components/settings/BackendToolSettings.tsx');
         expect(source).toContain("allowShareToChat: local.autonomyPermissions?.shareToChat !== false");

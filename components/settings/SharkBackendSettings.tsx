@@ -361,19 +361,21 @@ const SharkBackendSettings: React.FC = () => {
                     <button disabled={busy !== null || pushConfig.activeSubscriptions === 0} onClick={() => void turnOffPush()} className="shrink-0 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-[10px] font-bold text-emerald-700 disabled:opacity-40">{busy === 'disable-push' ? '关闭中…' : '关闭本机推送'}</button>
                 </div>}
 
-                {modelPool && <div className="space-y-2 rounded-2xl bg-slate-50 p-3">
-                    <div className="flex items-center justify-between"><span className="text-xs font-bold text-slate-700">后端模型池</span><span className="text-[9px] text-slate-400">{modelPool.routing.mode === 'auto' ? '自动故障转移' : '固定模型'}</span></div>
-                    {modelPool.profiles.map(profile => <div key={profile.id} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2">
+                <div className="space-y-2 rounded-2xl bg-slate-50 p-3">
+                    <div className="flex items-center justify-between"><span className="text-xs font-bold text-slate-700">后端模型 API</span><span className="text-[9px] text-slate-400">{modelPool ? (modelPool.routing.mode === 'auto' ? '自动故障转移' : '固定模型') : '等待首次配置'}</span></div>
+                    <p className="text-[9px] leading-relaxed text-slate-500">在这里填写提供商的 API 地址、API Key 和模型名。后端 heartbeat、自主活动与后端工具调用使用这里的模型，不会自动读取聊天页里只保存在当前设备上的前端 API。</p>
+                    {!config.token.trim() && <p className="rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-2 text-[9px] text-amber-700">请先用上方一次性配对码连接服务器，再保存模型配置。</p>}
+                    {(modelPool?.profiles ?? []).map(profile => <div key={profile.id} className="flex items-center gap-2 rounded-xl bg-white px-3 py-2">
                         <button className="min-w-0 flex-1 text-left" onClick={async () => {
                             await updateBackendModelRouting(persistConfig(), { mode: 'fixed', activeProfileId: profile.id });
                             setModelPool(await getBackendModelPool(persistConfig()));
                         }}>
                             <span className="block truncate text-[10px] font-bold text-slate-700">{profile.label} · {profile.model}</span>
-                            <span className="block text-[9px] text-slate-400">{modelPool.routing.activeProfileId === profile.id ? '当前固定' : profile.healthStatus}</span>
+                            <span className="block text-[9px] text-slate-400">{modelPool?.routing.activeProfileId === profile.id ? '当前固定' : profile.healthStatus}</span>
                         </button>
                         {!profile.readOnly && <button onClick={async () => { await deleteBackendModelProfile(persistConfig(), profile.id); setModelPool(await getBackendModelPool(persistConfig())); }} className="text-[10px] text-red-400">删除</button>}
                     </div>)}
-                    <button onClick={async () => { await updateBackendModelRouting(persistConfig(), { mode: 'auto', activeProfileId: null }); setModelPool(await getBackendModelPool(persistConfig())); }} className="w-full rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600">使用自动故障转移</button>
+                    {modelPool && <button onClick={async () => { await updateBackendModelRouting(persistConfig(), { mode: 'auto', activeProfileId: null }); setModelPool(await getBackendModelPool(persistConfig())); }} className="w-full rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600">使用自动故障转移</button>}
                     <div className="grid grid-cols-2 gap-2">
                         <input value={newModel.label} onChange={event => setNewModel(value => ({ ...value, label: event.target.value }))} placeholder="名称" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
                         <input list="sharkos-backend-models" value={newModel.model} onChange={event => setNewModel(value => ({ ...value, model: event.target.value }))} placeholder="模型名" className="rounded-lg border border-slate-200 px-2 py-2 text-[10px]" />
@@ -382,10 +384,10 @@ const SharkBackendSettings: React.FC = () => {
                     </div>
                     <datalist id="sharkos-backend-models">{discoveredModels.map(model => <option key={model} value={model} />)}</datalist>
                     <div className="grid grid-cols-2 gap-2">
-                        <button disabled={busy !== null || !newModel.baseUrl || !newModel.apiKey} onClick={() => void discoverModels()} className="rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600 disabled:opacity-40">{busy === 'discover-models' ? '读取中…' : '自动读取模型'}</button>
-                        <button disabled={busy !== null || !newModel.baseUrl || !newModel.apiKey || !newModel.model} onClick={() => void addModel()} className="rounded-lg bg-slate-700 py-2 text-[10px] font-bold text-white disabled:opacity-40">{busy === 'model' ? '保存中…' : '加入模型池'}</button>
+                        <button disabled={busy !== null || !config.token.trim() || !newModel.baseUrl || !newModel.apiKey} onClick={() => void discoverModels()} className="rounded-lg border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-600 disabled:opacity-40">{busy === 'discover-models' ? '读取中…' : '自动读取模型'}</button>
+                        <button disabled={busy !== null || !config.token.trim() || !newModel.baseUrl || !newModel.apiKey || !newModel.model} onClick={() => void addModel()} className="rounded-lg bg-slate-700 py-2 text-[10px] font-bold text-white disabled:opacity-40">{busy === 'model' ? '保存中…' : '保存后端模型'}</button>
                     </div>
-                </div>}
+                </div>
 
                 <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 text-[10px] leading-relaxed text-amber-800">完整同步以当前手机为权威快照：相同 ID 更新而不是新增；最终 reconcile 会移除后端中手机已不存在的旧迁移副本。请先导入最完整的手机备份。</div>
                 <button disabled={busy !== null || !config.token.trim()} onClick={() => void syncAll()} className="w-full rounded-2xl bg-sky-600 py-3 text-sm font-bold text-white disabled:opacity-50">{busy === 'sync' ? '正在完整同步…' : '完整同步角色、聊天与记忆宫殿'}</button>
