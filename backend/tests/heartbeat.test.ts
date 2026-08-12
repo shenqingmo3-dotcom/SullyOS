@@ -111,7 +111,7 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('自然闲聊');
     expect(prompt).toContain('不必先使用工具');
     expect(prompt).toContain('早安、醒来后的惦记或生活开场是正常联系');
-    expect(prompt).toContain('不能把旧场景当作拒绝联系的唯一理由');
+    expect(prompt).toContain('不能把旧姿势当作拒绝联系的唯一理由');
     expect(prompt).toContain('条数由你决定');
     expect(prompt).not.toContain('符合你性格和上下文的一两句');
     expect(prompt).toContain('线下共处模式和地点按当前设置持续有效');
