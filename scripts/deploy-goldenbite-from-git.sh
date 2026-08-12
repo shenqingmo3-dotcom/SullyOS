@@ -32,7 +32,7 @@ docker run --rm \
   -v "${source_dir}:/workspace" \
   -w /workspace \
   node:24-bookworm-slim \
-  bash -lc 'corepack enable && pnpm install --frozen-lockfile && pnpm build'
+  bash -lc 'mkdir -p .deploy-cache/bin && corepack enable --install-directory .deploy-cache/bin && export PATH="/workspace/.deploy-cache/bin:$PATH" && pnpm install --frozen-lockfile && pnpm build'
 
 compose=(docker compose --env-file "${live_backend}/.env.production" -f "${live_backend}/compose.production.yaml")
 worker_running=false
