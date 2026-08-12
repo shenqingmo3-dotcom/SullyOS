@@ -42,7 +42,7 @@ function mockRevokeObjectURL(url: string): void {
 const RED_PIXEL_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
 
-import { injectPwaIcon, clearPwaIcon, initPwaIcon, PWA_ICON_APP_ID } from './appIcon';
+import { injectPwaIcon, clearPwaIcon, initPwaIcon, PWA_ICON_APP_ID, PWA_ICON_INSTALL_CACHE_KEY } from './appIcon';
 
 // ── helpers ─────────────────────────────────────────────────────────
 
@@ -199,6 +199,7 @@ describe('injectPwaIcon', () => {
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(RED_PIXEL_PNG);
     expect(links[0].classList.contains('sully-custom-pwa-icon')).toBe(true);
+    expect(localStorage.getItem(PWA_ICON_INSTALL_CACHE_KEY)).toBe(RED_PIXEL_PNG);
   });
 });
 
@@ -272,6 +273,7 @@ describe('clearPwaIcon', () => {
     expect(getAppleTouchIconHref()).toBe('./icons/apple-touch-icon.png');
     expect(document.querySelectorAll('link[rel="apple-touch-icon"]')).toHaveLength(1);
     expect(getManifestHref()).toBe(ORIGINAL_MANIFEST_HREF);
+    expect(localStorage.getItem(PWA_ICON_INSTALL_CACHE_KEY)).toBeNull();
   });
 
   it('没注入过时调用 clear 也不抛异常', () => {

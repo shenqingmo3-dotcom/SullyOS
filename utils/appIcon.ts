@@ -11,6 +11,7 @@
 import { getBlobForRef, isBlobRef, blobToDataUrl } from './blobRef';
 
 export const PWA_ICON_APP_ID = '_pwa_';
+export const PWA_ICON_INSTALL_CACHE_KEY = 'sharkos.pwaIcon.install.v1';
 
 const ATI_SELECTOR = 'link[rel="apple-touch-icon"]';
 const CUSTOM_ATI_CLASS = 'sully-custom-pwa-icon';
@@ -30,6 +31,11 @@ export async function injectPwaIcon(value: string): Promise<void> {
   const dataUrl = await resolveIconValue(value);
   if (!dataUrl) return;
 
+  try {
+    localStorage.setItem(PWA_ICON_INSTALL_CACHE_KEY, dataUrl);
+  } catch (error) {
+    console.warn('[PWA Icon] 无法保存安装图标缓存', error);
+  }
   injectAppleTouchIcon(dataUrl);
 
   await replaceManifest(dataUrl);
@@ -37,6 +43,11 @@ export async function injectPwaIcon(value: string): Promise<void> {
 
 /** 恢复默认图标：删掉注入的 link，manifest 指回原始文件。 */
 export function clearPwaIcon(): void {
+  try {
+    localStorage.removeItem(PWA_ICON_INSTALL_CACHE_KEY);
+  } catch {
+    // localStorage 被浏览器禁用时，仍继续恢复当前 DOM。
+  }
   clearAppleTouchIcon();
 
   const link = document.querySelector(MANIFEST_SELECTOR) as HTMLLinkElement | null;
