@@ -35,6 +35,7 @@ import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyti
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
 import SharkBackendSettings from '../components/settings/SharkBackendSettings';
+import { loadBackendChatConfig, getBackendXSession, updateBackendXSession, type BackendXSessionStatus } from '../utils/backendClient';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -578,6 +579,44 @@ const Settings: React.FC = () => {
   const [rtXhsPlatform, setRtXhsPlatform] = useState<'xhs' | 'rednote' | undefined>(realtimeConfig.xhsMcpConfig?.platform);
   const [rtXhsGuideOpen, setRtXhsGuideOpen] = useState(false);
   const [rtTestStatus, setRtTestStatus] = useState('');
+
+  // 黑 X 复用 VPS 持久 Chrome 会话；这里提供设置页入口，和后端工具卡片使用同一套接口。
+  const [xSession, setXSession] = useState<BackendXSessionStatus | null>(null);
+  const [xAuthToken, setXAuthToken] = useState('');
+  const [xCt0, setXCt0] = useState('');
+  const [xChecking, setXChecking] = useState(false);
+  const [xStatus, setXStatus] = useState('');
+  const [xSelfHandle, setXSelfHandle] = useState('');
+  const xBackendConfig = loadBackendChatConfig();
+
+  const checkXSession = async () => {
+    if (!xBackendConfig.token.trim()) { setXStatus('请先在 SharkOS 自主后端完成配对'); return; }
+    setXChecking(true);
+    try {
+      const result = await getBackendXSession(xBackendConfig);
+      setXSession(result);
+      setXSelfHandle(result.selfHandle || '');
+      setXStatus(result.loggedIn ? 'X 当前登录有效' : 'X 尚未登录');
+    } catch (error) {
+      setXStatus(error instanceof Error ? error.message : '读取 X 登录状态失败');
+    } finally { setXChecking(false); }
+  };
+
+  const saveXSession = async () => {
+    if (!xBackendConfig.token.trim()) { setXStatus('请先在 SharkOS 自主后端完成配对'); return; }
+    if (!xAuthToken.trim()) { setXStatus('请粘贴 X 的 auth_token'); return; }
+    setXChecking(true);
+    try {
+      const result = await updateBackendXSession(xBackendConfig, { authToken: xAuthToken.trim(), ct0: xCt0.trim() });
+      setXSession(result);
+      setXSelfHandle(result.selfHandle || '');
+      setXAuthToken('');
+      setXCt0('');
+      setXStatus(result.loggedIn ? 'Cookie 已注入，X 登录有效' : 'Cookie 已注入，但 X 未识别为登录');
+    } catch (error) {
+      setXStatus(error instanceof Error ? error.message : '保存 X 登录状态失败');
+    } finally { setXChecking(false); }
+  };
 
   // 麦当劳 MCP (token / 启用态都直接存 localStorage, 不进 realtimeConfig)
   const [mcdToken, setMcdTokenState] = useState(() => getMcdToken());
@@ -3647,6 +3686,26 @@ const Settings: React.FC = () => {
                           </p>
                       </div>
                   )}
+              </div>
+
+              {/* 黑 X：与小红书 Lite 并列，复用自主后端的持久登录会话 */}
+              <div className="bg-slate-100/70 p-4 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                          <span className="text-lg font-black text-slate-900">𝕏</span>
+                          <span className="text-sm font-bold text-slate-800">黑 X</span>
+                          <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full">VPS Chrome</span>
+                      </div>
+                      <button type="button" disabled={xChecking} onClick={() => void checkXSession()} className="text-[10px] bg-slate-900 text-white px-3 py-1.5 rounded-full font-bold disabled:opacity-40">检查登录</button>
+                  </div>
+                  <p className="text-[10px] text-slate-600/80 leading-relaxed">角色自主活动使用的黑 X。Cookie 注入你自己的 VPS Chrome，与后端工具里的黑 X 共用同一会话。</p>
+                  <div className="grid grid-cols-2 gap-2">
+                      <input type="password" value={xAuthToken} onChange={e => setXAuthToken(e.target.value)} placeholder="auth_token" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[10px] font-mono" />
+                      <input type="password" value={xCt0} onChange={e => setXCt0(e.target.value)} placeholder="ct0（可留空）" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[10px] font-mono" />
+                  </div>
+                  <button type="button" disabled={xChecking} onClick={() => void saveXSession()} className="w-full py-2 bg-slate-900 text-white text-xs font-bold rounded-xl disabled:opacity-40">注入 Cookie 到 VPS</button>
+                  <input value={xSelfHandle} onChange={e => setXSelfHandle(e.target.value.replace(/^@/, '').trim())} placeholder="自己的 X 用户名（不带 @）" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[11px]" />
+                  {xStatus && <p className={`text-[10px] rounded-lg px-2 py-1.5 ${xSession?.loggedIn ? 'bg-emerald-50 text-emerald-700' : 'bg-white/80 text-slate-600'}`}>{xStatus}</p>}
               </div>
 
               {/* 小红书自动化 */}
