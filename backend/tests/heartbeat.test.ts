@@ -114,6 +114,8 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('不能把旧场景当作拒绝联系的唯一理由');
     expect(prompt).toContain('条数由你决定');
     expect(prompt).not.toContain('符合你性格和上下文的一两句');
+    expect(prompt).toContain('线下共处模式和地点按当前设置持续有效');
+    expect(prompt).not.toContain('所在地点等线下状态不会无期限延续');
   });
 
   it('does not let a model-selected silence skip the rest of the morning', () => {
