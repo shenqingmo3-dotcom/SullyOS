@@ -451,6 +451,15 @@ async function runXhsLite(connection: ToolConnection, goal: string): Promise<Too
   };
 }
 
+export async function readXFeed(input: { view: 'home' | 'notifications' | 'profile'; handle?: string }): Promise<{ items: ToolShareCandidate[]; view: string; fetchedAt: string }> {
+  const connection = await getToolConnection('x.read');
+  if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
+  const goal = input.view === 'notifications' ? '通知' : input.view === 'profile'
+    ? `我的主页${input.handle ? ` 用户: ${input.handle}` : ''}` : '首页';
+  const result = await runMcp(connection, goal);
+  return { items: result.shareCandidates || [], view: input.view, fetchedAt: new Date().toISOString() };
+}
+
 export async function runWebSearch(connection: ToolConnection, goal: string): Promise<ToolRunResult> {
   const endpoint = connection.endpoint || 'https://api.search.brave.com/res/v1/web/search';
   const apiKey = connection.credentials.bearerToken || connection.credentials.apiKey;

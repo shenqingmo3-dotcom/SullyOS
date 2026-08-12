@@ -31,6 +31,7 @@ const xSessionSchema = z.object({
   authToken: z.string().min(10).max(1_000),
   ct0: z.string().max(1_000).optional().default(''),
 });
+const xFeedSchema = z.object({ view: z.enum(['home', 'notifications', 'profile']).default('home'), handle: z.string().max(100).optional() });
 
 interface ConnectionRow {
   id: ToolConnectionId;
@@ -147,6 +148,18 @@ export async function registerToolConnectionRoutes(app: FastifyInstance): Promis
     return { data: status };
   });
 
+  app.post('/v1/tools/x.read/feed', async (request, reply) => {
+    const input = xFeedSchema.parse(request.body ?? {});
+    const connection = await getToolConnection('x.read');
+    if (!connection?.enabled || !connection.endpoint) return reply.code(400).send({ error: { code: 'x_not_configured', message: 'X 工具尚未启用' } });
+    try {
+      const { readXFeed } = await import('./toolRunner.js');
+      return { data: await readXFeed(input) };
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'x_feed_failed', message: error instanceof Error ? error.message : 'X Feed 读取失败' } });
+    }
+  });
+
   app.put('/v1/tools/:id', async (request) => {
     const id = connectionIdSchema.parse((request.params as { id?: unknown }).id);
     const input = patchSchema.parse(request.body);
@@ -178,13 +191,16 @@ export async function registerToolConnectionRoutes(app: FastifyInstance): Promis
 
   app.post('/v1/tools/phone.read/device-token', async (_request, reply) => {
     const existing = await getToolConnection('phone.read');
-    if (!existing) {
-      return reply.code(404).send({
-        error: { code: 'phone_not_configured', message: '请先保存一次 iPhone 屏幕查看设置。' },
-      });
-    }
     const deviceToken = randomBytes(24).toString('base64url');
-    const credentials = { ...existing.credentials, deviceToken };
+    const credentials = { ...(existing?.credentials ?? {}), deviceToken };
+    if (!existing) {
+      await pool.query(
+        `INSERT INTO external_tool_connections
+           (id, label, enabled, endpoint, settings, credentials_ciphertext, updated_at)
+         VALUES ('phone.read','iPhone 屏幕查看',true,'','{}'::jsonb,$1,now())`,
+        [encryptSecret(JSON.stringify(credentials))],
+      );
+    }
     await pool.query(
       `UPDATE external_tool_connections
        SET credentials_ciphertext=$2, updated_at=now()

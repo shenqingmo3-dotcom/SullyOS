@@ -31,6 +31,8 @@ type CalendarEvent = {
     adjusted?: boolean;
     avatar?: string;
     task?: Task;
+    scheduleId?: string;
+    slotIndex?: number;
 };
 
 const pad = (value: number) => String(value).padStart(2, '0');
@@ -45,6 +47,9 @@ const minuteOf = (time = '09:00') => {
     const [hour, minute] = time.split(':').map(Number);
     return (hour || 0) * 60 + (minute || 0);
 };
+const anniversaryCreator = (anniversary: Anniversary): 'user' | 'character' => (
+    anniversary.createdBy || (anniversary.id.startsWith('anni-') ? 'character' : 'user')
+);
 
 const ScheduleApp: React.FC = () => {
     const {
@@ -73,6 +78,7 @@ const ScheduleApp: React.FC = () => {
     const [endTime, setEndTime] = useState('10:00');
     const [location, setLocation] = useState('');
     const [note, setNote] = useState('');
+    const [anniversaryNote, setAnniversaryNote] = useState('');
     const [repeatWeekly, setRepeatWeekly] = useState(false);
     const [anniversaryDate, setAnniversaryDate] = useState(selectedDate);
 
@@ -165,6 +171,8 @@ const ScheduleApp: React.FC = () => {
             note: slot.description,
             adjusted: Boolean(slot.adjusted),
             avatar: selectedCharacter.avatar,
+            scheduleId: schedule.id,
+            slotIndex: index,
         }));
     };
 
@@ -194,6 +202,7 @@ const ScheduleApp: React.FC = () => {
         setEndTime('10:00');
         setLocation('');
         setNote('');
+        setAnniversaryNote('');
         setRepeatWeekly(false);
         setAnniversaryDate(selectedDate);
         setComposer(null);
@@ -230,12 +239,41 @@ const ScheduleApp: React.FC = () => {
             title: title.trim(),
             date: anniversaryDate,
             charId: selectedCharacter?.id || '',
+            createdBy: 'user',
+            note: anniversaryNote.trim() || undefined,
             countMode: 'auto',
         };
         await DB.saveAnniversary(anniversary);
         setAnniversaries(current => [...current, anniversary]);
         addToast('纪念日已经收好', 'success');
         resetComposer();
+    };
+
+    const deleteAnniversary = async (anniversary: Anniversary) => {
+        await DB.deleteAnniversary(anniversary.id);
+        setAnniversaries(current => current.filter(item => item.id !== anniversary.id));
+        addToast('纪念日已删除', 'success');
+    };
+
+    const deleteCharacterEvent = async (event: CalendarEvent) => {
+        if (!event.scheduleId || event.slotIndex === undefined) return;
+        const schedule = dailySchedules.find(item => item.id === event.scheduleId);
+        if (!schedule) return;
+        const next = { ...schedule, slots: schedule.slots.filter((_, index) => index !== event.slotIndex) };
+        if (next.slots.length === 0) await DB.deleteDailySchedule(schedule.charId, schedule.date);
+        else await DB.saveDailySchedule(next);
+        setDailySchedules(current => next.slots.length === 0 ? current.filter(item => item.id !== schedule.id) : current.map(item => item.id === schedule.id ? next : item));
+        addToast('这段角色日程已删除', 'success');
+    };
+
+    const useLongPress = (callback: () => void) => {
+        let timer: number | undefined;
+        return {
+            onPointerDown: () => { timer = window.setTimeout(callback, 650); },
+            onPointerUp: () => { if (timer !== undefined) window.clearTimeout(timer); },
+            onPointerLeave: () => { if (timer !== undefined) window.clearTimeout(timer); },
+            onContextMenu: (event: React.MouseEvent) => event.preventDefault(),
+        };
     };
 
     const deleteUserEvent = async (event: CalendarEvent) => {
@@ -372,7 +410,7 @@ const ScheduleApp: React.FC = () => {
                             {selectedEvents.length ? (
                                 <div className="relative mt-4 space-y-3 before:absolute before:bottom-3 before:left-[45px] before:top-3 before:w-px before:bg-[#d8d4c9]">
                                     {selectedEvents.map(event => (
-                                        <article key={event.id} className="relative grid grid-cols-[36px_1fr] gap-4">
+                                        <article key={event.id} className="relative grid grid-cols-[36px_1fr] gap-4" {...(event.owner === 'user' && event.task ? useLongPress(() => void deleteUserEvent(event)) : event.owner === 'character' ? useLongPress(() => void deleteCharacterEvent(event)) : {})}>
                                             <time className="pt-4 text-right font-mono text-[10px] text-[#8a867b]">{event.startTime}</time>
                                             <div className={`relative rounded-[18px] border px-4 py-3 shadow-[0_5px_15px_rgba(75,67,44,0.06)] ${event.owner === 'character' ? 'border-[#ddd4bb] bg-[#f3efe3]' : 'border-[#b9dcd2] bg-[#e2f3ed]'}`}>
                                                 <span className={`absolute -left-[21px] top-[18px] h-2.5 w-2.5 rounded-full border-2 border-[#fffdf9] ${event.owner === 'character' ? 'bg-[#b7aa85]' : 'bg-[#78b6a5]'}`} />
@@ -421,17 +459,20 @@ const ScheduleApp: React.FC = () => {
                                 .map((anniversary, index) => {
                                     const dayDifference = Math.round((fromDateKey(anniversary.date).getTime() - fromDateKey(todayKey).getTime()) / 86400000);
                                     const isFuture = anniversary.countMode === 'countdown' || (anniversary.countMode !== 'countup' && dayDifference >= 0);
-                                    const character = selectedCharacter;
+                                    const creator = anniversaryCreator(anniversary);
+                                    const character = creator === 'character' ? selectedCharacter : null;
+                                    const avatar = creator === 'character' ? character?.avatar : userProfile.avatar;
                                     return (
-                                        <article key={anniversary.id} className={`relative overflow-hidden rounded-[22px] border p-4 shadow-[0_7px_18px_rgba(76,65,36,0.08)] ${index % 2 === 0 ? 'rotate-[-0.4deg] border-[#ddd4bb] bg-[#f3efe3]' : 'rotate-[0.35deg] border-[#badbd1] bg-[#e2f3ed]'}`}>
+                                        <article key={anniversary.id} {...useLongPress(() => void deleteAnniversary(anniversary))} className={`relative overflow-hidden rounded-[22px] border p-4 shadow-[0_7px_18px_rgba(76,65,36,0.08)] ${index % 2 === 0 ? 'rotate-[-0.4deg] border-[#ddd4bb] bg-[#f3efe3]' : 'rotate-[0.35deg] border-[#badbd1] bg-[#e2f3ed]'}`}>
                                             <span className="absolute right-4 top-0 h-6 w-16 -translate-y-2 rotate-[4deg] bg-white/45" />
                                             <span aria-hidden="true" className="absolute bottom-2 right-3 rotate-[8deg] text-[16px] opacity-55">{['💌', '🌱', '🦊', '🧁', '🌄'][index % 5]}</span>
                                             <div className="flex items-start justify-between gap-4">
                                                 <div className="flex min-w-0 items-center gap-3">
-                                                    {character?.avatar ? <img src={character.avatar} alt="" className="h-11 w-11 rounded-full border-2 border-white/80 object-cover shadow-sm" /> : <div className="grid h-11 w-11 place-items-center rounded-full bg-[#c9bd99] text-[#504a3c]"><Heart size={20} weight="fill" /></div>}
+                                                    {avatar ? <img src={avatar} alt="" className="h-11 w-11 rounded-full border-2 border-white/80 object-cover shadow-sm" /> : <div className="grid h-11 w-11 place-items-center rounded-full bg-[#c9bd99] text-[#504a3c]"><Heart size={20} weight="fill" /></div>}
                                                     <div className="min-w-0">
                                                         <p className="truncate text-[15px] font-semibold">{anniversary.title}</p>
-                                                        <p className="mt-1 font-mono text-[9px] tracking-wider text-[#777267]">{anniversary.date}</p>
+                                                        <p className="mt-1 font-mono text-[9px] tracking-wider text-[#777267]">{anniversary.date} · {creator === 'character' ? `${character?.name || '角色'} 添加` : '我添加'}</p>
+                                                        {anniversary.note && <p className="mt-2 text-[11px] leading-5 text-[#66645d]">{anniversary.note}</p>}
                                                     </div>
                                                 </div>
                                                 <div className="shrink-0 text-right">
@@ -493,10 +534,13 @@ const ScheduleApp: React.FC = () => {
                                     <input value={note} onChange={event => setNote(event.target.value)} placeholder="备注（可不填）" className="w-full rounded-[18px] border border-[#ddd7c8] bg-white px-4 py-3 text-[13px] outline-none" />
                                 </>
                             ) : (
-                                <label className="block rounded-[18px] border border-[#ddd4bb] bg-[#f3efe3] px-4 py-3">
-                                    <span className="block text-[9px] font-semibold text-[#6f654d]">日期</span>
-                                    <input type="date" value={anniversaryDate} onChange={event => setAnniversaryDate(event.target.value)} className="mt-1 w-full bg-transparent text-[14px] font-semibold outline-none" />
-                                </label>
+                                <>
+                                    <label className="block rounded-[18px] border border-[#ddd4bb] bg-[#f3efe3] px-4 py-3">
+                                        <span className="block text-[9px] font-semibold text-[#6f654d]">日期</span>
+                                        <input type="date" value={anniversaryDate} onChange={event => setAnniversaryDate(event.target.value)} className="mt-1 w-full bg-transparent text-[14px] font-semibold outline-none" />
+                                    </label>
+                                    <textarea value={anniversaryNote} onChange={event => setAnniversaryNote(event.target.value)} maxLength={240} rows={2} placeholder="备注（可写一两句话）" className="w-full resize-none rounded-[18px] border border-[#ddd7c8] bg-white px-4 py-3 text-[13px] outline-none" />
+                                </>
                             )}
                         </div>
 

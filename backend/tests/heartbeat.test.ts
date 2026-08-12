@@ -57,6 +57,16 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('不得复用其标题、核心事件、显眼数字');
   });
 
+  it('keeps ordinary autonomous messages open to varied life contact', () => {
+    const prompt = buildHeartbeatDecisionPrompt({
+      agentName: '测试角色', intervalMinutes: 5, policy: normalizeAutonomyPolicy({}),
+    });
+    expect(prompt).toContain('普通聊天是和 diary、comment、explore 并列的自主出口');
+    expect(prompt).toContain('想念用户');
+    expect(prompt).toContain('自然闲聊');
+    expect(prompt).toContain('不必先使用工具');
+  });
+
   it('turns off the diary action after the character has written today', () => {
     const prompt = buildHeartbeatDecisionPrompt({
       agentName: '测试角色', intervalMinutes: 5,

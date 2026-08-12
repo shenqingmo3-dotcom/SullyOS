@@ -403,6 +403,10 @@ const SharkBackendSettings: React.FC = () => {
                             <div className="min-w-0 flex-1">
                                 <div className="truncate text-xs font-bold text-slate-700">{agent.name}</div>
                                 <div className="mt-0.5 text-[9px] text-slate-400">{agent.enabled ? `下次计划：${agent.nextWakeAt ? new Date(agent.nextWakeAt).toLocaleString() : '等待调度'}` : '自主 heartbeat 已关闭'}</div>
+                                {agent.lastRun && <div className={`mt-1 rounded-lg px-2 py-1 text-[9px] leading-relaxed ${agent.lastRun.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-500'}`}>
+                                    <div>上次苏醒：{new Date(agent.lastRun.at).toLocaleString()} · {agent.lastRun.status === 'failed' ? '失败' : `动作 ${agent.lastRun.action || 'none'}`}</div>
+                                    {agent.lastRun.error || agent.lastRun.reason ? <div className="mt-0.5 break-words">{agent.lastRun.error || agent.lastRun.reason}</div> : null}
+                                </div>}
                             </div>
                             <button
                                 type="button"

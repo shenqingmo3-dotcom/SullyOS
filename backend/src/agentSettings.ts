@@ -34,6 +34,11 @@ interface AgentSettingsRow {
   autonomy_policy: unknown;
   last_heartbeat_at: Date | null;
   next_wake_at: Date | null;
+  last_run_status: string | null;
+  last_run_action: string | null;
+  last_run_reason: string | null;
+  last_run_error: string | null;
+  last_run_at: Date | null;
 }
 
 function publicAgent(row: AgentSettingsRow) {
@@ -46,6 +51,13 @@ function publicAgent(row: AgentSettingsRow) {
     policy: normalizeAutonomyPolicy(row.autonomy_policy),
     lastHeartbeatAt: row.last_heartbeat_at?.toISOString() ?? null,
     nextWakeAt: row.next_wake_at?.toISOString() ?? null,
+    lastRun: row.last_run_at ? {
+      status: row.last_run_status,
+      action: row.last_run_action,
+      reason: row.last_run_reason,
+      error: row.last_run_error,
+      at: row.last_run_at.toISOString(),
+    } : null,
   };
 }
 
@@ -54,9 +66,16 @@ export async function registerAgentSettingsRoutes(app: FastifyInstance): Promise
     const connectedIds = await connectedCapabilityIds();
     const result = await pool.query<AgentSettingsRow>(
       `SELECT a.external_id, a.name, a.heartbeat_enabled, a.heartbeat_interval_minutes, a.timezone,
-              a.autonomy_policy, s.last_heartbeat_at, s.next_wake_at
+              a.autonomy_policy, s.last_heartbeat_at, s.next_wake_at,
+              wr.status AS last_run_status, wr.action AS last_run_action,
+              wr.reason_summary AS last_run_reason, wr.error_message AS last_run_error,
+              wr.started_at AS last_run_at
        FROM characters a
        LEFT JOIN agent_state s ON s.agent_id=a.id
+       LEFT JOIN LATERAL (
+         SELECT status, action, reason_summary, error_message, started_at
+         FROM wake_runs WHERE agent_id=a.id ORDER BY started_at DESC LIMIT 1
+       ) wr ON true
        WHERE a.owner_user_id=$1 AND a.external_id <> '__demo__'
        ORDER BY a.updated_at DESC`,
       [DEFAULT_USER_ID],
@@ -113,8 +132,15 @@ export async function registerAgentSettingsRoutes(app: FastifyInstance): Promise
 
     const refreshed = await pool.query<AgentSettingsRow>(
       `SELECT a.external_id, a.name, a.heartbeat_enabled, a.heartbeat_interval_minutes, a.timezone,
-              a.autonomy_policy, s.last_heartbeat_at, s.next_wake_at
+              a.autonomy_policy, s.last_heartbeat_at, s.next_wake_at,
+              wr.status AS last_run_status, wr.action AS last_run_action,
+              wr.reason_summary AS last_run_reason, wr.error_message AS last_run_error,
+              wr.started_at AS last_run_at
        FROM characters a LEFT JOIN agent_state s ON s.agent_id=a.id
+       LEFT JOIN LATERAL (
+         SELECT status, action, reason_summary, error_message, started_at
+         FROM wake_runs WHERE agent_id=a.id ORDER BY started_at DESC LIMIT 1
+       ) wr ON true
        WHERE a.owner_user_id=$1 AND a.external_id=$2`,
       [DEFAULT_USER_ID, params.characterId],
     );

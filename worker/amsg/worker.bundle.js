@@ -6231,7 +6231,7 @@ var buildTaskInstruction = (mode, promptHint) => {
   }
   return [
     "\u8FD9\u662F\u4E00\u6761\u9700\u8981 AI \u81EA\u4E3B\u751F\u6210\u7684\u4E3B\u52A8\u6D88\u606F\u3002",
-    "\u8BF7\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u5173\u7CFB\u72B6\u6001\u3001\u6700\u8FD1\u4E0A\u4E0B\u6587\u4E0E\u5F53\u524D\u65F6\u95F4\uFF0C\u81EA\u7136\u5730\u4E3B\u52A8\u627E\u7528\u6237\u8BF4\u4E00\u5230\u4E09\u53E5\u79C1\u804A\u6D88\u606F\u3002",
+    "\u8BF7\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u5173\u7CFB\u72B6\u6001\u3001\u6700\u8FD1\u4E0A\u4E0B\u6587\u4E0E\u5F53\u524D\u65F6\u95F4\uFF0C\u81EA\u7136\u5730\u4E3B\u52A8\u627E\u7528\u6237\u8BF4\u4E00\u5230\u4E09\u53E5\u79C1\u804A\u6D88\u606F\u3002\u666E\u901A\u751F\u6D3B\u8FD1\u51B5\u3001\u6B63\u5728\u505A\u7684\u4E8B\u3001\u60F3\u5FF5\u3001\u7A81\u7136\u60F3\u5230\u7684\u5C0F\u4E8B\u6216\u81EA\u7136\u95F2\u804A\u90FD\u53EF\u4EE5\u6210\u4E3A\u5185\u5BB9\uFF0C\u4E0D\u8981\u56FA\u5B9A\u6210\u5355\u4E00\u4E3B\u9898\uFF0C\u4E5F\u4E0D\u5FC5\u7B49\u5F85\u7279\u6B8A\u4E8B\u4EF6\u3002",
     promptHint?.trim() ? `\u53EF\u9009\u7075\u611F\u8865\u5145\uFF1A${promptHint.trim()}` : "\u53EF\u9009\u7075\u611F\u8865\u5145\uFF1A\u65E0"
   ].join("\n");
 };
@@ -10231,8 +10231,8 @@ var SIDE_EFFECT_TAGS = [
   // 里的 extractTransferCommands, 那份解析跟客户端共用一份源码, 且要认模仿历史日志的口语形态。
   // [[ACTION:ADD_EVENT|title|date]]
   {
-    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/g,
-    toDirective: (m) => ({ type: "add_event", title: m[1], date: m[2] })
+    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)(?:\s*\|\s*(.*?))?\]\]/g,
+    toDirective: (m) => ({ type: "add_event", title: m[1], date: m[2], ...m[3] ? { note: m[3] } : {} })
   },
   // [schedule_message | time | fixed | text]  (note: 单方括号, 跟原 chatParser 一致)
   {

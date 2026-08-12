@@ -229,6 +229,7 @@ export async function buildAgentContextMessages(input: {
     target.refined_memories ? `## 已整理记忆\n${limited(target.refined_memories, 30_000)}` : '',
     formatNpcNetwork(metadata),
     input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
+    input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。' : '',
     (() => {
       const mode = metadata.interactionMode === 'offline' ? 'offline' : 'online';
       const scene = metadata.interactionScene && typeof metadata.interactionScene === 'object'

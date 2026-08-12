@@ -162,7 +162,7 @@ export type PostProcessDirective =
     | { type: 'transfer'; amount: number }
     | { type: 'transfer_accept' }
     | { type: 'transfer_return' }
-    | { type: 'add_event'; title: string; date: string }
+    | { type: 'add_event'; title: string; date: string; note?: string }
     | { type: 'schedule_message'; time: string; text: string }
     // song 是主动消息 2.0 的定时路径后补的「角色说的是哪首歌」（见 chatParser 的
     // FrozenMusicSong）；标签里只有歌单名带不动它，所以单独走 directive 字段。
@@ -212,7 +212,7 @@ function reconstructDirectiveTags(directives: PostProcessDirective[] | undefined
                 parts.push('[[ACTION:TRANSFER_RETURN]]');
                 break;
             case 'add_event':
-                parts.push(`[[ACTION:ADD_EVENT|${d.title}|${d.date}]]`);
+                parts.push(`[[ACTION:ADD_EVENT|${d.title}|${d.date}${d.note ? `|${d.note}` : ''}]]`);
                 break;
             case 'schedule_message':
                 parts.push(`[schedule_message | ${d.time} | fixed | ${d.text}]`);

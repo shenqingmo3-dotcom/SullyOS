@@ -196,7 +196,7 @@ export const buildTaskInstruction = (mode: ActiveMsg2Mode, promptHint?: string):
   }
   return [
     '这是一条需要 AI 自主生成的主动消息。',
-    '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
+    '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。普通生活近况、正在做的事、想念、突然想到的小事或自然闲聊都可以成为内容，不要固定成单一主题，也不必等待特殊事件。',
     promptHint?.trim() ? `可选灵感补充：${promptHint.trim()}` : '可选灵感补充：无',
   ].join('\n');
 };

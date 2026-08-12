@@ -117,6 +117,13 @@ export interface BackendAgentAutonomy {
     };
     lastHeartbeatAt: string | null;
     nextWakeAt: string | null;
+    lastRun: {
+        status: string | null;
+        action: string | null;
+        reason: string | null;
+        error: string | null;
+        at: string;
+    } | null;
 }
 
 export interface BackendAgentsResult {
@@ -497,6 +504,14 @@ export async function updateBackendXSession(
         method: 'POST', body: JSON.stringify(input),
     });
     return result.data as BackendXSessionStatus;
+}
+
+export interface BackendXFeedItem {
+    platform: 'x'; url: string; title: string; description: string; author: string; imageUrl?: string; likes?: number;
+}
+export async function getBackendXFeed(config: BackendChatConfig, input: { view: 'home' | 'notifications' | 'profile'; handle?: string }): Promise<{ items: BackendXFeedItem[]; view: string; fetchedAt: string }> {
+    const result = await backendFetch(config, '/v1/tools/x.read/feed', { method: 'POST', body: JSON.stringify(input) });
+    return result.data;
 }
 
 export interface BackendPhoneDeviceTokenResult {

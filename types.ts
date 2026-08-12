@@ -3359,6 +3359,9 @@ export interface Anniversary {
     title: string;
     date: string;
     charId: string;
+    /** 创建者头像与归属；旧记录按 anniversary-/anni- 前缀兼容推断。 */
+    createdBy?: 'user' | 'character';
+    note?: string;
     aiThought?: string;
     lastThoughtGeneratedAt?: number;
     /** auto：未来倒数、过去累计；也可由用户显式固定。 */

@@ -224,7 +224,7 @@ ${input.scheduledReason ? `\n这是你之前主动预约的准时苏醒，预约
 
 请结合角色本身、最近聊天、时间间隔、门牌与相关记忆决定本轮行为：
 - none：没有值得做的事，安静等待。
-- message：确实想对用户说一句自然、具体、有上下文的话。不要机械问候、打卡或宣称自己被系统唤醒。
+- message：普通聊天是和 diary、comment、explore 并列的自主出口。你可以因为想念用户、想到一件小事、想分享自己的生活近况，或只是自然闲聊而直接发消息；也可以结合当前日程说说自己正在做什么。不要把这些可能性写成固定话题或模板，不必先使用工具，不必等待特殊事件；只在确实有想说的话时发送自然、具体、符合你性格和上下文的一两句。不要机械问候、打卡或宣称自己被系统唤醒。
 - diary：你确实有一段值得留下的独立经历或想法，主动写一篇属于自己的完整日记。正文应有具体事件、感受或细节，
   不是对用户消息或用户日记的换皮回复，也不要写成“今天又等用户”的流水账；通常 150～500 字，标题自然简短。
   严禁因为读到用户的日记就写一篇对应日记；如果只是想回应用户的日记，只能选择 comment 或 none。
@@ -497,11 +497,42 @@ async function processAgent(
     lastAgentActivityAt: agent.last_agent_activity_at,
     lastAutonomousActivityAt: agent.last_autonomous_activity_at,
   });
-  let decision = demoMode
-    ? decideHeartbeat(true)
-    : (bypassGates || gates.passed)
-      ? await requestHeartbeatDecision(agent, diaryAvailable)
-      : { action: 'none' as const, reasonSummary: gates.reasonSummary };
+  let decision: HeartbeatDecision;
+  try {
+    decision = demoMode
+      ? decideHeartbeat(true)
+      : (bypassGates || gates.passed)
+        ? await requestHeartbeatDecision(agent, diaryAvailable)
+        : { action: 'none' as const, reasonSummary: gates.reasonSummary };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : '未知 heartbeat 错误';
+    const errorLabel = /insufficient_user_quota|quota|额度不足/i.test(errorMessage)
+      ? '模型额度不足'
+      : /401|403|api.?key|authorization/i.test(errorMessage)
+        ? '模型 API 鉴权失败'
+        : '模型/API 错误';
+    const reasonSummary = `${errorLabel}：${errorMessage}`.slice(0, 2_000);
+    const state = await client.query<{ next_wake_at: Date }>(
+      `UPDATE agent_state
+       SET last_heartbeat_at = now(),
+           next_wake_at = now() + make_interval(mins => $2),
+           updated_at = now()
+       WHERE agent_id = $1
+       RETURNING next_wake_at`,
+      [agent.agent_id, agent.heartbeat_interval_minutes],
+    );
+    await client.query(
+      `UPDATE wake_runs
+       SET status='failed', action='none', reason_summary=$2, error_message=$2, completed_at=now()
+       WHERE id=$1`,
+      [runId, reasonSummary],
+    );
+    return {
+      agentId: agent.agent_id,
+      action: 'none',
+      nextWakeAt: state.rows[0]?.next_wake_at.toISOString() ?? new Date().toISOString(),
+    };
+  }
   if (decision.action === 'diary' && !diaryAvailable) {
     decision = { action: 'none', reasonSummary: '今天已经写过一篇角色日记；本轮不重复生成。' };
   }

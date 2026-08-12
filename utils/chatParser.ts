@@ -402,12 +402,13 @@ export const ChatParser = {
         }
 
         // ADD_EVENT
-        const eventMatch = content.match(/\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/);
+        const eventMatch = content.match(/\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)(?:\s*\|\s*(.*?))?\]\]/);
         if (eventMatch) {
             const title = eventMatch[1].trim();
             const date = eventMatch[2].trim();
+            const eventNote = eventMatch[3]?.trim();
             if (title && date) {
-                const anni: any = { id: `anni-${Date.now()}`, title: title, date: date, charId };
+                const anni: any = { id: `anni-${Date.now()}`, title, date, charId, createdBy: 'character', ...(eventNote ? { note: eventNote } : {}) };
                 await DB.saveAnniversary(anni);
                 addToast(`${charName} 添加了新日程: ${title}`, 'success');
                 await persist({ charId, role: 'system', type: 'text', content: `[系统: ${charName} 新增了日程 "${title}" (${date})]` });

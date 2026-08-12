@@ -408,19 +408,21 @@ const TogetherApp: React.FC = () => {
                 setPendingSelection(null);
                 return;
             }
-            const quote = selection.toString().trim();
+            const rawQuote = selection.toString();
+            const quote = rawQuote.trim();
             if (!quote) return;
             const before = document.createRange();
             before.selectNodeContents(startSegment);
             before.setEnd(range.startContainer, range.startOffset);
-            const startOffset = before.toString().length;
+            const leadingWhitespace = rawQuote.indexOf(quote);
+            const startOffset = before.toString().length + Math.max(0, leadingWhitespace);
             setPendingSelection({
                 segmentIndex: Number(startSegment.dataset.segmentIndex),
                 startOffset,
-                endOffset: startOffset + selection.toString().length,
+                endOffset: startOffset + quote.length,
                 quote,
             });
-        }, 0);
+        }, 80);
     };
 
     const onNovelScroll = () => {
@@ -507,7 +509,7 @@ const TogetherApp: React.FC = () => {
 
     const renderParagraph = (paragraph: string, index: number) => {
         const ranges = annotations
-            .filter(annotation => annotation.segmentIndex === index && annotation.author === 'user')
+            .filter(annotation => annotation.segmentIndex === index)
             .sort((left, right) => left.startOffset - right.startOffset);
         if (!ranges.length) return paragraph;
         const nodes: React.ReactNode[] = [];
@@ -516,7 +518,7 @@ const TogetherApp: React.FC = () => {
             const start = Math.max(cursor, Math.min(paragraph.length, annotation.startOffset));
             const end = Math.max(start, Math.min(paragraph.length, annotation.endOffset));
             if (start > cursor) nodes.push(paragraph.slice(cursor, start));
-            nodes.push(<mark key={annotation.id} title={annotation.comment} className="rounded-sm bg-[#c9bd99]/45 px-0.5 text-inherit">{paragraph.slice(start, end)}</mark>);
+            nodes.push(<mark key={annotation.id} title={annotation.comment} className={`rounded-sm px-0.5 text-inherit ${annotation.author === 'character' ? 'bg-[#86b69e]/35' : 'bg-[#c9bd99]/45'}`}>{paragraph.slice(start, end)}</mark>);
             cursor = end;
         });
         if (cursor < paragraph.length) nodes.push(paragraph.slice(cursor));
@@ -609,9 +611,8 @@ const TogetherApp: React.FC = () => {
             <div
                 ref={textPaneRef}
                 onScroll={onNovelScroll}
-                onMouseUp={captureSelection}
-                onTouchEnd={captureSelection}
-                className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-32 pt-7 selection:bg-[#c9bd99]/55"
+                onPointerUp={captureSelection}
+                className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-32 pt-7 selection:bg-[#c9bd99]/55 [user-select:text]"
                 style={{ fontFamily: font.css, fontSize: preferences.fontSize, lineHeight: preferences.lineHeight }}
             >
                 <article className="mx-auto max-w-[44rem]">

@@ -51,7 +51,7 @@ export type Directive =
   // 它们留在正文里被 sanitize 剥成空块然后整块丢掉 —— push 路径上收/退根本不生效。
   | { type: 'transfer_accept' }
   | { type: 'transfer_return' }
-  | { type: 'add_event'; title: string; date: string }
+  | { type: 'add_event'; title: string; date: string; note?: string }
   | { type: 'schedule_message'; time: string; text: string }
   // song 是可选的后补字段（见 MusicActionSong），只有主动消息 2.0 的定时路径会填。
   | { type: 'music_action'; verb: string; args: string[]; song?: MusicActionSong }
@@ -181,8 +181,8 @@ const SIDE_EFFECT_TAGS: SideEffectSpec[] = [
   // 里的 extractTransferCommands, 那份解析跟客户端共用一份源码, 且要认模仿历史日志的口语形态。
   // [[ACTION:ADD_EVENT|title|date]]
   {
-    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/g,
-    toDirective: (m) => ({ type: 'add_event', title: m[1], date: m[2] }),
+    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)(?:\s*\|\s*(.*?))?\]\]/g,
+    toDirective: (m) => ({ type: 'add_event', title: m[1], date: m[2], ...(m[3] ? { note: m[3] } : {}) }),
   },
   // [schedule_message | time | fixed | text]  (note: 单方括号, 跟原 chatParser 一致)
   {

@@ -2788,8 +2788,8 @@ var SIDE_EFFECT_TAGS = [
   // 里的 extractTransferCommands, 那份解析跟客户端共用一份源码, 且要认模仿历史日志的口语形态。
   // [[ACTION:ADD_EVENT|title|date]]
   {
-    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/g,
-    toDirective: (m) => ({ type: "add_event", title: m[1], date: m[2] })
+    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)(?:\s*\|\s*(.*?))?\]\]/g,
+    toDirective: (m) => ({ type: "add_event", title: m[1], date: m[2], ...m[3] ? { note: m[3] } : {} })
   },
   // [schedule_message | time | fixed | text]  (note: 单方括号, 跟原 chatParser 一致)
   {
