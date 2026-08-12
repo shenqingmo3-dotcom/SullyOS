@@ -419,7 +419,7 @@ const SharkBackendSettings: React.FC = () => {
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2 [&>label:nth-child(2)]:hidden">
+                        <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2">
                             <label className="space-y-1">
                                 <span className="text-[9px] text-slate-500">苏醒间隔</span>
                                 <select value={agent.intervalMinutes} disabled={agentBusyId === agent.characterId}

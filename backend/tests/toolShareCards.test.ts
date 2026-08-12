@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { extractXShareCandidates, extractXhsShareCandidates } from '../src/toolRunner.js';
+import { extractXShareCandidates, extractXhsShareCandidates, xStatusToolArguments } from '../src/toolRunner.js';
 
 describe('platform share candidates', () => {
+  it('uses the exact single-post argument required by the deployed X MCP', () => {
+    expect(xStatusToolArguments({
+      inputSchema: { properties: { url_or_id: { type: 'string' } } },
+    }, 'https://x.com/shark/status/123')).toEqual({ url_or_id: 'https://x.com/shark/status/123' });
+  });
   it('extracts an X status as a shareable card candidate', () => {
     const [candidate] = extractXShareCandidates({
       data: [{
@@ -61,6 +66,27 @@ describe('platform share candidates', () => {
       imageUrl: 'https://img.example/waffle.jpg',
       likes: 12003,
       retweets: 876,
+    });
+  });
+
+  it('extracts the focused post from the deployed x_read_tweet response shape', () => {
+    const [candidate] = extractXShareCandidates({
+      url: 'https://x.com/yongsa412/status/2087158741556928724',
+      focused: {
+        id: '2087158741556928724',
+        url: 'https://x.com/yongsa412/status/2087158741556928724',
+        text: 'Small Fun', author: '勇士', handle: 'yongsa412',
+        reply_count: 9, retweet_count: 428, like_count: 71,
+      },
+      parents: [],
+      replies: [{
+        id: '2087419064453132644', url: 'https://x.com/AlexBlazan/status/2087419064453132644',
+        text: 'A reply', author: 'Alex', handle: 'AlexBlazan', like_count: 0, retweet_count: 0,
+      }],
+    });
+    expect(candidate).toMatchObject({
+      url: 'https://x.com/yongsa412/status/2087158741556928724',
+      title: 'Small Fun', description: 'Small Fun', author: '@yongsa412', likes: 71, retweets: 428,
     });
   });
 });

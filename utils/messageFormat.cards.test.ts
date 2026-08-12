@@ -91,6 +91,20 @@ describe('normalizeMessageContent · X webpage card', () => {
     expect(out).toContain('点赞 42');
     expect(out).toContain('转推 7');
   });
+
+  it('lets the character read an X card produced by the single-post endpoint', () => {
+    const out = normalizeMessageContent(
+      mk('webpage_card', 'Small Fun', { webpage: {
+        platform: 'x', siteName: 'X', author: '@yongsa412', title: 'Small Fun',
+        excerpt: 'Small Fun', finalUrl: 'https://x.com/yongsa412/status/2087158741556928724',
+        likes: 71, retweets: 428,
+      } }),
+      'Sully', '用户',
+    );
+    expect(out).toContain('帖子正文：Small Fun');
+    expect(out).toContain('https://x.com/yongsa412/status/2087158741556928724');
+    expect(out).toContain('点赞 71 · 转推 428');
+  });
 });
 
 describe('normalizeMessageContent · independent diary and autonomy cards', () => {

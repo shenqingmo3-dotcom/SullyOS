@@ -501,6 +501,18 @@ export async function readXFeed(input: { view: 'home' | 'notifications' | 'profi
   return { items: result.shareCandidates || [], view: input.view, fetchedAt: new Date().toISOString() };
 }
 
+export function xStatusToolArguments(tool: Record<string, unknown>, url: string): Record<string, string> {
+  const inputSchema = tool.inputSchema;
+  const properties = inputSchema && typeof inputSchema === 'object' && !Array.isArray(inputSchema)
+    ? (inputSchema as { properties?: Record<string, unknown> }).properties || {}
+    : {};
+  if ('url_or_id' in properties) return { url_or_id: url };
+  if ('url' in properties) return { url };
+  if ('tweet_url' in properties) return { tweet_url: url };
+  if ('status_url' in properties) return { status_url: url };
+  return { url_or_id: url };
+}
+
 export async function readXStatus(url: string): Promise<ToolShareCandidate | null> {
   const connection = await getToolConnection('x.read');
   if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
@@ -517,7 +529,7 @@ export async function readXStatus(url: string): Promise<ToolShareCandidate | nul
     name: String(detail.name),
     arguments: String(detail.name) === 'x_read_home'
       ? { count: 30, url, query: url }
-      : { url, tweet_url: url, status_url: url },
+      : xStatusToolArguments(detail, url),
   }, 3, listed.sessionId);
   if (called.body?.error) throw new Error(bounded(called.body.error, 1_000));
   return extractXShareCandidates(unwrapMcpResult(called.body))[0] || null;
