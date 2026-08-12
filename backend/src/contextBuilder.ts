@@ -303,7 +303,9 @@ export async function buildAgentContextMessages(input: {
     formatNpcNetwork(metadata),
     input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
     input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。最近聊天中的记录时间是判断场景是否仍在继续的依据：上一晚的入睡、陪伴、线下地点和身体状态到了新一天只能视为历史，不能因为最后一句仍写着“睡着了”就假定此刻仍处于昨晚场景。' : '',
-    formatInteractionState(metadata, input.purpose, recentEvents.length > 0),
+    formatInteractionState(metadata, input.purpose, recentEvents.some((event) => (
+      event.event_type === 'user_message' || event.event_type === 'assistant_message'
+    ))),
   ].filter(Boolean);
 
   const messages: ModelMessage[] = [
