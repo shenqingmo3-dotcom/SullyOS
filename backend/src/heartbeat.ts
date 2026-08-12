@@ -171,29 +171,62 @@ const aiDecisionSchema = z.object({
   nextWakeAt: z.string().max(100).optional(),
 });
 
-function parseDecisionContent(content: string): HeartbeatDecision {
+export function parseDecisionContent(content: string): HeartbeatDecision | null {
   const firstBrace = content.indexOf('{');
   const lastBrace = content.lastIndexOf('}');
   if (firstBrace < 0 || lastBrace <= firstBrace) {
-    return { action: 'none', reasonSummary: '模型没有返回可解析的心跳决策。' };
+    return null;
   }
   let json: unknown;
   try {
     json = JSON.parse(content.slice(firstBrace, lastBrace + 1));
   } catch {
-    return { action: 'none', reasonSummary: '模型没有返回可解析的心跳决策。' };
+    return null;
   }
   const parsed = aiDecisionSchema.safeParse(json);
-  if (!parsed.success) return { action: 'none', reasonSummary: '模型返回的心跳决策不符合协议。' };
+  if (!parsed.success) return null;
   if ((parsed.data.action === 'message' || parsed.data.action === 'diary' || parsed.data.action === 'comment')
       && !parsed.data.content?.trim()) {
-    return { action: 'none', reasonSummary: '模型选择了内容动作，但没有提供内容。' };
+    return null;
   }
   if (parsed.data.action === 'explore' && parsed.data.capabilityId === 'phone.read'
       && !parsed.data.content?.trim()) {
-    return { action: 'none', reasonSummary: '角色想看手机屏幕，但没有先向用户提出截图请求。' };
+    return null;
   }
   return parsed.data;
+}
+
+function completionContent(completion: Record<string, unknown>): string {
+  const first = Array.isArray(completion.choices) ? completion.choices[0] : undefined;
+  const message = first && typeof first === 'object' ? (first as Record<string, unknown>).message : undefined;
+  const content = message && typeof message === 'object' ? (message as Record<string, unknown>).content : '';
+  return typeof content === 'string' ? content : '';
+}
+
+export async function requestParsedHeartbeatDecision(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: unknown }>,
+  complete = createChatCompletion,
+): Promise<HeartbeatDecision> {
+  const first = await complete({ messages, temperature: 0.75, maxTokens: 2_000 });
+  const firstContent = completionContent(first);
+  const parsed = parseDecisionContent(firstContent);
+  if (parsed) return parsed;
+
+  const repaired = await complete({
+    messages: [
+      ...messages,
+      { role: 'assistant', content: firstContent },
+      {
+        role: 'user',
+        content: '上一个回答不是有效的心跳决策 JSON。只修复格式，保留你真正选择的动作、理由和内容，不要改写成固定话题。只返回一个符合要求的 JSON 对象。',
+      },
+    ],
+    temperature: 0.2,
+    maxTokens: 2_000,
+  });
+  const repairedDecision = parseDecisionContent(completionContent(repaired));
+  if (!repairedDecision) throw new Error('模型连续两次没有返回有效的心跳决策 JSON。');
+  return repairedDecision;
 }
 
 export function buildHeartbeatDecisionPrompt(input: {
@@ -473,11 +506,7 @@ async function requestHeartbeatDecision(agent: DueAgent, diaryAvailable: boolean
   const messages = context.messages.map((message, index) => index === 0
     ? { ...message, content: `${String(message.content)}\n\n${prompt}` }
     : message);
-  const completion = await createChatCompletion({ messages, temperature: 0.75, maxTokens: 2_000 });
-  const first = Array.isArray(completion.choices) ? completion.choices[0] : undefined;
-  const message = first && typeof first === 'object' ? (first as Record<string, unknown>).message : undefined;
-  const content = message && typeof message === 'object' ? (message as Record<string, unknown>).content : '';
-  const decision = parseDecisionContent(typeof content === 'string' ? content : '');
+  const decision = await requestParsedHeartbeatDecision(messages);
   if (decision.action === 'comment' && !diaryCandidates.some((diary) => diary.id === decision.diaryId)) {
     return { action: 'none', reasonSummary: '模型选择了不存在或不属于该角色的日记。' };
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractXShareCandidates, extractXhsShareCandidates, xStatusToolArguments } from '../src/toolRunner.js';
+import { extractXShareCandidates, extractXhsShareCandidates, matchingXStatus, xStatusToolArguments } from '../src/toolRunner.js';
 
 describe('platform share candidates', () => {
   it('uses the exact single-post argument required by the deployed X MCP', () => {
@@ -88,5 +88,16 @@ describe('platform share candidates', () => {
       url: 'https://x.com/yongsa412/status/2087158741556928724',
       title: 'Small Fun', description: 'Small Fun', author: '@yongsa412', likes: 71, retweets: 428,
     });
+  });
+
+  it('only enriches media from the exact X status id', () => {
+    const candidates = [
+      { platform: 'x' as const, url: 'https://x.com/shark/status/111', title: 'other', imageUrl: 'https://img.example/wrong.jpg' },
+      { platform: 'x' as const, url: 'https://twitter.com/shark/status/222', title: 'target', imageUrl: 'https://img.example/right.jpg' },
+    ];
+
+    expect(matchingXStatus(candidates, 'https://x.com/shark/status/222')?.imageUrl)
+      .toBe('https://img.example/right.jpg');
+    expect(matchingXStatus(candidates, 'https://x.com/shark/status/333')).toBeNull();
   });
 });

@@ -513,6 +513,37 @@ export function xStatusToolArguments(tool: Record<string, unknown>, url: string)
   return { url_or_id: url };
 }
 
+function xTimelineToolArguments(tool: Record<string, unknown>, handle: string): Record<string, unknown> {
+  const inputSchema = tool.inputSchema;
+  const properties = inputSchema && typeof inputSchema === 'object' && !Array.isArray(inputSchema)
+    ? (inputSchema as { properties?: Record<string, unknown> }).properties || {}
+    : {};
+  const args: Record<string, unknown> = {};
+  for (const key of ['user', 'username', 'handle', 'screen_name']) {
+    if (key in properties) {
+      args[key] = handle;
+      break;
+    }
+  }
+  for (const key of ['count', 'limit', 'max_results']) {
+    if (key in properties) {
+      args[key] = 30;
+      break;
+    }
+  }
+  return args;
+}
+
+function xStatusId(url: string): string {
+  return url.match(/\/(?:status)\/(\d+)/i)?.[1] || '';
+}
+
+export function matchingXStatus(candidates: ToolShareCandidate[], url: string): ToolShareCandidate | null {
+  const targetId = xStatusId(url);
+  if (!targetId) return null;
+  return candidates.find(candidate => xStatusId(candidate.url) === targetId) || null;
+}
+
 export async function readXStatus(url: string): Promise<ToolShareCandidate | null> {
   const connection = await getToolConnection('x.read');
   if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
@@ -532,7 +563,37 @@ export async function readXStatus(url: string): Promise<ToolShareCandidate | nul
       : xStatusToolArguments(detail, url),
   }, 3, listed.sessionId);
   if (called.body?.error) throw new Error(bounded(called.body.error, 1_000));
-  return extractXShareCandidates(unwrapMcpResult(called.body))[0] || null;
+  const detailCandidates = extractXShareCandidates(unwrapMcpResult(called.body));
+  const candidate = matchingXStatus(detailCandidates, url)
+    || detailCandidates[0]
+    || null;
+  if (!candidate || candidate.imageUrl) return candidate;
+
+  const parsedUrl = url.match(/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([^/]+)\/status\/\d+/i);
+  const handle = parsedUrl?.[1]?.replace(/^@/, '') || '';
+  const enrichmentTools = [
+    handle ? tools.find(tool => String(tool.name || '') === 'x_read_timeline') : undefined,
+    tools.find(tool => String(tool.name || '') === 'x_read_home'),
+  ].filter((tool, index, all): tool is Record<string, unknown> => Boolean(tool?.name)
+    && all.findIndex(other => other?.name === tool?.name) === index);
+
+  for (let index = 0; index < enrichmentTools.length; index += 1) {
+    const tool = enrichmentTools[index]!;
+    try {
+      const enriched = await mcpRpc(connection, 'tools/call', {
+        name: String(tool.name),
+        arguments: String(tool.name) === 'x_read_timeline'
+          ? xTimelineToolArguments(tool, handle)
+          : { count: 30 },
+      }, 4 + index, called.sessionId);
+      if (enriched.body?.error) continue;
+      const exact = matchingXStatus(extractXShareCandidates(unwrapMcpResult(enriched.body)), url);
+      if (exact?.imageUrl) return { ...candidate, imageUrl: exact.imageUrl };
+    } catch {
+      // The detail result remains useful even when optional media enrichment is unavailable.
+    }
+  }
+  return candidate;
 }
 
 export async function runWebSearch(connection: ToolConnection, goal: string): Promise<ToolRunResult> {

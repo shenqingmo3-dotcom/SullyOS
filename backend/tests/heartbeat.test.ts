@@ -1,8 +1,45 @@
 import { describe, expect, it } from 'vitest';
 import { availableCapabilities, normalizeAutonomyPolicy } from '../src/capabilities.js';
-import { buildHeartbeatDecisionPrompt, decideHeartbeat, evaluateHeartbeatGates, heartbeatProbability } from '../src/heartbeat.js';
+import {
+  buildHeartbeatDecisionPrompt,
+  decideHeartbeat,
+  evaluateHeartbeatGates,
+  heartbeatProbability,
+  parseDecisionContent,
+  requestParsedHeartbeatDecision,
+} from '../src/heartbeat.js';
 
 describe('decideHeartbeat', () => {
+  it('parses a valid decision surrounded by model prose or a JSON fence', () => {
+    expect(parseDecisionContent('```json\n{"action":"message","reasonSummary":"想说话","content":"刚想到你。"}\n```'))
+      .toMatchObject({ action: 'message', content: '刚想到你。' });
+  });
+
+  it('repairs malformed heartbeat JSON once without forcing a fixed topic', async () => {
+    const calls: any[] = [];
+    const complete = async (input: any) => {
+      calls.push(input);
+      return calls.length === 1
+        ? { choices: [{ message: { content: '我决定发消息，但格式写坏了' } }] }
+        : { choices: [{ message: { content: '{"action":"message","reasonSummary":"随口想说","content":"窗外那朵云有点像华夫饼。"}' } }] };
+    };
+
+    await expect(requestParsedHeartbeatDecision([
+      { role: 'system', content: '角色提示' },
+    ], complete as any)).resolves.toMatchObject({
+      action: 'message', content: '窗外那朵云有点像华夫饼。',
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].messages.at(-1).content).toContain('不要改写成固定话题');
+  });
+
+  it('reports an explicit error after two malformed heartbeat responses', async () => {
+    const complete = async () => ({ choices: [{ message: { content: 'still not json' } }] });
+    await expect(requestParsedHeartbeatDecision([
+      { role: 'system', content: '角色提示' },
+    ], complete as any)).rejects.toThrow('模型连续两次没有返回有效的心跳决策 JSON');
+  });
+
   it('does not create content before an AI decision provider is configured', () => {
     expect(decideHeartbeat(false)).toEqual({
       action: 'none',
