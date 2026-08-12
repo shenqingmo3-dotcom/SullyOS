@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { formatInteractionState, formatRecentEventContent } from '../src/contextBuilder.js';
+import {
+  formatInteractionState,
+  formatRecentEventContent,
+  shouldIncludeRecentEvent,
+} from '../src/contextBuilder.js';
 
 describe('heartbeat recent-event context', () => {
   const occurredAt = new Date('2026-08-12T20:16:10.000Z');
@@ -32,5 +36,14 @@ describe('heartbeat recent-event context', () => {
     const chat = formatInteractionState(metadata, 'chat');
     expect(chat).toContain('线下见面：你和用户处在同一个现实场景');
     expect(chat).toContain('地点：卧室');
+  });
+
+  it('expires old scene turns for heartbeat without hiding them from normal chat', () => {
+    const now = new Date('2026-08-12T21:27:00.000Z');
+    const oldScene = new Date('2026-08-12T13:52:00.000Z');
+    const currentScene = new Date('2026-08-12T17:52:00.000Z');
+    expect(shouldIncludeRecentEvent(oldScene, 'heartbeat', now)).toBe(false);
+    expect(shouldIncludeRecentEvent(oldScene, 'chat', now)).toBe(true);
+    expect(shouldIncludeRecentEvent(currentScene, 'heartbeat', now)).toBe(true);
   });
 });

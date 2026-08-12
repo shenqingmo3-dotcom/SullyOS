@@ -26,6 +26,8 @@ interface RecentEventRow {
   occurred_at: Date;
 }
 
+const HEARTBEAT_SCENE_MAX_AGE_MS = 6 * 60 * 60 * 1_000;
+
 interface MemoryRow {
   external_id: string | null;
   content: string;
@@ -103,6 +105,14 @@ export function formatInteractionState(
   const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
   const distance = typeof scene.distance === 'string' && scene.distance ? `距离：${scene.distance}。` : '沿用已经建立的物理距离。';
   return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n用户的普通文字视为当面说出口的话。\n\n线下格式要求（必须遵守）：\n1. 每次回复都要有动作和说话。动作叙述使用第三人称，以角色名、他/她或 ta 指代角色；对白里可以正常使用“我”。\n2. 动作叙述必须以 "> " 开头，并独占一行；这一行就是一个动作气泡。\n3. 说出口的话必须用中文引号“……”包住，并独占一行；这一行就是一个对白气泡。\n4. 动作和对白绝不能写在同一行或同一个气泡里。通常先发一个完整动作气泡，再发一个完整对白气泡；发生明显场景转折时才再次交替。\n\n线下写作保持连续的场景节拍：合并同一时刻的连续动作、神态、观察、身体反应、环境和氛围；不要直接写内心想法或心理分析，用可见行为表现情绪。延续已经建立的地点和双方距离，移动写出过程，不能瞬移或在距离不够时突然触碰。对白可以比线上聊天更长、更有情绪和层次，但要自然。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+}
+
+export function shouldIncludeRecentEvent(
+  occurredAt: Date,
+  purpose: 'chat' | 'heartbeat',
+  now = new Date(),
+): boolean {
+  return purpose === 'chat' || now.getTime() - occurredAt.getTime() <= HEARTBEAT_SCENE_MAX_AGE_MS;
 }
 
 function queryTerms(text: string): string[] {
@@ -221,7 +231,9 @@ export async function buildAgentContextMessages(input: {
     ),
   ]);
 
-  const recentEvents = eventsResult.rows.reverse();
+  const recentEvents = eventsResult.rows.reverse().filter((event) => (
+    shouldIncludeRecentEvent(event.occurred_at, input.purpose)
+  ));
   const lastUserText = input.userMessage
     ?? [...recentEvents].reverse().find((event) => event.actor_type === 'user')?.content
     ?? '';
