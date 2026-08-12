@@ -50,6 +50,7 @@ import {
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { extractInteractionModeDirective } from './interactionMode';
+import { normalizeOfflineBubbleFormatting } from './offlineBubbleFormat';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -632,7 +633,10 @@ export async function applyAssistantPostProcessing(
             // 角色永远最后才发表情包」。
             // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
             const renderPlainSegment = async (segment: string): Promise<void> => {
-                for (const part of ChatParser.splitResponse(segment)) {
+                const bubbleSafeSegment = char.interactionMode === 'offline'
+                    ? normalizeOfflineBubbleFormatting(segment)
+                    : segment;
+                for (const part of ChatParser.splitResponse(bubbleSafeSegment)) {
                     if (part.type === 'emoji') {
                         await sendEmojiBubble(part.content);
                         continue;
@@ -683,7 +687,10 @@ export async function applyAssistantPostProcessing(
             if (textAfter) await renderPlainSegment(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
         } else {
             // ─── normal path (splitResponse → chunkText → per-chunk save) ───
-            const parts = ChatParser.splitResponse(content);
+            const bubbleSafeContent = char.interactionMode === 'offline'
+                ? normalizeOfflineBubbleFormatting(content)
+                : content;
+            const parts = ChatParser.splitResponse(bubbleSafeContent);
             // 模型常把 [[QUOTE:]] 单独写一行 (后面紧跟换行或 [[SEND_EMOJI:]]), chunkText/splitResponse
             // 会把它拆成一个"只有标签没有正文"的 chunk — 剥标签后 hasDisplayContent 为 false 不落库,
             // 解析出的引用目标若不暂存就会随之丢失。挂到下一条真正落库的文字气泡上。

@@ -583,13 +583,14 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
             && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         const strictModeBoundary = char.interactionMode === 'offline'
-            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. Prefix every action, environment, or third-person scene narration block with "> ", then write spoken dialogue with Chinese quotation marks “...”. Never use brackets for actions; no direct inner thoughts, system labels, timestamps, teleporting, or touching across an unclosed physical distance.`
+            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. All narration must be third-person: use the character's name, 他/她, or ta, never 我, as the subject of actions, body movement, environment interaction, or scene narration. The character may use 我 normally inside spoken dialogue. Prefix every action, environment, or third-person scene narration block with "> ", and put each such block on its own line. Put every spoken dialogue block on a separate line and wrap it in Chinese quotation marks “...”. Narration and dialogue must never share one line or one bubble. Never use brackets for actions; no direct inner thoughts, system labels, timestamps, teleporting, or touching across an unclosed physical distance.`
             : `Internal chat state: follow the original SullyOS mobile-chat rules below. Never mention the state name or any mode label. Do not output internal labels such as [text message], [线上聊天], or speaker/log prefixes.`;
 
         const interactionFormatRules = char.interactionMode === 'offline'
             ? `3. **线下输出格式**:
    - 这里虽然共用同一个消息页面，但当前内容是当面相处，不是手机气泡聊天。
-   - 每个动作、环境或第三人称场景叙述块都必须以 `> ` 开头；说出口的话使用中文引号“……”。可以根据场景自然交替多个叙述块和对白块，不限制段数。
+   - 所有叙述必须使用第三人称：动作、身体移动、环境互动和场景描写要用角色名、他/她或 ta 作主语，不能用“我”写叙述；对白内部可以正常使用“我”。每个叙述块都必须以 `> ` 开头并独占一行。
+   - 每个说出口的对白块都必须使用中文引号“……”并独占一行。动作与对白可以自然交替，但绝不能写在同一行或同一个气泡里。
    - 合并同一瞬间的动作与环境，不要用括号动作或直接内心独白；延续地点和距离，移动写出过程，距离不足时不能突然触碰。
    - 表情包、引用、戳一戳、转账等手机 UI 命令默认不用；只有角色在场景里确实拿起手机操作时才使用对应能力。社交平台、网页、搜索与 MCP 工具仍可照常使用。`
             : `3. **线上输出格式**:

@@ -26,6 +26,9 @@ describe('interactionMode', () => {
         expect(prompt).toContain('状态持续有效');
         expect(prompt).toContain('必须以 "> " 开头');
         expect(prompt).toContain('中文引号“……”');
+        expect(prompt).toContain('所有叙述必须使用第三人称');
+        expect(prompt).toContain('不能用“我”写叙述');
+        expect(prompt).toContain('动作与对白不得出现在同一行或同一个气泡');
     });
 
     it('聊天主提示词不再用本体规则强制回到线上', () => {

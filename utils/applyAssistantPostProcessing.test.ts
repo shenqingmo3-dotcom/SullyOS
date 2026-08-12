@@ -46,6 +46,40 @@ const quotedUserMsg = {
     timestamp: Date.now() - 1000,
 };
 
+describe('线下动作与对白分泡', () => {
+    const mixedOfflineReply = '> 她走到你身边。“今天累不累？” > 她低头看着你。';
+
+    it('线下模式把同一行的动作、对白、动作保存成三个独立气泡', async () => {
+        const charId = `c-offline-bubbles-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'offline';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing(mixedOfflineReply, ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual([
+            '> 她走到你身边。',
+            '“今天累不累？”',
+            '> 她低头看着你。',
+        ]);
+    });
+
+    it('线上模式不启用线下分块规则', async () => {
+        const charId = `c-online-bubbles-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'online';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing(mixedOfflineReply, ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual([mixedOfflineReply]);
+    });
+});
+
 describe('renderAndPersist 引用解析', () => {
     it('[[QUOTE:]] 单独成行 (后跟 SEND_EMOJI + 正文) 时引用顺延到第一条文字气泡', async () => {
         const charId = `c-quote-${Date.now()}`;

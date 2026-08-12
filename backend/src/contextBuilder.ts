@@ -246,7 +246,7 @@ export async function buildAgentContextMessages(input: {
       }
       const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
       const distance = typeof scene.distance === 'string' && scene.distance ? `距离：${scene.distance}。` : '沿用已经建立的物理距离。';
-      return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n普通文字视为当面说出口的话，不是手机聊天。每个动作、环境或第三人称场景叙述块必须以 "> " 开头，说出口的话使用中文引号“……”；可按场景自然交替多个叙述块和对白块，不限制段数。合并同一瞬间的动作和环境，不写直接内心独白。延续地点和距离，移动写出过程，不瞬移，距离不够时不能突然触碰。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+      return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n普通文字视为当面说出口的话，不是手机聊天。所有叙述必须使用第三人称：动作、身体移动、环境互动和场景描写要用角色名、他/她或 ta 作主语，不能用“我”写叙述；对白内部可以正常使用“我”。每个叙述块必须以 "> " 开头并独占一行；每个对白块必须使用中文引号“……”并独占一行，动作与对白不得出现在同一行或同一个气泡里。合并同一瞬间的动作和环境，不写直接内心独白。延续地点和距离，移动写出过程，不瞬移，距离不够时不能突然触碰。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
     })(),
   ].filter(Boolean);
 
