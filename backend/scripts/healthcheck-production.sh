@@ -23,6 +23,12 @@ domain="$(env_value SULLYOS_DOMAIN)"
 app_token="$(env_value APP_TOKEN)"
 base_url="https://${domain}"
 
+homepage="$(curl --fail --silent --show-error --max-time 20 "${base_url}/")"
+if [[ "${homepage}" != *'<div id="root">'* ]]; then
+  echo "Frontend homepage is missing or invalid at ${base_url}/." >&2
+  exit 1
+fi
+
 health="$(curl --fail --silent --show-error --max-time 20 "${base_url}/health")"
 if [[ "${health}" != *'"ok":true'* ]]; then
   echo "Unexpected health response: ${health}" >&2
@@ -33,4 +39,4 @@ curl --fail --silent --show-error --max-time 20 \
   -H "Authorization: Bearer ${app_token}" \
   "${base_url}/v1/model/status" >/dev/null
 
-echo "OK: HTTPS, API authentication and PostgreSQL health all passed at ${base_url}."
+echo "OK: frontend, HTTPS, API authentication and PostgreSQL health all passed at ${base_url}."

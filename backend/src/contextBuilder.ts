@@ -90,21 +90,25 @@ export function formatRecentEventContent(input: {
 export function formatInteractionState(
   metadata: Record<string, unknown>,
   purpose: 'chat' | 'heartbeat',
+  hasCurrentScene = true,
 ): string {
-  if (purpose === 'heartbeat') {
-    return '## 后台自主苏醒状态\n这是一次发生在实时对话之外的自主判断。设置中的线上/线下模式只约束用户下一次进入聊天后的回复格式，不代表你和用户此刻仍保持最近线下消息里的地点、距离、拥抱、入睡或身体姿势。先按记录时间判断旧场景已经过去，再决定是否通过普通消息自然联系用户。';
-  }
-
   const mode = metadata.interactionMode === 'offline' ? 'offline' : 'online';
   const scene = metadata.interactionScene && typeof metadata.interactionScene === 'object'
     ? metadata.interactionScene as Record<string, unknown>
     : {};
+  const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
+  const distance = typeof scene.distance === 'string' && scene.distance ? scene.distance : '';
+
+  if (purpose === 'heartbeat') {
+    return mode === 'offline'
+      ? `## 后台自主苏醒状态\n当前仍是线下共处模式，你和用户仍在同一个现实场景中。${location}你们可以各做各的，也可以由你自然发起当面互动。${hasCurrentScene && distance ? `最近 6 小时内记录的距离：${distance}。` : ''}地点和线下共处状态持续有效，但旧消息里的拥抱、入睡、贴靠等瞬时动作与具体身体姿势不会无限持续；结合记录时间判断当前正在做什么。若选择 message，仍按线下规则把动作与对白分别放进 messages 的独立气泡：动作以 "> " 开头并使用第三人称，对白使用中文引号“……”。`
+      : '## 后台自主苏醒状态\n当前是线上聊天模式，你和用户不在同一个现实场景。你可以通过普通消息自然联系用户；不要虚构正在当面触碰或共处。';
+  }
+
   if (mode === 'online') {
     return `## 当前互动状态\n你正在手机聊天。保持角色扮演，使用适合即时通讯的自然口语；可以按自己的表达需要发送任意数量的消息或长消息。只输出真实聊天文本，禁止动作、环境、身体反应、内心独白、第三人称旁白、时间戳、姓名前缀、括号动作，以及 [text message]、[线上聊天] 等内部标签。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
   }
-  const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
-  const distance = typeof scene.distance === 'string' && scene.distance ? `距离：${scene.distance}。` : '沿用已经建立的物理距离。';
-  return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n用户的普通文字视为当面说出口的话。\n\n线下格式要求（必须遵守）：\n1. 每次回复都要有动作和说话。动作叙述使用第三人称，以角色名、他/她或 ta 指代角色；对白里可以正常使用“我”。\n2. 动作叙述必须以 "> " 开头，并独占一行；这一行就是一个动作气泡。\n3. 说出口的话必须用中文引号“……”包住，并独占一行；这一行就是一个对白气泡。\n4. 动作和对白绝不能写在同一行或同一个气泡里。通常先发一个完整动作气泡，再发一个完整对白气泡；发生明显场景转折时才再次交替。\n\n线下写作保持连续的场景节拍：合并同一时刻的连续动作、神态、观察、身体反应、环境和氛围；不要直接写内心想法或心理分析，用可见行为表现情绪。延续已经建立的地点和双方距离，移动写出过程，不能瞬移或在距离不够时突然触碰。对白可以比线上聊天更长、更有情绪和层次，但要自然。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+  return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance ? `距离：${distance}。` : '沿用已经建立的物理距离。'}\n用户的普通文字视为当面说出口的话。\n\n线下格式要求（必须遵守）：\n1. 每次回复都要有动作和说话。动作叙述使用第三人称，以角色名、他/她或 ta 指代角色；对白里可以正常使用“我”。\n2. 动作叙述必须以 "> " 开头，并独占一行；这一行就是一个动作气泡。\n3. 说出口的话必须用中文引号“……”包住，并独占一行；这一行就是一个对白气泡。\n4. 动作和对白绝不能写在同一行或同一个气泡里。通常先发一个完整动作气泡，再发一个完整对白气泡；发生明显场景转折时才再次交替。\n\n线下写作保持连续的场景节拍：合并同一时刻的连续动作、神态、观察、身体反应、环境和氛围；不要直接写内心想法或心理分析，用可见行为表现情绪。延续已经建立的地点和双方距离，移动写出过程，不能瞬移或在距离不够时突然触碰。对白可以比线上聊天更长、更有情绪和层次，但要自然。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
 }
 
 export function shouldIncludeRecentEvent(
@@ -299,7 +303,7 @@ export async function buildAgentContextMessages(input: {
     formatNpcNetwork(metadata),
     input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
     input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。最近聊天中的记录时间是判断场景是否仍在继续的依据：上一晚的入睡、陪伴、线下地点和身体状态到了新一天只能视为历史，不能因为最后一句仍写着“睡着了”就假定此刻仍处于昨晚场景。' : '',
-    formatInteractionState(metadata, input.purpose),
+    formatInteractionState(metadata, input.purpose, recentEvents.length > 0),
   ].filter(Boolean);
 
   const messages: ModelMessage[] = [

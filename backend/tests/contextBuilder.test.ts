@@ -24,14 +24,19 @@ describe('heartbeat recent-event context', () => {
     })).toBe('早上好。');
   });
 
-  it('does not carry live offline positioning into a background heartbeat', () => {
+  it('keeps offline co-presence while expiring exact physical poses', () => {
     const metadata = {
       interactionMode: 'offline', interactionScene: { location: '卧室', distance: '拥抱中' },
     };
-    const heartbeat = formatInteractionState(metadata, 'heartbeat');
-    expect(heartbeat).toContain('实时对话之外');
-    expect(heartbeat).toContain('不代表你和用户此刻仍保持');
-    expect(heartbeat).not.toContain('线下见面：你和用户处在同一个现实场景');
+    const heartbeat = formatInteractionState(metadata, 'heartbeat', false);
+    expect(heartbeat).toContain('当前仍是线下共处模式');
+    expect(heartbeat).toContain('地点：卧室');
+    expect(heartbeat).toContain('你们可以各做各的');
+    expect(heartbeat).toContain('具体身体姿势不会无限持续');
+    expect(heartbeat).toContain('messages 的独立气泡');
+    expect(heartbeat).not.toContain('拥抱中');
+
+    expect(formatInteractionState(metadata, 'heartbeat', true)).toContain('拥抱中');
 
     const chat = formatInteractionState(metadata, 'chat');
     expect(chat).toContain('线下见面：你和用户处在同一个现实场景');

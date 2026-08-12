@@ -17,6 +17,12 @@ describe('decideHeartbeat', () => {
       .toMatchObject({ action: 'message', content: '刚想到你。' });
   });
 
+  it('accepts as many proactive message bubbles as the model chooses', () => {
+    expect(parseDecisionContent(JSON.stringify({
+      action: 'message', reasonSummary: '想多说几句', messages: ['第一条', '第二条', '第三条'],
+    }))).toMatchObject({ messages: ['第一条', '第二条', '第三条'] });
+  });
+
   it('repairs malformed heartbeat JSON once without forcing a fixed topic', async () => {
     const calls: any[] = [];
     const complete = async (input: any) => {
@@ -106,6 +112,8 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('不必先使用工具');
     expect(prompt).toContain('早安、醒来后的惦记或生活开场是正常联系');
     expect(prompt).toContain('不能把旧场景当作拒绝联系的唯一理由');
+    expect(prompt).toContain('条数由你决定');
+    expect(prompt).not.toContain('符合你性格和上下文的一两句');
   });
 
   it('does not let a model-selected silence skip the rest of the morning', () => {

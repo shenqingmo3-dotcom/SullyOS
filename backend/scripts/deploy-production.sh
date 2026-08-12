@@ -5,10 +5,16 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 backend_dir="$(cd -- "${script_dir}/.." && pwd -P)"
 env_file="${1:-${backend_dir}/.env.production}"
 compose_file="${backend_dir}/compose.production.yaml"
+frontend_dir="$(cd -- "${backend_dir}/.." && pwd -P)/sullyos-frontend"
 
 if [[ ! -f "${env_file}" ]]; then
   echo "Production env file not found: ${env_file}" >&2
   echo "Run: bash scripts/generate-production-env.sh" >&2
+  exit 1
+fi
+if [[ ! -f "${frontend_dir}/index.html" ]]; then
+  echo "Production frontend is missing: ${frontend_dir}/index.html" >&2
+  echo "Deploy from the repository root with scripts/deploy-goldenbite-from-git.sh." >&2
   exit 1
 fi
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
