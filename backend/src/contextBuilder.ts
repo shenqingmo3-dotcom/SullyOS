@@ -236,11 +236,11 @@ export async function buildAgentContextMessages(input: {
         ? metadata.interactionScene as Record<string, unknown>
         : {};
       if (mode === 'online') {
-        return `## 当前互动状态\n线上聊天：你和用户不在同一现实场景。主动消息必须像手机聊天，只写自然对话，不写动作、环境或场景旁白。小红书、X、网页和 MCP 仍可照常使用。`;
+        return `## 当前互动状态\nSullyOS 原版线上聊天：你和用户通过手机消息交流，不在同一现实场景。只发送真实聊天文本，简短自然；禁止动作、环境、身体反应、内心独白、第三人称旁白、时间戳、姓名前缀和括号动作。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
       }
       const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
       const distance = typeof scene.distance === 'string' && scene.distance ? `距离：${scene.distance}。` : '沿用已经建立的物理距离。';
-      return `## 当前互动状态\n线下相处：你和用户处在同一个现实场景。${location}${distance}\n主动醒来时也必须延续这个场景：用一个连贯的第三人称场景叙述块加自然对白；不写直接内心独白，不瞬移，距离不够时不能突然触碰。小红书、X、网页和 MCP 仍可照常使用。`;
+      return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n普通文字视为当面说出口的话，不是手机聊天。输出一个连续的第三人称场景叙述块，再输出中文引号对白（“……”）；合并同一瞬间的动作和环境，不写直接内心独白。延续地点和距离，移动写出过程，不瞬移，距离不够时不能突然触碰。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
     })(),
   ].filter(Boolean);
 
