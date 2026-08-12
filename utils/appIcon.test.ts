@@ -16,16 +16,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const mockGetBlobForRef = vi.fn();
 const mockBlobToDataUrl = vi.fn();
-const mockIsStandalone = vi.fn();
 
 vi.mock('./blobRef', () => ({
   isBlobRef: (v: unknown) => typeof v === 'string' && v.startsWith('blobref:'),
   getBlobForRef: (...args: any[]) => mockGetBlobForRef(...args),
   blobToDataUrl: (...args: any[]) => mockBlobToDataUrl(...args),
-}));
-
-vi.mock('./iosStandalone', () => ({
-  isStandaloneDisplayMode: () => mockIsStandalone(),
 }));
 
 // jsdom 没有 URL.createObjectURL / revokeObjectURL；自己垫一层轻量实现，
@@ -65,7 +60,7 @@ function setupDOM() {
 }
 
 function getAppleTouchIconHref(): string | null {
-  const link = document.querySelector('link[rel="apple-touch-icon"].sully-custom-pwa-icon');
+  const link = document.querySelector('link[rel="apple-touch-icon"]');
   return link?.getAttribute('href') ?? null;
 }
 
@@ -107,8 +102,6 @@ beforeEach(() => {
   setupDOM();
   mockGetBlobForRef.mockReset();
   mockBlobToDataUrl.mockReset();
-  mockIsStandalone.mockReset();
-  mockIsStandalone.mockReturnValue(false);
 
   // fetch mock：请求真实 manifest 时返回 SAMPLE_MANIFEST
   globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
@@ -185,7 +178,7 @@ describe('injectPwaIcon', () => {
     mockGetBlobForRef.mockResolvedValue(null);
 
     await expect(injectPwaIcon('blobref:dead')).resolves.toBeUndefined();
-    expect(getAppleTouchIconHref()).toBeNull();
+    expect(getAppleTouchIconHref()).toBe('./icons/apple-touch-icon.png');
   });
 
   it('多次调用 → 每次都替换旧注入（不会堆叠多个 link）', async () => {
@@ -195,21 +188,29 @@ describe('injectPwaIcon', () => {
     await injectPwaIcon('blobref:a');
     await injectPwaIcon('blobref:b');
 
-    const links = document.querySelectorAll('link[rel="apple-touch-icon"].sully-custom-pwa-icon');
+    const links = document.querySelectorAll('link[rel="apple-touch-icon"]');
     expect(links.length).toBe(1);
+  });
+
+  it('直接改写静态 apple-touch-icon，避免 iOS 继续读取排在前面的默认图标', async () => {
+    await injectPwaIcon(RED_PIXEL_PNG);
+
+    const links = document.querySelectorAll<HTMLLinkElement>('link[rel="apple-touch-icon"]');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(RED_PIXEL_PNG);
+    expect(links[0].classList.contains('sully-custom-pwa-icon')).toBe(true);
   });
 });
 
-// ── manifest 替换（standalone 模式） ─────────────────────────────────
+// ── manifest 替换 ───────────────────────────────────────────────────
 
-describe('manifest 替换（standalone）', () => {
+describe('manifest 替换', () => {
   beforeEach(() => {
-    mockIsStandalone.mockReturnValue(true);
     mockGetBlobForRef.mockResolvedValue(new Blob([RED_PIXEL_PNG], { type: 'image/png' }));
     mockBlobToDataUrl.mockResolvedValue(RED_PIXEL_PNG);
   });
 
-  it('standalone 下 manifest href 被换成 blob: URL', async () => {
+  it('普通浏览器页面也会在安装前换成自定义 manifest', async () => {
     await injectPwaIcon('blobref:test');
 
     expect(getManifestHref()).toMatch(/^blob:mock-/);
@@ -263,13 +264,13 @@ describe('clearPwaIcon', () => {
   it('删掉注入的 apple-touch-icon，恢复原始 manifest href', async () => {
     mockGetBlobForRef.mockResolvedValue(new Blob([RED_PIXEL_PNG], { type: 'image/png' }));
     mockBlobToDataUrl.mockResolvedValue(RED_PIXEL_PNG);
-    mockIsStandalone.mockReturnValue(true);
 
     await injectPwaIcon('blobref:test');
     expect(getAppleTouchIconHref()).toBe(RED_PIXEL_PNG);
 
     clearPwaIcon();
-    expect(getAppleTouchIconHref()).toBeNull();
+    expect(getAppleTouchIconHref()).toBe('./icons/apple-touch-icon.png');
+    expect(document.querySelectorAll('link[rel="apple-touch-icon"]')).toHaveLength(1);
     expect(getManifestHref()).toBe(ORIGINAL_MANIFEST_HREF);
   });
 

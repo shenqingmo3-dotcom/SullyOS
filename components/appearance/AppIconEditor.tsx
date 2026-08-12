@@ -33,7 +33,7 @@ const AppIconEditor: React.FC = () => {
     } catch (e) {
       console.warn('[AppIconEditor] injectPwaIcon 失败', e);
     }
-    addToast('PWA 图标已更新 ✨', 'success');
+    addToast('安装图标已更新，请重新打开分享菜单', 'success');
   }, [setCustomIcon, addToast]);
 
   // ── 上传 ───────────────────────────────────────────────────
@@ -238,7 +238,7 @@ const AppIconEditor: React.FC = () => {
       ) : (
         <div className="rounded-xl bg-blue-50 border border-blue-200 p-3">
           <div className="text-xs text-blue-600 leading-relaxed">
-            ✨ 标签页图标已更新。下次「添加到主屏幕」时就会用新图标啦～
+            ✨ 安装图标已更新。请关闭当前分享菜单后重新打开；下次「添加到主屏幕」时会使用新图标。
             已经装好的 App 不受影响。
           </div>
         </div>

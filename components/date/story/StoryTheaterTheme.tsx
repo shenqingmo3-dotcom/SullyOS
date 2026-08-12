@@ -92,7 +92,7 @@ const STORY_THEME_CSS = `
   content: '';
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: 2;
   pointer-events: none;
   opacity: 0;
   transition: opacity 240ms ease;
@@ -109,7 +109,7 @@ const STORY_THEME_CSS = `
   content: '';
   position: absolute;
   inset: -12% -8%;
-  z-index: 0;
+  z-index: 2;
   pointer-events: none;
   opacity: 0;
   background-image:
@@ -120,6 +120,7 @@ const STORY_THEME_CSS = `
   background-position: 7px 23px, 51px 79px, 119px 31px;
 }
 .story-theme.story-decor-cinema::after { opacity: 1; animation: story-bubble-drift 18s ease-in-out infinite alternate; }
+.story-appearance-overlay::before, .story-appearance-overlay::after { display: none; }
 @keyframes story-bubble-drift { from { transform: translate3d(0, 2%, 0); } to { transform: translate3d(1.5%, -2%, 0); } }
 .story-theme > * { position: relative; z-index: 1; }
 .story-theme .bg-stone-100 { background-color: var(--story-bg) !important; }
@@ -270,7 +271,7 @@ export const StoryAppearanceButton: React.FC<{ className?: string }> = ({ classN
             <Palette size={18} weight={appearance.decor === 'cinema' ? 'fill' : 'regular'} />
         </button>
         {open && createPortal(<div
-            className={`story-theme story-theme-${appearance.color} story-decor-${appearance.decor} fixed inset-0 z-[90] flex items-end sm:items-center justify-center overflow-y-auto overscroll-contain`}
+            className={`story-theme story-appearance-overlay story-theme-${appearance.color} story-decor-${appearance.decor} fixed inset-0 z-[90] flex items-end sm:items-center justify-center overflow-y-auto overscroll-contain`}
             style={{ position: 'fixed', paddingTop: 'max(12px, var(--safe-top))', paddingBottom: 'max(0px, var(--safe-bottom))', backgroundColor: 'rgba(2, 6, 23, .35)' }}
             onClick={closePanel}
             role='presentation'

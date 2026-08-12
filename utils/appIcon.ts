@@ -8,12 +8,12 @@
 // 约束：图标只在「添加到主屏幕」那一刻固化，装完之后改不了。装成 App 的用户要看到
 // 新图标得删掉重装（会丢 IndexedDB 数据），UI 上的警告由 AppIconEditor 负责。
 
-import { isStandaloneDisplayMode } from './iosStandalone';
 import { getBlobForRef, isBlobRef, blobToDataUrl } from './blobRef';
 
 export const PWA_ICON_APP_ID = '_pwa_';
 
-const ATI_SELECTOR = 'link[rel="apple-touch-icon"].sully-custom-pwa-icon';
+const ATI_SELECTOR = 'link[rel="apple-touch-icon"]';
+const CUSTOM_ATI_CLASS = 'sully-custom-pwa-icon';
 const MANIFEST_SELECTOR = 'link[rel="manifest"]';
 
 let originalManifestHref: string | null = null;
@@ -24,7 +24,7 @@ let dynamicManifestUrl: string | null = null;
 /**
  * 把图标值（blobRef 令牌 / data: URI / http(s) URL）注入 DOM。
  * - 总是注入 apple-touch-icon（影响浏览器标签页 + iOS 主屏图标）
- * - standalone display-mode 下额外替换 manifest（影响 Android/Chrome 主屏图标）
+ * - 同时替换 manifest（影响 Android/Chrome 下一次安装时的主屏图标）
  */
 export async function injectPwaIcon(value: string): Promise<void> {
   const dataUrl = await resolveIconValue(value);
@@ -32,9 +32,7 @@ export async function injectPwaIcon(value: string): Promise<void> {
 
   injectAppleTouchIcon(dataUrl);
 
-  if (isStandaloneDisplayMode()) {
-    await replaceManifest(dataUrl);
-  }
+  await replaceManifest(dataUrl);
 }
 
 /** 恢复默认图标：删掉注入的 link，manifest 指回原始文件。 */
@@ -84,18 +82,35 @@ async function resolveIconValue(value: string): Promise<string | null> {
 }
 
 function injectAppleTouchIcon(dataUrl: string): void {
-  clearAppleTouchIcon();
+  const links = Array.from(document.querySelectorAll<HTMLLinkElement>(ATI_SELECTOR));
+  const link = links[0] ?? document.createElement('link');
 
-  const link = document.createElement('link');
+  if (!link.dataset.sullyOriginalHref) {
+    link.dataset.sullyOriginalHref = link.getAttribute('href') || '__created__';
+  }
+
+  // iOS 会优先读取文档里较早出现的 apple-touch-icon。直接复用并改写静态标签，
+  // 不再把自定义标签追加到默认标签后面。
+  for (const duplicate of links.slice(1)) duplicate.remove();
   link.rel = 'apple-touch-icon';
   link.setAttribute('sizes', '180x180');
   link.href = dataUrl;
-  link.classList.add('sully-custom-pwa-icon');
-  document.head.appendChild(link);
+  link.classList.add(CUSTOM_ATI_CLASS);
+  if (!link.isConnected) document.head.appendChild(link);
 }
 
 function clearAppleTouchIcon(): void {
-  document.querySelector(ATI_SELECTOR)?.remove();
+  const link = document.querySelector<HTMLLinkElement>(`${ATI_SELECTOR}.${CUSTOM_ATI_CLASS}`);
+  if (!link) return;
+
+  const originalHref = link.dataset.sullyOriginalHref;
+  if (originalHref && originalHref !== '__created__') {
+    link.setAttribute('href', originalHref);
+    link.classList.remove(CUSTOM_ATI_CLASS);
+    delete link.dataset.sullyOriginalHref;
+    return;
+  }
+  link.remove();
 }
 
 async function replaceManifest(iconDataUrl: string): Promise<void> {
@@ -114,7 +129,7 @@ async function replaceManifest(iconDataUrl: string): Promise<void> {
 
     // manifest 的 base URL —— 浏览器已把 ./manifest.webmanifest 解析为绝对地址，
     // 动态 manifest（blob: URL）的 base 会变成 blob:，所以所有相对路径必须折成绝对地址
-    const base = link.href;
+    const base = originalManifestHref || link.href;
 
     manifest.icons = [
       { src: iconDataUrl, sizes: '192x192', type: 'image/png' },
