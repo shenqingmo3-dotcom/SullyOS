@@ -118,6 +118,7 @@ export function buildPlatformShareMessage(
                 platform,
                 author,
                 likes: typeof data.likes === 'number' ? data.likes : 0,
+                retweets: typeof data.retweets === 'number' ? data.retweets : 0,
             },
             source: 'backend-platform-share',
             backendEventId: event.id,

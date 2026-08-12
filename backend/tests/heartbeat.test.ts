@@ -86,7 +86,7 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('截图回来后会作为用户图片消息进入聊天');
   });
 
-  it('checks idle threshold before spending a model call', () => {
+  it('does not block autonomous decisions after a recent conversation', () => {
     const now = new Date('2026-08-09T12:00:00.000Z');
     const result = evaluateHeartbeatGates({
       policy: normalizeAutonomyPolicy({ idleThresholdMinutes: 30, probabilityLevel: 'high' }),
@@ -97,7 +97,7 @@ describe('decideHeartbeat', () => {
       now,
       random: () => 0,
     });
-    expect(result.passed).toBe(false);
+    expect(result.passed).toBe(true);
     expect(result.reasonSummary).toContain('空闲阈值');
   });
 
@@ -128,7 +128,7 @@ describe('decideHeartbeat', () => {
     }).reasonSummary).toContain('允许活动时段');
   });
 
-  it('uses autonomous activity cooldown and the configured probability slot', () => {
+  it('uses autonomous activity cooldown without a random probability gate', () => {
     const now = new Date('2026-08-09T12:00:00.000Z');
     const policy = normalizeAutonomyPolicy({
       idleThresholdMinutes: 0,

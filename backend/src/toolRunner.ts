@@ -193,12 +193,14 @@ export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
     seen.add(url);
     const description = firstString(item.text, item.content, item.description);
     const author = firstString(item.author, item.handle && `@${String(item.handle).replace(/^@/, '')}`);
-    const imageUrl = firstString(item.image, item.imageUrl, item.image_url, item.mediaUrl, item.media_url);
+    const imageUrl = firstString(item.image, item.imageUrl, item.image_url, item.mediaUrl, item.media_url, item.thumbnail, item.thumbnailUrl, item.thumbnail_url);
+    const retweets = Number(item.retweet_count ?? item.retweets ?? item.retweetCount ?? item.repost_count ?? item.reposts ?? item.repostCount ?? item.quote_count ?? 0) || 0;
     candidates.push({
       platform: 'x', url,
       title: description.slice(0, 100) || `${author || 'X 用户'} 的帖子`,
       description: description.slice(0, 1_200), author, imageUrl,
-      likes: Number(item.like_count ?? item.likes ?? 0) || 0,
+      likes: Number(item.like_count ?? item.likes ?? item.likeCount ?? 0) || 0,
+      retweets,
     });
     if (candidates.length >= 12) break;
   }
@@ -458,6 +460,28 @@ export async function readXFeed(input: { view: 'home' | 'notifications' | 'profi
     ? `我的主页${input.handle ? ` 用户: ${input.handle}` : ''}` : '首页';
   const result = await runMcp(connection, goal);
   return { items: result.shareCandidates || [], view: input.view, fetchedAt: new Date().toISOString() };
+}
+
+export async function readXStatus(url: string): Promise<ToolShareCandidate | null> {
+  const connection = await getToolConnection('x.read');
+  if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
+  const initialized = await mcpRpc(connection, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {},
+    clientInfo: { name: 'sullyos-chat', version: '1.0.0' },
+  }, 1);
+  const listed = await mcpRpc(connection, 'tools/list', {}, 2, initialized.sessionId);
+  const tools = Array.isArray(listed.body?.result?.tools) ? listed.body.result.tools as Array<Record<string, unknown>> : [];
+  const detail = tools.find(tool => /(?:read|fetch|get|view).*(?:tweet|status|post)|(?:tweet|status|post).*(?:read|fetch|get|view)/i.test(String(tool.name || '')) && !isProbablyWriteTool(String(tool.name || '')))
+    || tools.find(tool => String(tool.name || '') === 'x_read_home');
+  if (!detail?.name) return null;
+  const called = await mcpRpc(connection, 'tools/call', {
+    name: String(detail.name),
+    arguments: String(detail.name) === 'x_read_home'
+      ? { count: 30, url, query: url }
+      : { url, tweet_url: url, status_url: url },
+  }, 3, listed.sessionId);
+  if (called.body?.error) throw new Error(bounded(called.body.error, 1_000));
+  return extractXShareCandidates(unwrapMcpResult(called.body))[0] || null;
 }
 
 export async function runWebSearch(connection: ToolConnection, goal: string): Promise<ToolRunResult> {

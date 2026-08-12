@@ -68,6 +68,7 @@ export interface ExtractedWebpage {
   platform?: 'x';
   author?: string;
   likes?: number;
+  retweets?: number;
 }
 
 /** 卡片 metadata 里正文的存储上限：太长既占 IndexedDB 也没必要全留。 */
@@ -141,6 +142,7 @@ export function createXShareCard(text: string, url: string): ExtractedWebpage | 
     platform: 'x',
     author: parsed.author,
     likes: 0,
+    retweets: 0,
   };
 }
 

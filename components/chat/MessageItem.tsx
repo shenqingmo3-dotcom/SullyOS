@@ -2371,6 +2371,7 @@ const MessageItem = React.memo(({
         if (wp.platform === 'x' || wp.siteName === 'X') {
             const author = String(wp.author || '').trim();
             const likes = Number(wp.likes || 0);
+            const retweets = Number(wp.retweets || 0);
             return commonLayout(
                 <div
                     onClick={openPage}
@@ -2397,9 +2398,12 @@ const MessageItem = React.memo(({
                     <div className="px-3.5 pb-3 pt-2.5">
                         <div className="line-clamp-2 text-sm font-semibold leading-snug text-white">{wp.title || 'X 帖子'}</div>
                         {excerpt && excerpt !== wp.title && <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-300">{excerpt}</p>}
+                        <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-400">
+                            <span className="text-pink-300">♥ {likes}</span>
+                            <span className="text-sky-300">↻ {retweets}</span>
+                        </div>
                         <div className="mt-2.5 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px] text-slate-400">
                             <span>𝕏 · {isUser ? '分享' : '推荐'}</span>
-                            <span className="flex items-center gap-1"><span className="text-pink-400">♥</span>{likes}</span>
                         </div>
                     </div>
                 </div>

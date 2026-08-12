@@ -12,6 +12,7 @@ export interface ToolShareCandidate {
   noteId?: string;
   xsecToken?: string;
   likes?: number;
+  retweets?: number;
 }
 
 export interface ToolDigestion {

@@ -67,7 +67,7 @@ import {
     resolveContextRangeMode,
     type ContextRangeMode,
 } from '../utils/chatContextRange';
-import { flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { flushBackendMemorySyncQueue, getBackendXStatus, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 /** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
@@ -1250,6 +1250,23 @@ const Chat: React.FC = () => {
                 // X 页面经常只返回登录墙。和小红书一样，先从分享文案与 status URL
                 // 生成平台卡片，不把远端正文抓取当作成功前提。
                 let webpage: ExtractedWebpage | null = createXShareCard(text, sharedUrl);
+                if (webpage?.platform === 'x') {
+                    try {
+                        const remote = await getBackendXStatus(loadBackendChatConfig(), sharedUrl);
+                        if (remote) webpage = {
+                            ...webpage,
+                            title: remote.title || webpage.title,
+                            content: remote.description || webpage.content,
+                            excerpt: remote.description || webpage.excerpt,
+                            image: remote.imageUrl || webpage.image,
+                            author: remote.author || webpage.author,
+                            likes: remote.likes ?? webpage.likes,
+                            retweets: remote.retweets ?? webpage.retweets,
+                        };
+                    } catch (error) {
+                        console.warn('X status read failed; keeping local share card:', error);
+                    }
+                }
                 if (!webpage && isVideoShareUrl(sharedUrl)) {
                     try {
                         addToast('正在解析视频链接…', 'info');

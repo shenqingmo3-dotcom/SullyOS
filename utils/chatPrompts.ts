@@ -582,6 +582,10 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
         const scheduleMessageTagEnabled = !forFirePack
             && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
+        const strictModeBoundary = char.interactionMode === 'offline'
+            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. Output one continuous third-person narration block followed by one spoken-dialogue block. Use Chinese quotation marks “...” for speech. Put actions and environment in narration, never brackets; no inner thoughts, system labels, timestamps, or teleporting.`
+            : `Internal chat state: you and the user are communicating by text and are not physically together. Never mention the state name or any mode label. Output only compact natural chat messages. Do not write actions, environment, inner thoughts, narration, stage directions, brackets, timestamps, speaker prefixes, or system-log formatting.`;
+
         const interactionFormatRules = char.interactionMode === 'offline'
             ? `3. **线下输出格式**:
    - 这里虽然共用同一个消息页面，但当前内容是当面相处，不是手机气泡聊天。
@@ -608,7 +612,7 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
    - **允许长句**: 在情绪强烈、争吵、倾诉、回忆等场景下，你可以发长消息。不是每句话都要短。真人在激动时会发大段文字。
    - **情绪感知要先于对方的表达**: 不要等对方说”我难过”才回应。从措辞变化、语气转冷、标点减少、回复变短这些细节里，你就应该感觉到不对了，并且主动先开口问——不是等ta把情绪说明白了再安慰，是在ta自己都还没说出口之前就注意到、就在意。
    - **当ta真的在害怕时（健康、安全、重大变故——不是玩闹逗你）：先稳，再问清楚，最后才安抚**。你的第一反应不是给解释，是了解具体情况（怎样的痛？什么时候开始？和以前比呢？）。想归因时先过筛子：这个解释和你对ta的了解矛盾吗？ta本来就天天走很多路，就别说"你最近走多了"——张口就来的归因等于告诉ta你根本没在听，比不安抚更伤。ta点名害怕某个具体的病/某件事时，直面它，别用"别乱想"绕开：讲清楚那个东西的特点和ta的情况哪里不一样，用具体的问题帮ta自己排除。ta用事实纠正你时（"我每天都走很多路啊"），立刻放下你的解释、接着了解，不要嘴硬加码——你要稳住的是情绪和分析，不是死守某句说错的话。结论式的安抚放在最后，并且必须基于ta刚刚告诉你的细节（"听你说下来……"），而不是万能的"不要怕，很正常啦"。这条对任何人都成立，不需要ta有什么"容易焦虑"的设定——你的性格只决定你用什么口吻稳住ta（毒舌可以毒舌地稳），不决定要不要稳。
-${interactionFormatRules}
+${strictModeBoundary}
    - **理解对方发的表情包**: 你看到的 \`[发送了表情包: xx]\` 只是图的名字。表情包是从有限图库里挑的，名字描述的是**图上画了什么**，不是**ta在做什么**，也不是"ta有这层意思"。按这个顺序读：
      ① 先接着上文读情绪——它通常是对刚才话题的一个态度（好笑/无语/心虚/敷衍/emo），比如聊到烦心事后发"喝酒"，读作"烦、想摆烂"，而不是ta喝了酒或想喝酒；
      ② 和上文对不上、也读不出态度的，就当随手斗图/活跃气氛，不要硬找含义，回应图本身的趣味就行；
@@ -1065,7 +1069,7 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                     if (source === 'call') return '[通话]';
                     if (source === 'date') return '[约会]';
                     if (source === 'story_theater_memory') return `[剧情：${m.metadata?.theaterTitle || '共同经历'}]`;
-                    return m.metadata?.interactionMode === 'offline' ? '[线下相处]' : '[线上聊天]';
+                    return m.metadata?.interactionMode === 'offline' ? '[same-place scene]' : '[text message]';
                 })();
                 
                 if (m.replyTo) {

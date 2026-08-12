@@ -48,12 +48,6 @@ export interface HeartbeatResult {
   nextWakeAt: string;
 }
 
-export const HEARTBEAT_PROBABILITIES = {
-  low: 0.15,
-  mid: 0.35,
-  high: 0.65,
-} as const;
-
 export interface HeartbeatGateResult {
   passed: boolean;
   reasonSummary: string;
@@ -90,19 +84,6 @@ export function evaluateHeartbeatGates(input: {
   random?: () => number;
 }): HeartbeatGateResult {
   const now = input.now ?? new Date();
-  const latestConversationActivity = [input.lastUserActivityAt, input.lastAgentActivityAt]
-    .filter((value): value is Date => value instanceof Date)
-    .sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
-  if (latestConversationActivity && input.policy.idleThresholdMinutes > 0) {
-    const idleMinutes = (now.getTime() - latestConversationActivity.getTime()) / 60_000;
-    if (idleMinutes < input.policy.idleThresholdMinutes) {
-      return {
-        passed: false,
-        reasonSummary: `仍在最近对话的空闲阈值内（${Math.max(0, Math.floor(idleMinutes))}/${input.policy.idleThresholdMinutes} 分钟）。`,
-      };
-    }
-  }
-
   const window = input.policy.activityWindow;
   if (window.enabled) {
     const current = clockMinutes(now, input.timezone);
@@ -125,11 +106,7 @@ export function evaluateHeartbeatGates(input: {
     }
   }
 
-  const chance = HEARTBEAT_PROBABILITIES[input.policy.probabilityLevel];
-  if ((input.random ?? Math.random)() >= chance) {
-    return { passed: false, reasonSummary: `本轮未命中 ${input.policy.probabilityLevel} 概率档位。` };
-  }
-  return { passed: true, reasonSummary: '空闲、时段、冷却与概率门均已通过。' };
+  return { passed: true, reasonSummary: '活动时段与冷却条件均已通过；空闲阈值与概率档位不再拦截。' };
 }
 
 export function decideHeartbeat(demoMode: boolean): HeartbeatDecision {
@@ -408,6 +385,7 @@ async function insertPlatformShare(input: {
     noteId: candidate.noteId || '',
     xsecToken: candidate.xsecToken || '',
     likes: candidate.likes || 0,
+    retweets: candidate.retweets || 0,
   };
   const event = await input.client.query<{ id: string }>(
     `INSERT INTO conversation_events

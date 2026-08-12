@@ -507,11 +507,15 @@ export async function updateBackendXSession(
 }
 
 export interface BackendXFeedItem {
-    platform: 'x'; url: string; title: string; description: string; author: string; imageUrl?: string; likes?: number;
+    platform: 'x'; url: string; title: string; description: string; author: string; imageUrl?: string; likes?: number; retweets?: number;
 }
 export async function getBackendXFeed(config: BackendChatConfig, input: { view: 'home' | 'notifications' | 'profile'; handle?: string }): Promise<{ items: BackendXFeedItem[]; view: string; fetchedAt: string }> {
     const result = await backendFetch(config, '/v1/tools/x.read/feed', { method: 'POST', body: JSON.stringify(input) });
     return result.data;
+}
+export async function getBackendXStatus(config: BackendChatConfig, url: string): Promise<BackendXFeedItem | null> {
+    const result = await backendFetch(config, '/v1/tools/x.read/status', { method: 'POST', body: JSON.stringify({ url }) });
+    return (result.data || null) as BackendXFeedItem | null;
 }
 
 export interface BackendPhoneDeviceTokenResult {

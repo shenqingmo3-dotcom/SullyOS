@@ -10,6 +10,7 @@ describe('platform share candidates', () => {
         handle: 'shark',
         image_url: 'https://img.example/x.jpg',
         like_count: 42,
+        retweet_count: 7,
       }],
     });
 
@@ -20,6 +21,7 @@ describe('platform share candidates', () => {
       author: '@shark',
       imageUrl: 'https://img.example/x.jpg',
       likes: 42,
+      retweets: 7,
     });
   });
 

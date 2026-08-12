@@ -419,7 +419,7 @@ const SharkBackendSettings: React.FC = () => {
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2">
+                        <div className="grid grid-cols-2 gap-2 border-t border-violet-100/80 pt-2 [&>label:nth-child(2)]:hidden">
                             <label className="space-y-1">
                                 <span className="text-[9px] text-slate-500">苏醒间隔</span>
                                 <select value={agent.intervalMinutes} disabled={agentBusyId === agent.characterId}
@@ -475,7 +475,7 @@ const SharkBackendSettings: React.FC = () => {
                             <p className="text-[8px] text-slate-400">按设备时区 {agent.timezone || 'UTC'} 判断，可跨午夜。</p>
                         </div>
 
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="hidden flex items-center justify-between gap-2">
                             <span className="text-[9px] text-slate-500">触发概率</span>
                             <div className="flex rounded-lg bg-slate-100 p-0.5">
                                 {(['low', 'mid', 'high'] as const).map(level => <button key={level} type="button"

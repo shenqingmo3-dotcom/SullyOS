@@ -160,6 +160,18 @@ export async function registerToolConnectionRoutes(app: FastifyInstance): Promis
     }
   });
 
+  app.post('/v1/tools/x.read/status', async (request, reply) => {
+    const input = z.object({ url: z.string().url().max(2_000) }).parse(request.body ?? {});
+    const connection = await getToolConnection('x.read');
+    if (!connection?.enabled || !connection.endpoint) return reply.code(400).send({ error: { code: 'x_not_configured', message: 'X 工具尚未启用' } });
+    try {
+      const { readXStatus } = await import('./toolRunner.js');
+      return { data: await readXStatus(input.url) };
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'x_status_failed', message: error instanceof Error ? error.message : 'X 帖子读取失败' } });
+    }
+  });
+
   app.put('/v1/tools/:id', async (request) => {
     const id = connectionIdSchema.parse((request.params as { id?: unknown }).id);
     const input = patchSchema.parse(request.body);
