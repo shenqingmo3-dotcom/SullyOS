@@ -32,6 +32,7 @@ import {
     loadBackendChatConfig,
     syncBackendContext,
 } from '../utils/backendClient';
+import { appendXChatReadContext, loadXChatReadContext } from '../utils/xChatRead';
 import {
     isInstantConfigReady,
     sendInstantPushAndAwaitReply,
@@ -999,7 +1000,10 @@ export const useChatAI = ({
             }));
             const systemPrompt = payload.systemPrompt;
             const cleanedApiMessages = payload.cleanedApiMessages;
-            const fullMessages = payload.fullMessages;
+            const xChatReadContext = typeof latestUserText === 'string'
+                ? await stageT('xRead', loadXChatReadContext(latestUserText, loadBackendChatConfig()))
+                : null;
+            const fullMessages = appendXChatReadContext(payload.fullMessages, xChatReadContext);
             const promptBuildSkipped = payload.flags.promptBuildSkipped;
             if (payload.flags.mcdActive) {
                 console.log(`🍔 [MCD-MiniApp] 注入协同点餐上下文 step=${mcdMiniSnap?.step} cartItems=${mcdMiniSnap?.cart?.length || 0} menuItems=${mcdMiniSnap?.menuMeals ? Object.keys(mcdMiniSnap.menuMeals).length : 0} nutrition=${mcdMiniSnap?.nutritionData ? mcdMiniSnap.nutritionData.length : 0}字`);
@@ -2007,7 +2011,7 @@ export const useChatAI = ({
                 commentParentIdCache: commentParentIdCacheRef.current,
             };
             await applyAssistantPostProcessing(rawAiContent, {
-                char,
+                char: charForGen,
                 userProfile,
                 emojis,
                 realtimeConfig,

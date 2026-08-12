@@ -9,6 +9,7 @@ export interface ToolShareCandidate {
   description?: string;
   author?: string;
   imageUrl?: string;
+  mediaUrls?: string[];
   noteId?: string;
   xsecToken?: string;
   likes?: number;

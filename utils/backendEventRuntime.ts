@@ -10,6 +10,7 @@ import { getBackendEventCursor, getBackendEvents, getBackendPhonePeekImage, load
 import { putImageBlob } from './blobRef';
 import { DB } from './db';
 import { buildActivityCardPayload, upsertDiaryCardMessage } from './journalCards';
+import { normalizeWebpageMediaUrls } from './webpageExtractor';
 
 const POLL_INTERVAL_MS = 30_000;
 const CURSOR_KEY_PREFIX = 'sullyos_backend_event_cursor_v1:';
@@ -96,6 +97,7 @@ export function buildPlatformShareMessage(
                 : typeof post.imageUrl === 'string' ? post.imageUrl
                     : typeof post.image_url === 'string' ? post.image_url
                         : typeof post.image === 'string' ? post.image : '';
+    const mediaUrls = normalizeWebpageMediaUrls(data.mediaUrls, post.mediaUrls, imageUrl);
     const likes = Number(data.likes ?? data.like_count ?? data.likeCount ?? data.favorite_count
         ?? post.likes ?? post.like_count ?? post.likeCount ?? post.favorite_count ?? 0) || 0;
     const retweets = Number(data.retweets ?? data.retweet_count ?? data.retweetCount ?? data.repost_count
@@ -135,7 +137,8 @@ export function buildPlatformShareMessage(
                 finalUrl: url,
                 title,
                 excerpt: description,
-                image: imageUrl,
+                image: mediaUrls[0],
+                mediaUrls,
                 siteName: platform === 'x' ? 'X' : '网页',
                 platform,
                 author,

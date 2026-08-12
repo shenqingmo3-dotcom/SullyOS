@@ -264,7 +264,11 @@ const BackendToolSettings: React.FC<{
                     className="w-full rounded-lg border border-violet-300 bg-white py-2 text-[10px] font-bold text-violet-700">打开远程桌面手动登录</button>
                   <input value={String(connection.settings.selfHandle || '')}
                     onChange={(event) => patchSetting('x.read', 'selfHandle', event.target.value.replace(/^@/, '').trim())}
-                    placeholder="自己的 X 用户名（不带 @，用于查看自己的主页）"
+                    placeholder="角色登录的 X 用户名（不带 @）"
+                    className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-[10px]" />
+                  <input value={String(connection.settings.userHandle || '')}
+                    onChange={(event) => patchSetting('x.read', 'userHandle', event.target.value.replace(/^@/, '').trim())}
+                    placeholder="用户的 X 用户名（不带 @，用于“看我的主页”）"
                     className="w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-[10px]" />
                   <p className="rounded-lg border border-violet-100 bg-white/80 p-2 text-[10px] leading-relaxed text-slate-500">
                     角色会按自己的人设决定评价、点赞、转推或把帖子分享到聊天；不会为了刷动作而机械互动。

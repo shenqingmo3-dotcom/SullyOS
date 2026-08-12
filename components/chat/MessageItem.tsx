@@ -8,6 +8,7 @@ import { tryParseLifeSimResetCard } from '../../utils/lifeSimChatCard';
 import { VALID_INTERJECTION_TAGS, cleanVoiceMarkupForDisplay } from '../../utils/minimaxTts';
 import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
 import { formatStatCount } from '../../utils/videoParser';
+import { normalizeWebpageMediaUrls } from '../../utils/webpageExtractor';
 import { trackEvent } from '../../utils/analytics';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
@@ -2373,7 +2374,14 @@ const MessageItem = React.memo(({
             const author = String(xData.author || xData.handle || xData.username || '').trim();
             const likes = Number(xData.likes ?? xData.like_count ?? xData.likeCount ?? xData.favorite_count ?? 0) || 0;
             const retweets = Number(xData.retweets ?? xData.retweet_count ?? xData.retweetCount ?? xData.repost_count ?? 0) || 0;
-            const image = String(xData.image || xData.imageUrl || xData.image_url || xData.mediaUrl || xData.media_url || '').trim();
+            const mediaUrls = normalizeWebpageMediaUrls(
+                xData.mediaUrls,
+                xData.image,
+                xData.imageUrl,
+                xData.image_url,
+                xData.mediaUrl,
+                xData.media_url,
+            );
             const postText = String(xData.excerpt || xData.description || xData.text || xData.full_text || xData.fullText || wp.title || '').trim();
             return commonLayout(
                 <div
@@ -2381,17 +2389,22 @@ const MessageItem = React.memo(({
                     role="link"
                     tabIndex={0}
                     onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openPage(); }}
-                    className="w-64 overflow-hidden rounded-xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer transition-opacity active:opacity-90">
-                    {image && (
-                        <div className="h-36 w-full overflow-hidden bg-slate-900">
-                            <img
-                                src={image}
-                                alt="X 帖子配图"
-                                className="h-full w-full object-cover"
-                                loading="lazy"
-                                referrerPolicy="no-referrer"
-                                onError={(e: any) => { const c = e.target?.parentElement; if (c) c.style.display = 'none'; }}
-                            />
+                    className="w-full max-w-[320px] overflow-hidden rounded-xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer transition-opacity active:opacity-90">
+                    {mediaUrls.length > 0 && (
+                        <div className={`grid w-full gap-0.5 overflow-hidden bg-slate-900 ${mediaUrls.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                            {mediaUrls.map((imageUrl: string, index: number) => (
+                                <div key={imageUrl} className={`${mediaUrls.length === 1 ? 'aspect-[4/3]' : 'aspect-square'} min-w-0 overflow-hidden`}>
+                                    <img
+                                        src={imageUrl}
+                                        alt={`X post image ${index + 1}`}
+                                        className="h-full w-full object-cover"
+                                        loading="lazy"
+                                        decoding="async"
+                                        referrerPolicy="no-referrer"
+                                        onError={(e: any) => { const cell = e.currentTarget?.parentElement; if (cell) cell.style.display = 'none'; }}
+                                    />
+                                </div>
+                            ))}
                         </div>
                     )}
                     <div className="p-3">

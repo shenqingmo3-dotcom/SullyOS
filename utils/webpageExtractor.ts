@@ -58,6 +58,8 @@ export interface ExtractedWebpage {
   excerpt: string;
   /** 封面图 URL（og:image / 正文首图），卡片显示用。 */
   image?: string;
+  /** X post media in source order; image remains the first-item compatibility field. */
+  mediaUrls?: string[];
   /** 正文是否因超长被截断。 */
   truncated: boolean;
   /** 抓取时间戳。 */
@@ -81,6 +83,22 @@ const APIZERO_EXTRACT_ENDPOINT = 'https://v1.apizero.cn/api/content-extract';
 /** 提取正文短于这个就当失败：多半是 SPA 壳 / 反爬占位页，让 Jina（无头渲染）接手。 */
 const MIN_EXTRACT_CHARS = 80;
 const APIZERO_TIMEOUT_MS = 20000;
+
+export function normalizeWebpageMediaUrls(...sources: unknown[]): string[] {
+  const urls: string[] = [];
+  const append = (value: unknown): void => {
+    if (urls.length >= 4) return;
+    if (Array.isArray(value)) {
+      for (const item of value) append(item);
+      return;
+    }
+    if (typeof value !== 'string') return;
+    const url = value.trim();
+    if (/^(?:data:image\/|https?:\/\/)/i.test(url) && !urls.includes(url)) urls.push(url);
+  };
+  for (const source of sources) append(source);
+  return urls;
+}
 
 /**
  * 从一段文本里揪出第一个 http(s) 链接。返回 null 表示没有可抓的链接。

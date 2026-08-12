@@ -449,6 +449,7 @@ async function insertPlatformShare(input: {
     description: candidate.description || '',
     author: candidate.author || '',
     imageUrl: candidate.imageUrl || '',
+    mediaUrls: candidate.mediaUrls || [],
     noteId: candidate.noteId || '',
     xsecToken: candidate.xsecToken || '',
     likes: candidate.likes || 0,

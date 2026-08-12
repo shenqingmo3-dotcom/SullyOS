@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractXShareCandidates, extractXhsShareCandidates, matchingXStatus, xStatusToolArguments } from '../src/toolRunner.js';
+import { chooseXReadTool, extractXFollowingAccounts, extractXShareCandidates, extractXhsShareCandidates, matchingXStatus, xStatusToolArguments } from '../src/toolRunner.js';
 
 describe('platform share candidates', () => {
   it('uses the exact single-post argument required by the deployed X MCP', () => {
@@ -69,6 +69,40 @@ describe('platform share candidates', () => {
     });
   });
 
+  it('deduplicates X media, caps it at four, and ignores reply media', () => {
+    const [candidate] = extractXShareCandidates({
+      url: 'https://x.com/waffle/status/9876543210',
+      focused: {
+        id: '9876543210',
+        url: 'https://x.com/waffle/status/9876543210',
+        text: 'A gallery',
+        attachments: {
+          media: [
+            { media_url: 'https://img.example/1.jpg' },
+            { preview_image_url: 'https://img.example/2.jpg' },
+            { image_url: 'https://img.example/1.jpg' },
+            { url: 'https://img.example/3.jpg' },
+            { thumbnail_url: 'https://img.example/4.jpg' },
+            { image: 'https://img.example/5.jpg' },
+          ],
+        },
+      },
+      replies: [{
+        id: '9876543211',
+        url: 'https://x.com/reply/status/9876543211',
+        image_url: 'https://img.example/reply.jpg',
+      }],
+    });
+
+    expect(candidate?.mediaUrls).toEqual([
+      'https://img.example/1.jpg',
+      'https://img.example/2.jpg',
+      'https://img.example/3.jpg',
+      'https://img.example/4.jpg',
+    ]);
+    expect(candidate?.imageUrl).toBe('https://img.example/1.jpg');
+  });
+
   it('extracts the focused post from the deployed x_read_tweet response shape', () => {
     const [candidate] = extractXShareCandidates({
       url: 'https://x.com/yongsa412/status/2087158741556928724',
@@ -99,5 +133,25 @@ describe('platform share candidates', () => {
     expect(matchingXStatus(candidates, 'https://x.com/shark/status/222')?.imageUrl)
       .toBe('https://img.example/right.jpg');
     expect(matchingXStatus(candidates, 'https://x.com/shark/status/333')).toBeNull();
+  });
+
+  it('normalizes and deduplicates X following accounts', () => {
+    expect(extractXFollowingAccounts({ users: [
+      { screen_name: 'shark', name: '小鲨鱼', description: '海边散步。' },
+      { username: '@waffle', display_name: '华夫饼' },
+      { handle: 'SHARK', name: '重复项' },
+    ] })).toEqual([
+      { handle: 'shark', name: '小鲨鱼', bio: '海边散步。' },
+      { handle: 'waffle', name: '华夫饼', bio: '' },
+    ]);
+  });
+
+  it('does not disguise the home feed as the requested own profile', () => {
+    const connection = { settings: {} } as any;
+    const tools = [{ name: 'x_read_home' }, { name: 'x_read_timeline' }];
+    expect(() => chooseXReadTool(connection, '我的主页', tools))
+      .toThrow('没有保存你的账号 handle');
+    expect(() => chooseXReadTool(connection, '主页: shark', [{ name: 'x_read_home' }]))
+      .toThrow('没有提供用户主页读取工具');
   });
 });

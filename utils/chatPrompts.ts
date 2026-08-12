@@ -21,6 +21,8 @@ import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
+import { buildOfflineSceneRules } from './interactionMode';
+import { normalizeWebpageMediaUrls } from './webpageExtractor';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -583,22 +585,8 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
             && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         const strictModeBoundary = char.interactionMode === 'offline'
-            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. All narration must be third-person: use the character's name, 他/她, or ta, never 我, as the subject of actions, body movement, environment interaction, or scene narration. The character may use 我 normally inside spoken dialogue. Prefix every action, environment, or third-person scene narration block with "> ", and put each such block on its own line. Put every spoken dialogue block on a separate line and wrap it in Chinese quotation marks “...”. Narration and dialogue must never share one line or one bubble. Never use brackets for actions; no direct inner thoughts, system labels, timestamps, teleporting, or touching across an unclosed physical distance.`
+            ? buildOfflineSceneRules()
             : `Internal chat state: follow the original SullyOS mobile-chat rules below. Never mention the state name or any mode label. Do not output internal labels such as [text message], [线上聊天], or speaker/log prefixes.`;
-
-        const interactionFormatRules = char.interactionMode === 'offline'
-            ? `3. **线下输出格式**:
-   - 这里虽然共用同一个消息页面，但当前内容是当面相处，不是手机气泡聊天。
-   - 所有叙述必须使用第三人称：动作、身体移动、环境互动和场景描写要用角色名、他/她或 ta 作主语，不能用“我”写叙述；对白内部可以正常使用“我”。每个叙述块都必须以 `> ` 开头并独占一行。
-   - 每个说出口的对白块都必须使用中文引号“……”并独占一行。动作与对白可以自然交替，但绝不能写在同一行或同一个气泡里。
-   - 合并同一瞬间的动作与环境，不要用括号动作或直接内心独白；延续地点和距离，移动写出过程，距离不足时不能突然触碰。
-   - 表情包、引用、戳一戳、转账等手机 UI 命令默认不用；只有角色在场景里确实拿起手机操作时才使用对应能力。社交平台、网页、搜索与 MCP 工具仍可照常使用。`
-            : `3. **线上输出格式**:
-   - 将回复拆分成简短的气泡（句子）。**【极其重要】当你想分成多条消息气泡时，必须使用真正的换行符（\\n）分隔，每一行会变成一个独立气泡。绝对不要用空格代替换行！空格不会产生新气泡！只有换行符（\\n）才会分割气泡。** 正常句子中的标点不会被用来分割气泡，请自然使用。
-   - 【严禁】在输出中包含时间戳、名字前缀或“[角色名]:”。
-   - **【严禁】模仿历史记录中的系统日志格式（如“[你 发送了...]”），也不要输出 [text message]、[线上聊天] 等内部标签。**
-   - **发送表情包**: 必须且只能使用命令：\`[[SEND_EMOJI: 表情名称]]\`。
-   - **可用表情库 (按分类)**:\n${emojiContextStr}`;
 
         baseSystemPrompt += `### 同一互动平台行为规范
 **当前线上 / 线下状态块是唯一有效的互动形式。打开这个页面、发送消息、使用平台工具或调用 MCP 都不会自动把线下状态改成线上。**
@@ -1204,13 +1192,13 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                         userProfile?.name || '用户',
                     );
                     content = `${timeStr} ${readable}`;
-                    const image = typeof webpage.image === 'string' ? webpage.image.trim() : '';
-                    if (image && /^(?:data:image\/|https?:\/\/)/i.test(image)) {
+                    const mediaUrls = normalizeWebpageMediaUrls(webpage.mediaUrls, webpage.image);
+                    if (mediaUrls.length > 0) {
                         return {
                             role: m.role,
                             content: [
                                 { type: 'text', text: content },
-                                { type: 'image_url', image_url: { url: image } },
+                                ...mediaUrls.map(url => ({ type: 'image_url', image_url: { url } })),
                             ],
                         };
                     }

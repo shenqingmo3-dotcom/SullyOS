@@ -5,6 +5,7 @@ import {
     enqueueBackendChatMessageDeletes,
     enqueueBackendMemoryChange,
     getBackendMemoryChanges,
+    getBackendMemoryChangesByKeys,
 } from './backendSyncQueue';
 
 describe('backend deletion queue', () => {
@@ -71,6 +72,29 @@ describe('backend deletion queue', () => {
 
         expect(await getBackendMemoryChanges('character-1')).toEqual([
             expect.objectContaining({ updatedAt: 200, payload: { content: 'new' } }),
+        ]);
+        vi.restoreAllMocks();
+    });
+
+    it('can read a newly queued deletion even when older work fills the normal batch', async () => {
+        vi.spyOn(Date, 'now').mockReturnValue(100);
+        for (let index = 0; index < 205; index += 1) {
+            await enqueueBackendMemoryChange({
+                charId: 'character-1', entityType: 'memory_node', entityId: `old-${index}`,
+                operation: 'upsert', payload: { content: 'older queued work' },
+            });
+        }
+        vi.mocked(Date.now).mockReturnValue(200);
+        await enqueueBackendChatMessageDeletes('character-1', [{ id: 999 }]);
+
+        const regular = await getBackendMemoryChanges('character-1', 200);
+        expect(regular.some(change => change.entityId === '999')).toBe(false);
+        const priority = await getBackendMemoryChangesByKeys(
+            'character-1',
+            ['character-1:chat_message:999'],
+        );
+        expect(priority).toEqual([
+            expect.objectContaining({ entityType: 'chat_message', entityId: '999', operation: 'delete' }),
         ]);
         vi.restoreAllMocks();
     });

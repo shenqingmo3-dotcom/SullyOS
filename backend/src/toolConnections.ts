@@ -31,7 +31,11 @@ const xSessionSchema = z.object({
   authToken: z.string().min(10).max(1_000),
   ct0: z.string().max(1_000).optional().default(''),
 });
-const xFeedSchema = z.object({ view: z.enum(['home', 'notifications', 'profile']).default('home'), handle: z.string().max(100).optional() });
+const xFeedSchema = z.object({
+  view: z.enum(['home', 'notifications', 'profile']).default('home'),
+  handle: z.string().max(100).optional(),
+  owner: z.enum(['user', 'character']).optional(),
+});
 
 interface ConnectionRow {
   id: ToolConnectionId;
@@ -157,6 +161,17 @@ export async function registerToolConnectionRoutes(app: FastifyInstance): Promis
       return { data: await readXFeed(input) };
     } catch (error) {
       return reply.code(400).send({ error: { code: 'x_feed_failed', message: error instanceof Error ? error.message : 'X Feed 读取失败' } });
+    }
+  });
+
+  app.post('/v1/tools/x.read/following', async (_request, reply) => {
+    const connection = await getToolConnection('x.read');
+    if (!connection?.enabled || !connection.endpoint) return reply.code(400).send({ error: { code: 'x_not_configured', message: 'X 工具尚未启用' } });
+    try {
+      const { readXFollowing } = await import('./toolRunner.js');
+      return { data: await readXFollowing() };
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'x_following_failed', message: error instanceof Error ? error.message : 'X 关注列表读取失败' } });
     }
   });
 

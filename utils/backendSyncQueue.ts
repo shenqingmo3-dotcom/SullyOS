@@ -90,6 +90,34 @@ export async function getBackendMemoryChanges(charId: string, limit = 2_000): Pr
     });
 }
 
+/** Read specific queue entries without being blocked by older unrelated changes. */
+export async function getBackendMemoryChangesByKeys(
+    charId: string,
+    keys: string[],
+): Promise<BackendMemoryChange[]> {
+    if (keys.length === 0) return [];
+    const db = await openDB();
+    if (!db.objectStoreNames.contains(STORE)) return [];
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const store = tx.objectStore(STORE);
+        const results: BackendMemoryChange[] = [];
+        let remaining = keys.length;
+        for (const key of keys) {
+            const request = store.get(key);
+            request.onsuccess = () => {
+                const value = request.result as BackendMemoryChange | undefined;
+                if (value?.charId === charId) results.push(value);
+                remaining -= 1;
+                if (remaining === 0) resolve(results);
+            };
+            request.onerror = () => reject(request.error);
+        }
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
+
 export async function acknowledgeBackendMemoryChanges(
     acknowledged: Array<Pick<BackendMemoryChange, 'key' | 'updatedAt'>>,
 ): Promise<void> {

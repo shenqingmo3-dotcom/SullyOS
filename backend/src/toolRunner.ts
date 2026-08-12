@@ -208,6 +208,44 @@ function firstNestedCount(records: Record<string, any>[], keys: string[]): numbe
   return 0;
 }
 
+const X_MEDIA_URL_KEYS = new Set([
+  'image', 'imageUrl', 'image_url', 'mediaUrl', 'media_url', 'preview_image_url',
+  'thumbnail', 'thumbnailUrl', 'thumbnail_url',
+]);
+const X_MEDIA_CONTAINER_KEYS = new Set(['attachments', 'media', 'photos', 'images']);
+
+function collectXMediaUrls(
+  value: unknown,
+  targetStatusId: string,
+  output: string[],
+  depth = 0,
+  insideMedia = false,
+): void {
+  if (depth > 7 || output.length >= 4 || value == null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectXMediaUrls(item, targetStatusId, output, depth + 1, insideMedia);
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const record = value as Record<string, unknown>;
+  const nestedUrl = firstString(record.url, record.tweet_url, record.tweetUrl, record.status_url, record.permalink);
+  const nestedStatusId = xStatusId(nestedUrl);
+  if (nestedStatusId && targetStatusId && nestedStatusId !== targetStatusId) return;
+
+  for (const [key, nested] of Object.entries(record)) {
+    const isStatusRecord = depth === 0 || nestedStatusId === targetStatusId;
+    const isMediaUrl = (X_MEDIA_URL_KEYS.has(key) && (insideMedia || isStatusRecord))
+      || (insideMedia && key === 'url');
+    if (isMediaUrl && typeof nested === 'string' && /^https?:\/\//i.test(nested.trim())) {
+      const url = nested.trim();
+      if (!output.includes(url)) output.push(url);
+      if (output.length >= 4) return;
+    }
+    collectXMediaUrls(nested, targetStatusId, output, depth + 1, insideMedia || X_MEDIA_CONTAINER_KEYS.has(key));
+  }
+}
+
 export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
   const objects: Record<string, any>[] = [];
   collectObjects(value, objects);
@@ -226,10 +264,9 @@ export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
       handle && `@${handle.replace(/^@/, '')}`,
       displayName,
     );
-    const imageUrl = firstNestedString(records, [
-      'image', 'imageUrl', 'image_url', 'mediaUrl', 'media_url', 'preview_image_url',
-      'thumbnail', 'thumbnailUrl', 'thumbnail_url',
-    ]);
+    const mediaUrls: string[] = [];
+    collectXMediaUrls(item, xStatusId(url), mediaUrls);
+    const imageUrl = mediaUrls[0];
     const likes = firstNestedCount(records, ['like_count', 'likes', 'likeCount', 'favorite_count', 'favoriteCount']);
     const retweets = firstNestedCount(records, [
       'retweet_count', 'retweets', 'retweetCount', 'repost_count', 'reposts', 'repostCount',
@@ -237,7 +274,7 @@ export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
     candidates.push({
       platform: 'x', url,
       title: description.slice(0, 100) || `${author || 'X 用户'} 的帖子`,
-      description: description.slice(0, 1_200), author, imageUrl,
+      description: description.slice(0, 1_200), author, imageUrl, mediaUrls,
       likes,
       retweets,
     });
@@ -297,7 +334,7 @@ async function chooseMcpTool(goal: string, tools: Array<Record<string, unknown>>
   return toolChoiceSchema.parse(parseJsonObject(typeof content === 'string' ? content : ''));
 }
 
-function chooseXReadTool(
+export function chooseXReadTool(
   connection: ToolConnection,
   goal: string,
   tools: Array<Record<string, unknown>>,
@@ -309,10 +346,13 @@ function chooseXReadTool(
   }
   const explicitUser = normalized.match(/(?:用户|主页|账号)\s*[:：]\s*@?([A-Za-z0-9_]+)/i)?.[1];
   const wantsOwnProfile = /我的主页|自己(?:的)?主页|我转发|自己的动态/i.test(normalized);
+  const wantsProfile = Boolean(explicitUser || wantsOwnProfile);
   const user = explicitUser || (wantsOwnProfile ? firstString(connection.settings.selfHandle) : '');
   if (user && names.has('x_read_timeline')) {
     return { toolName: 'x_read_timeline', arguments: { user, count: 20 } };
   }
+  if (wantsOwnProfile && !user) throw new Error('X 工具没有保存你的账号 handle，无法读取“我的主页”。');
+  if (wantsProfile) throw new Error('当前 X 桥接器没有提供用户主页读取工具。');
   if (names.has('x_read_home')) return { toolName: 'x_read_home', arguments: { count: 18 } };
   const fallback = tools.find((tool) => !isProbablyWriteTool(String(tool.name || '')));
   if (!fallback?.name) throw new Error('X 桥接器没有可用的读取工具。');
@@ -492,13 +532,103 @@ async function runXhsLite(connection: ToolConnection, goal: string): Promise<Too
   };
 }
 
-export async function readXFeed(input: { view: 'home' | 'notifications' | 'profile'; handle?: string }): Promise<{ items: ToolShareCandidate[]; view: string; fetchedAt: string }> {
+export async function readXFeed(input: { view: 'home' | 'notifications' | 'profile'; handle?: string; owner?: 'user' | 'character' }): Promise<{ items: ToolShareCandidate[]; view: string; fetchedAt: string }> {
   const connection = await getToolConnection('x.read');
   if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
+  const configuredHandle = input.owner === 'user'
+    ? firstString(connection.settings.userHandle)
+    : input.owner === 'character' ? firstString(connection.settings.selfHandle) : '';
+  if (input.view === 'profile' && input.owner === 'user' && !configuredHandle) {
+    throw new Error('尚未配置用户的 X 用户名，无法读取用户主页。');
+  }
+  if (input.view === 'profile' && input.owner === 'character' && !configuredHandle) {
+    throw new Error('尚未识别角色登录的 X 用户名，无法读取角色主页。');
+  }
+  const handle = input.handle || configuredHandle;
   const goal = input.view === 'notifications' ? '通知' : input.view === 'profile'
-    ? `我的主页${input.handle ? ` 用户: ${input.handle}` : ''}` : '首页';
+    ? `主页: ${handle}` : '首页';
   const result = await runMcp(connection, goal);
   return { items: result.shareCandidates || [], view: input.view, fetchedAt: new Date().toISOString() };
+}
+
+export interface XFollowingAccount {
+  handle: string;
+  name: string;
+  bio: string;
+}
+
+function xFollowingTool(tools: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  const exactNames = ['x_read_following', 'x_read_friends', 'x_read_following_list'];
+  for (const name of exactNames) {
+    const tool = tools.find(candidate => String(candidate.name || '').toLowerCase() === name);
+    if (tool) return tool;
+  }
+  return tools.find(tool => /^(?:x_)?(?:read|get|list)_(?:following|friends|following_list)$/i.test(String(tool.name || ''))
+    && !isProbablyWriteTool(String(tool.name || '')));
+}
+
+function xFollowingToolArguments(tool: Record<string, unknown>, selfHandle: string): Record<string, unknown> {
+  const inputSchema = tool.inputSchema;
+  const properties = inputSchema && typeof inputSchema === 'object' && !Array.isArray(inputSchema)
+    ? (inputSchema as { properties?: Record<string, unknown> }).properties || {}
+    : {};
+  const args: Record<string, unknown> = {};
+  if (selfHandle) {
+    for (const key of ['user', 'username', 'handle', 'screen_name']) {
+      if (key in properties) {
+        args[key] = selfHandle.replace(/^@/, '');
+        break;
+      }
+    }
+  }
+  for (const key of ['count', 'limit', 'max_results']) {
+    if (key in properties) {
+      args[key] = 50;
+      break;
+    }
+  }
+  return args;
+}
+
+export function extractXFollowingAccounts(value: unknown): XFollowingAccount[] {
+  const objects: Record<string, any>[] = [];
+  collectObjects(value, objects);
+  const accounts: XFollowingAccount[] = [];
+  const seen = new Set<string>();
+  for (const item of objects) {
+    const handle = firstString(item.handle, item.username, item.screen_name, item.screenName).replace(/^@/, '');
+    if (!/^[A-Za-z0-9_]{1,50}$/.test(handle) || seen.has(handle.toLowerCase())) continue;
+    seen.add(handle.toLowerCase());
+    accounts.push({
+      handle,
+      name: firstString(item.display_name, item.displayName, item.name),
+      bio: firstString(item.bio, item.description).slice(0, 500),
+    });
+    if (accounts.length >= 50) break;
+  }
+  return accounts;
+}
+
+export async function readXFollowing(): Promise<{ accounts: XFollowingAccount[]; fetchedAt: string }> {
+  const connection = await getToolConnection('x.read');
+  if (!connection?.enabled || !connection.endpoint) throw new Error('X 工具尚未启用或未配置');
+  const initialized = await mcpRpc(connection, 'initialize', {
+    protocolVersion: '2025-06-18', capabilities: {},
+    clientInfo: { name: 'sullyos-chat', version: '1.0.0' },
+  }, 1);
+  const listed = await mcpRpc(connection, 'tools/list', {}, 2, initialized.sessionId);
+  const tools = Array.isArray(listed.body?.result?.tools) ? listed.body.result.tools as Array<Record<string, unknown>> : [];
+  const tool = xFollowingTool(tools);
+  if (!tool?.name) throw new Error('当前 X 桥接器没有提供关注列表读取工具。');
+  const called = await mcpRpc(connection, 'tools/call', {
+    name: String(tool.name),
+    arguments: xFollowingToolArguments(tool, firstString(connection.settings.selfHandle)),
+  }, 3, listed.sessionId);
+  if (called.body?.error) throw new Error(bounded(called.body.error, 1_000));
+  return {
+    accounts: extractXFollowingAccounts(unwrapMcpResult(called.body)),
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export function xStatusToolArguments(tool: Record<string, unknown>, url: string): Record<string, string> {
@@ -564,9 +694,7 @@ export async function readXStatus(url: string): Promise<ToolShareCandidate | nul
   }, 3, listed.sessionId);
   if (called.body?.error) throw new Error(bounded(called.body.error, 1_000));
   const detailCandidates = extractXShareCandidates(unwrapMcpResult(called.body));
-  const candidate = matchingXStatus(detailCandidates, url)
-    || detailCandidates[0]
-    || null;
+  const candidate = matchingXStatus(detailCandidates, url);
   if (!candidate || candidate.imageUrl) return candidate;
 
   const parsedUrl = url.match(/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/([^/]+)\/status\/\d+/i);
@@ -588,7 +716,9 @@ export async function readXStatus(url: string): Promise<ToolShareCandidate | nul
       }, 4 + index, called.sessionId);
       if (enriched.body?.error) continue;
       const exact = matchingXStatus(extractXShareCandidates(unwrapMcpResult(enriched.body)), url);
-      if (exact?.imageUrl) return { ...candidate, imageUrl: exact.imageUrl };
+      if (exact?.mediaUrls?.length) {
+        return { ...candidate, mediaUrls: exact.mediaUrls, imageUrl: exact.mediaUrls[0] };
+      }
     } catch {
       // The detail result remains useful even when optional media enrichment is unavailable.
     }

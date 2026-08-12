@@ -5,7 +5,7 @@ import { ChatPrompts } from './chatPrompts';
 const char = { id: 'c1', name: 'Sully', timeAwarenessEnabled: false } as any;
 const userProfile = { name: '我' } as any;
 
-function xCard(image = ''): Message {
+function xCard(image = '', mediaUrls?: string[]): Message {
     return {
         id: 1,
         charId: char.id,
@@ -24,6 +24,7 @@ function xCard(image = ''): Message {
                 likes: 71,
                 retweets: 428,
                 image,
+                mediaUrls,
             },
         },
     } as Message;
@@ -57,5 +58,17 @@ describe('buildMessageHistory X webpage card', () => {
         expect(content[0]?.text).toContain('这是角色必须真正读到的帖子正文。');
         expect(content[0]?.text).toContain('https://x.com/yongsa412/status/2087158741556928724');
         expect(content[1]).toEqual({ type: 'image_url', image_url: { url: image } });
+    });
+
+    it('sends at most four deduplicated X images while keeping legacy image compatibility', () => {
+        const urls = [1, 2, 3, 4, 5].map(index => `https://img.example/${index}.jpg`);
+        const { apiMessages } = ChatPrompts.buildMessageHistory(
+            [xCard(urls[0], [urls[0], urls[1], urls[0], urls[2], urls[3], urls[4]])],
+            10, char, userProfile, [],
+        );
+        const content = apiMessages[0]?.content as any[];
+        expect(content.slice(1)).toEqual(urls.slice(0, 4).map(url => ({
+            type: 'image_url', image_url: { url },
+        })));
     });
 });

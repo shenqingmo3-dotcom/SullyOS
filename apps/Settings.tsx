@@ -3704,7 +3704,7 @@ const Settings: React.FC = () => {
                       <input type="password" value={xCt0} onChange={e => setXCt0(e.target.value)} placeholder="ct0（可留空）" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[10px] font-mono" />
                   </div>
                   <button type="button" disabled={xChecking} onClick={() => void saveXSession()} className="w-full py-2 bg-slate-900 text-white text-xs font-bold rounded-xl disabled:opacity-40">注入 Cookie 到 VPS</button>
-                  <input value={xSelfHandle} onChange={e => setXSelfHandle(e.target.value.replace(/^@/, '').trim())} placeholder="自己的 X 用户名（不带 @）" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[11px]" />
+                  <input value={xSelfHandle} onChange={e => setXSelfHandle(e.target.value.replace(/^@/, '').trim())} placeholder="角色登录的 X 用户名（登录检查后自动识别）" className="w-full bg-white/80 border border-slate-300 rounded-xl px-3 py-2 text-[11px]" />
                   {xStatus && <p className={`text-[10px] rounded-lg px-2 py-1.5 ${xSession?.loggedIn ? 'bg-emerald-50 text-emerald-700' : 'bg-white/80 text-slate-600'}`}>{xStatus}</p>}
               </div>
 

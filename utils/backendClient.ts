@@ -19,6 +19,7 @@ import type {
 import {
     acknowledgeBackendMemoryChanges,
     getBackendMemoryChanges,
+    getBackendMemoryChangesByKeys,
     type BackendMemoryChange,
 } from './backendSyncQueue';
 import {
@@ -507,15 +508,22 @@ export async function updateBackendXSession(
 }
 
 export interface BackendXFeedItem {
-    platform: 'x'; url: string; title: string; description: string; author: string; imageUrl?: string; likes?: number; retweets?: number;
+    platform: 'x'; url: string; title: string; description: string; author: string; imageUrl?: string; mediaUrls?: string[]; likes?: number; retweets?: number;
 }
-export async function getBackendXFeed(config: BackendChatConfig, input: { view: 'home' | 'notifications' | 'profile'; handle?: string }): Promise<{ items: BackendXFeedItem[]; view: string; fetchedAt: string }> {
+export interface BackendXFollowingAccount {
+    handle: string; name: string; bio: string;
+}
+export async function getBackendXFeed(config: BackendChatConfig, input: { view: 'home' | 'notifications' | 'profile'; handle?: string; owner?: 'user' | 'character' }): Promise<{ items: BackendXFeedItem[]; view: string; fetchedAt: string }> {
     const result = await backendFetch(config, '/v1/tools/x.read/feed', { method: 'POST', body: JSON.stringify(input) });
     return result.data;
 }
 export async function getBackendXStatus(config: BackendChatConfig, url: string): Promise<BackendXFeedItem | null> {
     const result = await backendFetch(config, '/v1/tools/x.read/status', { method: 'POST', body: JSON.stringify({ url }) });
     return (result.data || null) as BackendXFeedItem | null;
+}
+export async function getBackendXFollowing(config: BackendChatConfig): Promise<{ accounts: BackendXFollowingAccount[]; fetchedAt: string }> {
+    const result = await backendFetch(config, '/v1/tools/x.read/following', { method: 'POST' });
+    return result.data;
 }
 
 export interface BackendPhoneDeviceTokenResult {
@@ -1001,8 +1009,18 @@ export async function flushBackendMemorySyncQueue(input: {
     config: BackendChatConfig;
     character: CharacterProfile;
     user: UserProfile;
+    priorityDeletedMessageIds?: number[];
+    priorityDeletedEventIds?: string[];
 }): Promise<{ synced: number }> {
-    const changes = await getBackendMemoryChanges(input.character.id, 200);
+    const priorityKeys = [
+        ...(input.priorityDeletedMessageIds || []).map(id => `${input.character.id}:chat_message:${id}`),
+        ...(input.priorityDeletedEventIds || []).map(id => `${input.character.id}:backend_event:${id}`),
+    ];
+    const [priorityChanges, regularChanges] = await Promise.all([
+        getBackendMemoryChangesByKeys(input.character.id, priorityKeys),
+        getBackendMemoryChanges(input.character.id, 200),
+    ]);
+    const changes = [...new Map([...priorityChanges, ...regularChanges].map(change => [change.key, change])).values()];
     if (changes.length === 0) return { synced: 0 };
 
     const nodeUpserts = queuedPayloads<MemoryNode>(changes, 'memory_node');

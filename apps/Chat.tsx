@@ -17,7 +17,7 @@ import TheaterPlayer from '../components/schedule/TheaterPlayer';
 import { formatMessageWithTime, normalizeMessageContent } from '../utils/messageFormat';
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '../utils/xhsMcpClient';
-import { createXShareCard, extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
+import { createXShareCard, extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, normalizeWebpageMediaUrls, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
@@ -256,6 +256,14 @@ const Chat: React.FC = () => {
                 config: backendConfig,
                 character: char,
                 user: userProfile,
+                priorityDeletedMessageIds: targets
+                    .filter(message => !message.metadata?.backendEventId)
+                    .map(message => message.id),
+                priorityDeletedEventIds: targets
+                    .map(message => typeof message.metadata?.backendEventId === 'string'
+                        ? message.metadata.backendEventId
+                        : '')
+                    .filter(Boolean),
             });
             return true;
           } catch (error) {
@@ -1253,16 +1261,22 @@ const Chat: React.FC = () => {
                 if (webpage?.platform === 'x') {
                     try {
                         const remote = await getBackendXStatus(loadBackendChatConfig(), sharedUrl);
-                        if (remote) webpage = {
-                            ...webpage,
-                            title: remote.title || webpage.title,
-                            content: remote.description || webpage.content,
-                            excerpt: remote.description || webpage.excerpt,
-                            image: remote.imageUrl || webpage.image,
-                            author: remote.author || webpage.author,
-                            likes: remote.likes ?? webpage.likes,
-                            retweets: remote.retweets ?? webpage.retweets,
-                        };
+                        if (remote) {
+                            const mediaUrls = normalizeWebpageMediaUrls(
+                                remote.mediaUrls, remote.imageUrl, webpage.mediaUrls, webpage.image,
+                            );
+                            webpage = {
+                                ...webpage,
+                                title: remote.title || webpage.title,
+                                content: remote.description || webpage.content,
+                                excerpt: remote.description || webpage.excerpt,
+                                image: mediaUrls[0],
+                                mediaUrls,
+                                author: remote.author || webpage.author,
+                                likes: remote.likes ?? webpage.likes,
+                                retweets: remote.retweets ?? webpage.retweets,
+                            };
+                        }
                     } catch (error) {
                         console.warn('X status read failed; keeping local share card:', error);
                     }
