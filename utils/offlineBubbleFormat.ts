@@ -4,13 +4,31 @@ const isActionStart = (line: string, index: number): boolean => {
     return /\s/.test(line[index - 1]) || /[。！？；：，、”]/.test(line[index - 1]);
 };
 
+const isDialogueStart = (line: string, index: number): boolean => {
+    const char = line[index];
+    if (char === '“') return line.indexOf('”', index + 1) !== -1;
+    if (char === '"') return line.indexOf('"', index + 1) !== -1;
+
+    // Some models emit the closing Chinese quote as the opening delimiter.
+    if (char !== '”') return false;
+    if (index === 0) return true;
+    return /\s/.test(line[index - 1]) || /[。！？；：，、]/.test(line[index - 1]);
+};
+
+const dialogueEnd = (line: string, index: number): number => {
+    const char = line[index];
+    if (char === '“') return line.indexOf('”', index + 1);
+    if (char === '"') return line.indexOf('"', index + 1);
+    return -1;
+};
+
 /**
  * Offline replies use explicit syntax: `> ` starts narration and paired Chinese
  * quotation marks delimit spoken dialogue. Add bubble boundaries only where that
  * syntax makes the boundary unambiguous; unmarked prose is left untouched.
  */
 export function normalizeOfflineBubbleFormatting(content: string): string {
-    if (!content || (!content.includes('>') && !content.includes('“'))) return content;
+    if (!content || (!content.includes('>') && !/["“”]/.test(content))) return content;
 
     const normalizedLines = content.split(/\r\n|\r|\n|\u2028|\u2029/).flatMap((line) => {
         const starts: number[] = [];
@@ -21,9 +39,10 @@ export function normalizeOfflineBubbleFormatting(content: string): string {
                 continue;
             }
 
-            if (line[index] === '“' && line.indexOf('”', index + 1) !== -1) {
+            if (isDialogueStart(line, index)) {
                 starts.push(index);
-                index = line.indexOf('”', index + 1);
+                const end = dialogueEnd(line, index);
+                if (end !== -1) index = end;
             }
         }
 

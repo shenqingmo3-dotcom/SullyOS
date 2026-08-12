@@ -78,6 +78,22 @@ describe('线下动作与对白分泡', () => {
         const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
         expect(texts.map(m => m.content)).toEqual([mixedOfflineReply]);
     });
+
+    it('线下模式把错用右引号开头的对白从动作气泡拆出', async () => {
+        const charId = `c-offline-closing-quote-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'offline';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('> 他原地跳了一下。  ”看看我。', ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual([
+            '> 他原地跳了一下。',
+            '”看看我。',
+        ]);
+    });
 });
 
 describe('renderAndPersist 引用解析', () => {
