@@ -16,6 +16,14 @@ interface ContextTarget {
   user_name: string;
   user_bio: string;
   metadata: Record<string, unknown> | null;
+  timezone: string;
+}
+
+interface RecentEventRow {
+  actor_type: string;
+  content: string | null;
+  event_type: string;
+  occurred_at: Date;
 }
 
 interface MemoryRow {
@@ -52,6 +60,29 @@ function cleanInteractionLabels(value: string): string {
   return value
     .replace(/^\s*\[(?:text message|same-place scene|线上聊天|线下相处|线上模式|线下模式)\]\s*/gimu, '')
     .trim();
+}
+
+function formatEventTime(value: Date, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+      weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(value);
+  } catch {
+    return value.toISOString();
+  }
+}
+
+export function formatRecentEventContent(input: {
+  content: string;
+  occurredAt: Date;
+  purpose: 'chat' | 'heartbeat';
+  timezone: string;
+}): string {
+  const content = cleanInteractionLabels(input.content);
+  return input.purpose === 'heartbeat'
+    ? `[记录时间：${formatEventTime(input.occurredAt, input.timezone)}]\n${content}`
+    : content;
 }
 
 function queryTerms(text: string): string[] {
@@ -125,7 +156,7 @@ export async function buildAgentContextMessages(input: {
   const targetResult = await pool.query<ContextTarget>(
     `SELECT a.id AS agent_id, c.id AS conversation_id, a.name, a.description,
             a.system_prompt, a.worldview, a.writer_persona, a.legacy_memories,
-            a.refined_memories, a.profile_metadata AS metadata,
+            a.refined_memories, a.profile_metadata AS metadata, a.timezone,
             u.display_name AS user_name, u.bio AS user_bio
      FROM characters a
      JOIN conversations c ON c.agent_id=a.id AND c.external_id=CONCAT('private:', a.external_id)
@@ -138,8 +169,8 @@ export async function buildAgentContextMessages(input: {
   if (!target) return null;
 
   const [eventsResult, platesResult, memoriesResult, anticipationResult] = await Promise.all([
-    pool.query<{ actor_type: string; content: string | null; event_type: string }>(
-      `SELECT actor_type, content, event_type
+    pool.query<RecentEventRow>(
+      `SELECT actor_type, content, event_type, occurred_at
        FROM conversation_events
        WHERE conversation_id=$1 AND deleted_at IS NULL
          AND actor_type IN ('user', 'assistant')
@@ -235,7 +266,7 @@ export async function buildAgentContextMessages(input: {
     target.refined_memories ? `## 已整理记忆\n${limited(target.refined_memories, 30_000)}` : '',
     formatNpcNetwork(metadata),
     input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
-    input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。' : '',
+    input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。最近聊天中的记录时间是判断场景是否仍在继续的依据：上一晚的入睡、陪伴、线下地点和身体状态到了新一天只能视为历史，不能因为最后一句仍写着“睡着了”就假定此刻仍处于昨晚场景。' : '',
     (() => {
       const mode = metadata.interactionMode === 'offline' ? 'offline' : 'online';
       const scene = metadata.interactionScene && typeof metadata.interactionScene === 'object'
@@ -254,7 +285,10 @@ export async function buildAgentContextMessages(input: {
     { role: 'system', content: systemSections.join('\n\n') },
     ...recentEvents.map((event): ModelMessage => ({
       role: event.actor_type === 'user' ? 'user' : 'assistant',
-      content: limited(cleanInteractionLabels(event.content ?? ''), 20_000),
+      content: limited(formatRecentEventContent({
+        content: event.content ?? '', occurredAt: event.occurred_at,
+        purpose: input.purpose, timezone: target.timezone,
+      }), 20_000),
     })),
   ];
   if (input.userMessage && !recentEvents.some((event) => event.actor_type === 'user' && event.content === input.userMessage)) {

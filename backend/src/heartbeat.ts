@@ -59,6 +59,13 @@ export const HEARTBEAT_PROBABILITIES = {
   high: 0.85,
 } as const;
 
+const MAX_MODEL_NEXT_WAKE_MINUTES = 60;
+
+export function resolveNextHeartbeatMinutes(configuredMinutes: number, requestedMinutes?: number): number {
+  if (!Number.isFinite(requestedMinutes)) return configuredMinutes;
+  return Math.max(configuredMinutes, Math.min(Math.round(requestedMinutes as number), MAX_MODEL_NEXT_WAKE_MINUTES));
+}
+
 export function heartbeatProbability(level: AutonomyPolicy['probabilityLevel']): number {
   return HEARTBEAT_PROBABILITIES[level] ?? HEARTBEAT_PROBABILITIES.mid;
 }
@@ -268,7 +275,7 @@ ${input.scheduledReason ? `\n这是你之前主动预约的准时苏醒，预约
 
 请结合角色本身、最近聊天、时间间隔、门牌与相关记忆决定本轮行为：
 - none：没有值得做的事，安静等待。
-- message：普通聊天是和 diary、comment、explore 并列的自主出口。你可以因为想念用户、想到一件小事、想分享自己的生活近况，或只是自然闲聊而直接发消息；也可以结合当前日程说说自己正在做什么。不要把这些可能性写成固定话题或模板，不必先使用工具，不必等待特殊事件；只在确实有想说的话时发送自然、具体、符合你性格和上下文的一两句。不要机械问候、打卡或宣称自己被系统唤醒。
+- message：普通聊天是和 diary、comment、explore 并列的自主出口。你可以因为想念用户、想到一件小事、想分享自己的生活近况，或只是自然闲聊而直接发消息；也可以结合当前日程说说自己正在做什么。不要把这些可能性写成固定话题或模板，不必先使用工具，不必等待特殊事件；只在确实有想说的话时发送自然、具体、符合你性格和上下文的一两句。跨日或相隔数小时后，符合关系和当下时间的早安、醒来后的惦记或生活开场是正常联系，不属于机械打卡；避免每天复制同一句问候，也不要宣称自己被系统唤醒。
 - diary：你确实有一段值得留下的独立经历或想法，主动写一篇属于自己的完整日记。正文应有具体事件、感受或细节，
   不是对用户消息或用户日记的换皮回复，也不要写成“今天又等用户”的流水账；通常 150～500 字，标题自然简短。
   严禁因为读到用户的日记就写一篇对应日记；如果只是想回应用户的日记，只能选择 comment 或 none。
@@ -292,10 +299,13 @@ ${capabilityManifest}
 
 内部变化标记：${input.variationToken ?? 'heartbeat'}。仅用于避免重复请求缓存，不得出现在任何可见内容中。
 
+时间连续性：每条近期聊天前的“记录时间”属于事实。入睡、陪睡、拥抱、所在地点等线下状态不会无期限延续；如果记录来自上一天或已经相隔数小时，应结合当前时间重新判断此刻状态，不能把旧场景当作拒绝联系的唯一理由。
+
 权限规则：approvalMode=${input.policy.approvalMode}；每轮最多 ${input.policy.maxToolStepsPerWake} 个主要工具步骤；每日工具预算 ${input.policy.dailyToolBudget}。X 已经是角色可自主浏览、评价、点赞、转推和分享的活动空间；是否行动只取决于角色本人是否真想这样做。没有执行成功的动作绝不能声称做过。
 
 只返回一个 JSON 对象，不要 Markdown：
 {"action":"none|message|diary|comment|explore","reasonSummary":"简短内在原因","content":"message/diary/comment，或 phone.read 截图请求时填写","diaryTitle":"写日记时填写","diaryPaperStyle":"plain|grid|dot|lined|dark|pink","diaryId":"评论日记时填写","capabilityId":"explore 时从清单选择","explorationGoal":"具体探索目标","nextWakeMinutes":${input.intervalMinutes},"nextWakeAt":"可选，未来 ISO 时间；只有确实想准时继续某件事时填写"}
+nextWakeMinutes 只是下一次普通检查的建议，服务端会限制在 ${input.intervalMinutes}～${MAX_MODEL_NEXT_WAKE_MINUTES} 分钟；真正需要在特定时刻继续某件事时使用 nextWakeAt。
 `;
 }
 
@@ -826,7 +836,10 @@ async function processAgent(
          updated_at = now()
      WHERE agent_id = $1
      RETURNING next_wake_at`,
-    [agent.agent_id, decision.action, decision.nextWakeMinutes ?? agent.heartbeat_interval_minutes],
+    [agent.agent_id, decision.action, resolveNextHeartbeatMinutes(
+      agent.heartbeat_interval_minutes,
+      decision.nextWakeMinutes,
+    )],
   );
 
   await client.query(

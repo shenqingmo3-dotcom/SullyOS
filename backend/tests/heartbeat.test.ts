@@ -7,6 +7,7 @@ import {
   heartbeatProbability,
   parseDecisionContent,
   requestParsedHeartbeatDecision,
+  resolveNextHeartbeatMinutes,
 } from '../src/heartbeat.js';
 
 describe('decideHeartbeat', () => {
@@ -102,6 +103,14 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('想念用户');
     expect(prompt).toContain('自然闲聊');
     expect(prompt).toContain('不必先使用工具');
+    expect(prompt).toContain('早安、醒来后的惦记或生活开场是正常联系');
+    expect(prompt).toContain('不能把旧场景当作拒绝联系的唯一理由');
+  });
+
+  it('does not let a model-selected silence skip the rest of the morning', () => {
+    expect(resolveNextHeartbeatMinutes(5, 420)).toBe(60);
+    expect(resolveNextHeartbeatMinutes(5, 30)).toBe(30);
+    expect(resolveNextHeartbeatMinutes(5)).toBe(5);
   });
 
   it('turns off the diary action after the character has written today', () => {
