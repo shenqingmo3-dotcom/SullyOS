@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { availableCapabilities, normalizeAutonomyPolicy } from '../src/capabilities.js';
 import {
+  appendHeartbeatDecisionPrompt,
   buildHeartbeatDecisionPrompt,
   decideHeartbeat,
   evaluateHeartbeatGates,
@@ -111,6 +112,16 @@ describe('decideHeartbeat', () => {
     expect(resolveNextHeartbeatMinutes(5, 420)).toBe(60);
     expect(resolveNextHeartbeatMinutes(5, 30)).toBe(30);
     expect(resolveNextHeartbeatMinutes(5)).toBe(5);
+  });
+
+  it('puts the current heartbeat time after stale conversation history', () => {
+    const messages = appendHeartbeatDecisionPrompt([
+      { role: 'system', content: '角色设定' },
+      { role: 'assistant', content: '[记录时间：2026/08/13 01:52]\n晚安。' },
+    ], '当前时间：2026/08/13 09:24。');
+    expect(messages.at(-1)).toEqual({
+      role: 'system', content: '当前时间：2026/08/13 09:24。',
+    });
   });
 
   it('turns off the diary action after the character has written today', () => {

@@ -309,6 +309,13 @@ nextWakeMinutes 只是下一次普通检查的建议，服务端会限制在 ${i
 `;
 }
 
+export function appendHeartbeatDecisionPrompt(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: unknown }>,
+  prompt: string,
+): Array<{ role: 'system' | 'user' | 'assistant'; content: unknown }> {
+  return [...messages, { role: 'system', content: prompt }];
+}
+
 async function loadDiaryCandidates(agentId: string) {
   const result = await pool.query<{
     id: string;
@@ -514,9 +521,7 @@ async function requestHeartbeatDecision(agent: DueAgent, diaryAvailable: boolean
     diaryAvailable,
     diaryCandidates,
   });
-  const messages = context.messages.map((message, index) => index === 0
-    ? { ...message, content: `${String(message.content)}\n\n${prompt}` }
-    : message);
+  const messages = appendHeartbeatDecisionPrompt(context.messages, prompt);
   const decision = await requestParsedHeartbeatDecision(messages);
   if (decision.action === 'comment' && !diaryCandidates.some((diary) => diary.id === decision.diaryId)) {
     return { action: 'none', reasonSummary: '模型选择了不存在或不属于该角色的日记。' };
