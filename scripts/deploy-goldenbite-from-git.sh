@@ -28,6 +28,7 @@ echo "Building SharkOS ${commit}..."
 docker run --rm \
   --user "${uid}:${gid}" \
   -e HOME=/tmp \
+  -e NODE_OPTIONS=--max-old-space-size=1536 \
   -e COREPACK_HOME=/workspace/.deploy-cache/corepack \
   -v "${source_dir}:/workspace" \
   -w /workspace \
