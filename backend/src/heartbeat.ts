@@ -53,6 +53,16 @@ export interface HeartbeatGateResult {
   reasonSummary: string;
 }
 
+export const HEARTBEAT_PROBABILITIES = {
+  low: 0.25,
+  mid: 0.55,
+  high: 0.85,
+} as const;
+
+export function heartbeatProbability(level: AutonomyPolicy['probabilityLevel']): number {
+  return HEARTBEAT_PROBABILITIES[level] ?? HEARTBEAT_PROBABILITIES.mid;
+}
+
 function clockMinutes(date: Date, timezone: string): number {
   try {
     const parts = new Intl.DateTimeFormat('en-GB', {
@@ -106,7 +116,31 @@ export function evaluateHeartbeatGates(input: {
     }
   }
 
-  return { passed: true, reasonSummary: '活动时段与冷却条件均已通过；空闲阈值与概率档位不再拦截。' };
+  const latestConversationActivity = [input.lastUserActivityAt, input.lastAgentActivityAt]
+    .filter((value): value is Date => value instanceof Date)
+    .sort((left, right) => right.getTime() - left.getTime())[0];
+  if (latestConversationActivity && input.policy.idleThresholdMinutes > 0) {
+    const idleElapsed = (now.getTime() - latestConversationActivity.getTime()) / 60_000;
+    if (idleElapsed < input.policy.idleThresholdMinutes) {
+      return {
+        passed: false,
+        reasonSummary: `空闲阈值未满足：最近仍在对话中（空闲 ${Math.max(0, Math.floor(idleElapsed))}/${input.policy.idleThresholdMinutes} 分钟）。`,
+      };
+    }
+  }
+
+  const probability = heartbeatProbability(input.policy.probabilityLevel);
+  if ((input.random ?? Math.random)() >= probability) {
+    return {
+      passed: false,
+      reasonSummary: `本轮概率骰子未通过（${input.policy.probabilityLevel} ${Math.round(probability * 100)}%）。`,
+    };
+  }
+
+  return {
+    passed: true,
+    reasonSummary: `活动时段、空闲阈值、冷却与概率档位均已通过（${input.policy.probabilityLevel} ${Math.round(probability * 100)}%）。`,
+  };
 }
 
 export function decideHeartbeat(demoMode: boolean): HeartbeatDecision {

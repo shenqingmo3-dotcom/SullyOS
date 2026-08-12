@@ -65,4 +65,15 @@ describe('backend platform share cards', () => {
             },
         });
     });
+
+    it('normalizes common nested X payload aliases for the character card', () => {
+        const nested = event('x');
+        nested.metadata = { share: {
+            platform: 'x', url: 'https://x.com/a/status/1', title: '@a 的 X 帖子',
+            post: { full_text: '正文', image_url: 'https://img.example/post.jpg', like_count: 9, retweet_count: 3 },
+        } };
+        expect(buildPlatformShareMessage(nested)?.metadata).toMatchObject({
+            webpage: { excerpt: '正文', image: 'https://img.example/post.jpg', likes: 9, retweets: 3 },
+        });
+    });
 });

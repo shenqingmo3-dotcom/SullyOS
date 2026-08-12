@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { availableCapabilities, normalizeAutonomyPolicy } from '../src/capabilities.js';
-import { buildHeartbeatDecisionPrompt, decideHeartbeat, evaluateHeartbeatGates } from '../src/heartbeat.js';
+import { buildHeartbeatDecisionPrompt, decideHeartbeat, evaluateHeartbeatGates, heartbeatProbability } from '../src/heartbeat.js';
 
 describe('decideHeartbeat', () => {
   it('does not create content before an AI decision provider is configured', () => {
@@ -86,7 +86,7 @@ describe('decideHeartbeat', () => {
     expect(prompt).toContain('截图回来后会作为用户图片消息进入聊天');
   });
 
-  it('does not block autonomous decisions after a recent conversation', () => {
+  it('blocks autonomous decisions while the conversation is still recent', () => {
     const now = new Date('2026-08-09T12:00:00.000Z');
     const result = evaluateHeartbeatGates({
       policy: normalizeAutonomyPolicy({ idleThresholdMinutes: 30, probabilityLevel: 'high' }),
@@ -97,8 +97,22 @@ describe('decideHeartbeat', () => {
       now,
       random: () => 0,
     });
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
     expect(result.reasonSummary).toContain('空闲阈值');
+  });
+
+  it('uses the configured probability tiers after idle and cooldown pass', () => {
+    expect(heartbeatProbability('low')).toBe(0.25);
+    expect(heartbeatProbability('mid')).toBe(0.55);
+    expect(heartbeatProbability('high')).toBe(0.85);
+    const base = {
+      policy: normalizeAutonomyPolicy({ idleThresholdMinutes: 0, cooldownMinutes: 0, probabilityLevel: 'high' }),
+      timezone: 'UTC', lastUserActivityAt: null, lastAgentActivityAt: null,
+      lastAutonomousActivityAt: null, now: new Date('2026-08-09T12:00:00.000Z'),
+    };
+    expect(evaluateHeartbeatGates({ ...base, random: () => 0.84 }).passed).toBe(true);
+    expect(evaluateHeartbeatGates({ ...base, random: () => 0.85 }).passed).toBe(false);
+    expect(evaluateHeartbeatGates({ ...base, random: () => 0.85 }).reasonSummary).toContain('85%');
   });
 
   it('supports activity windows that cross midnight', () => {
@@ -128,7 +142,7 @@ describe('decideHeartbeat', () => {
     }).reasonSummary).toContain('允许活动时段');
   });
 
-  it('uses autonomous activity cooldown without a random probability gate', () => {
+  it('keeps autonomous activity cooldown ahead of the probability gate', () => {
     const now = new Date('2026-08-09T12:00:00.000Z');
     const policy = normalizeAutonomyPolicy({
       idleThresholdMinutes: 0,
@@ -151,7 +165,7 @@ describe('decideHeartbeat', () => {
       lastAgentActivityAt: null,
       lastAutonomousActivityAt: new Date('2026-08-09T10:30:00.000Z'),
       now,
-      random: () => 0.15,
+      random: () => 0,
     }).reasonSummary).toContain('概率档位');
   });
 });

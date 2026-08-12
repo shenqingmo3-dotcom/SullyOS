@@ -300,11 +300,18 @@ export function normalizeMessageContent(
         const url = meta.finalUrl || meta.url || '';
         if (meta.platform === 'x' || meta.siteName === 'X') {
             const author = typeof meta.author === 'string' && meta.author.trim() ? meta.author.trim() : 'X 用户';
-            const body = (typeof meta.excerpt === 'string' && meta.excerpt.trim())
-                ? meta.excerpt.trim()
-                : (typeof title === 'string' ? title.trim() : '');
-            const likes = Number(meta.likes || 0);
-            const retweets = Number(meta.retweets || 0);
+            const source = meta.post && typeof meta.post === 'object' ? meta.post : meta;
+            const body = (typeof source.excerpt === 'string' && source.excerpt.trim())
+                ? source.excerpt.trim()
+                : (typeof source.description === 'string' && source.description.trim())
+                    ? source.description.trim()
+                    : (typeof source.text === 'string' && source.text.trim())
+                        ? source.text.trim()
+                        : (typeof source.full_text === 'string' && source.full_text.trim())
+                            ? source.full_text.trim()
+                            : (typeof title === 'string' ? title.trim() : '');
+            const likes = Number(source.likes ?? source.like_count ?? source.likeCount ?? source.favorite_count ?? 0) || 0;
+            const retweets = Number(source.retweets ?? source.retweet_count ?? source.retweetCount ?? source.repost_count ?? 0) || 0;
             return [
                 `[X 帖子] ${userName}分享了一条 ${author} 发布的帖子`,
                 body ? `帖子正文：${body}` : '（这条帖子的正文没有获取到。）',

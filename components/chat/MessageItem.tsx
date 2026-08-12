@@ -2368,12 +2368,13 @@ const MessageItem = React.memo(({
             const u = wp.finalUrl || wp.url;
             if (u) window.open(u, '_blank', 'noopener,noreferrer');
         };
-        const excerpt = (wp.excerpt || '').trim();
+        const xData = wp.post && typeof wp.post === 'object' ? wp.post : wp;
         if (wp.platform === 'x' || wp.siteName === 'X') {
-            const author = String(wp.author || '').trim();
-            const likes = Number(wp.likes || 0);
-            const retweets = Number(wp.retweets || 0);
-            const postText = excerpt || String(wp.title || '').trim();
+            const author = String(xData.author || xData.handle || xData.username || '').trim();
+            const likes = Number(xData.likes ?? xData.like_count ?? xData.likeCount ?? xData.favorite_count ?? 0) || 0;
+            const retweets = Number(xData.retweets ?? xData.retweet_count ?? xData.retweetCount ?? xData.repost_count ?? 0) || 0;
+            const image = String(xData.image || xData.imageUrl || xData.image_url || xData.mediaUrl || xData.media_url || '').trim();
+            const postText = String(xData.excerpt || xData.description || xData.text || xData.full_text || xData.fullText || wp.title || '').trim();
             return commonLayout(
                 <div
                     onClick={openPage}
@@ -2381,10 +2382,10 @@ const MessageItem = React.memo(({
                     tabIndex={0}
                     onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openPage(); }}
                     className="w-64 overflow-hidden rounded-xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer transition-opacity active:opacity-90">
-                    {wp.image && (
+                    {image && (
                         <div className="h-36 w-full overflow-hidden bg-slate-900">
                             <img
-                                src={wp.image}
+                                src={image}
                                 alt="X 帖子配图"
                                 className="h-full w-full object-cover"
                                 loading="lazy"

@@ -72,12 +72,34 @@ export function buildPlatformShareMessage(
     const share = event.metadata?.share;
     if (!share || typeof share !== 'object' || Array.isArray(share)) return undefined;
     const data = share as Record<string, unknown>;
+    const post = data.post && typeof data.post === 'object' && !Array.isArray(data.post)
+        ? data.post as Record<string, unknown>
+        : data;
     const platform = typeof data.platform === 'string' ? data.platform : '';
-    const title = typeof data.title === 'string' ? data.title : (event.content || '分享');
+    const title = typeof data.title === 'string' ? data.title
+        : typeof post.title === 'string' ? post.title : (event.content || '分享');
     const url = typeof data.url === 'string' ? data.url : '';
-    const description = typeof data.description === 'string' ? data.description : '';
-    const author = typeof data.author === 'string' ? data.author : '';
-    const imageUrl = typeof data.imageUrl === 'string' ? data.imageUrl : '';
+    const description = typeof data.description === 'string' ? data.description
+        : typeof data.excerpt === 'string' ? data.excerpt
+            : typeof data.text === 'string' ? data.text
+                : typeof data.full_text === 'string' ? data.full_text
+                    : typeof post.description === 'string' ? post.description
+                        : typeof post.excerpt === 'string' ? post.excerpt
+                            : typeof post.text === 'string' ? post.text
+                                : typeof post.full_text === 'string' ? post.full_text : '';
+    const author = typeof data.author === 'string' ? data.author
+        : typeof post.author === 'string' ? post.author
+            : typeof post.handle === 'string' ? post.handle : '';
+    const imageUrl = typeof data.imageUrl === 'string' ? data.imageUrl
+        : typeof data.image_url === 'string' ? data.image_url
+            : typeof data.image === 'string' ? data.image
+                : typeof post.imageUrl === 'string' ? post.imageUrl
+                    : typeof post.image_url === 'string' ? post.image_url
+                        : typeof post.image === 'string' ? post.image : '';
+    const likes = Number(data.likes ?? data.like_count ?? data.likeCount ?? data.favorite_count
+        ?? post.likes ?? post.like_count ?? post.likeCount ?? post.favorite_count ?? 0) || 0;
+    const retweets = Number(data.retweets ?? data.retweet_count ?? data.retweetCount ?? data.repost_count
+        ?? post.retweets ?? post.retweet_count ?? post.retweetCount ?? post.repost_count ?? 0) || 0;
     if (!url) return undefined;
     if (platform === 'xhs') {
         return {
@@ -94,7 +116,7 @@ export function buildPlatformShareMessage(
                     desc: description,
                     author,
                     coverUrl: imageUrl,
-                    likes: typeof data.likes === 'number' ? data.likes : 0,
+                    likes,
                 },
                 source: 'backend-platform-share',
                 backendEventId: event.id,
@@ -117,8 +139,8 @@ export function buildPlatformShareMessage(
                 siteName: platform === 'x' ? 'X' : '网页',
                 platform,
                 author,
-                likes: typeof data.likes === 'number' ? data.likes : 0,
-                retweets: typeof data.retweets === 'number' ? data.retweets : 0,
+                likes,
+                retweets,
             },
             source: 'backend-platform-share',
             backendEventId: event.id,

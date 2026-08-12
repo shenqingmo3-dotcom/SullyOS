@@ -475,14 +475,14 @@ const SharkBackendSettings: React.FC = () => {
                             <p className="text-[8px] text-slate-400">按设备时区 {agent.timezone || 'UTC'} 判断，可跨午夜。</p>
                         </div>
 
-                        <div className="hidden flex items-center justify-between gap-2">
+                        <div className="flex items-center justify-between gap-2 border-t border-violet-100/80 pt-2">
                             <span className="text-[9px] text-slate-500">触发概率</span>
                             <div className="flex rounded-lg bg-slate-100 p-0.5">
                                 {(['low', 'mid', 'high'] as const).map(level => <button key={level} type="button"
                                     disabled={agentBusyId === agent.characterId}
                                     onClick={() => void saveAgentAutonomy(agent, { policy: { ...agent.policy, probabilityLevel: level } })}
                                     className={`rounded-md px-2 py-1 text-[9px] font-semibold ${agent.policy.probabilityLevel === level ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-400'}`}>
-                                    {level === 'low' ? '低' : level === 'mid' ? '中' : '高'}
+                                    {level === 'low' ? '低 25%' : level === 'mid' ? '中 55%' : '高 85%'}
                                 </button>)}
                             </div>
                         </div>
