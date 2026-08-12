@@ -17,7 +17,8 @@ export interface ToolShareCandidate {
 
 export interface ToolDigestion {
   disposition: 'message' | 'diary';
-  content: string;
+  messages?: string[];
+  content?: string;
   diaryTitle?: string;
   diaryPaperStyle?: 'plain' | 'grid' | 'dot' | 'lined' | 'dark' | 'pink';
   shareCandidateIndex?: number | null;
@@ -25,8 +26,7 @@ export interface ToolDigestion {
   repostCandidateIndex?: number | null;
 }
 
-const commonFields = {
-  content: z.string().trim().min(1).max(100_000),
+const actionFields = {
   shareCandidateIndex: z.number().int().min(0).nullable().optional(),
   likeCandidateIndex: z.number().int().min(0).nullable().optional(),
   repostCandidateIndex: z.number().int().min(0).nullable().optional(),
@@ -35,13 +35,15 @@ const commonFields = {
 const digestionSchema = z.discriminatedUnion('disposition', [
   z.object({
     disposition: z.literal('message'),
-    ...commonFields,
+    messages: z.array(z.string().trim().min(1).max(100_000)).min(1),
+    ...actionFields,
     diaryTitle: z.string().trim().max(500).optional(),
     diaryPaperStyle: z.enum(['plain', 'grid', 'dot', 'lined', 'dark', 'pink']).optional(),
   }),
   z.object({
     disposition: z.literal('diary'),
-    ...commonFields,
+    content: z.string().trim().min(1).max(100_000),
+    ...actionFields,
     diaryTitle: z.string().trim().min(1).max(500),
     diaryPaperStyle: z.enum(['plain', 'grid', 'dot', 'lined', 'dark', 'pink']).optional(),
   }),
@@ -89,6 +91,7 @@ export function buildToolDigestionPrompt(input: {
     description: bounded(candidate.description || '', 600),
     url: candidate.url,
     likes: candidate.likes,
+    retweets: candidate.retweets,
   }));
   return `
 ## 你主动探索后的真实结果
@@ -99,7 +102,7 @@ ${bounded(input.result, 16_000)}
 ${candidates.length ? JSON.stringify(candidates, null, 2) : '（没有可用候选）'}
 
 “要不要看、要不要稍后看、要不要保持沉默”已经在调用工具之前决定完了。既然你已经主动去看并拿到了结果，现在必须由角色本人把结果消化成真实反应，不能重新选择沉默：
-- message：挑一个你真正会在意的具体细节，按你独有的性格、关系、用词与情绪去吐槽、评价、关心、追问或分享。通常一两段，不要逐条总结。
+- message：按你独有的性格、关系、用词与情绪去吐槽、评价、关心、追问或分享。你想说几条就说几条，每条都是一条会真实发给用户的独立聊天消息；不要逐条复述工具结果，也不要为了凑数量硬拆句子。
 - diary：只有这次探索真的勾起一段值得留下的私人经历或思绪时才写；不能把网页或工具结果换皮抄成报告。今天已经写过日记时禁止选择。
 - 可以同时选择一个候选分享成链接卡片、给真正合心意的候选点赞，或转推一条确实想放到自己主页的 X 帖子；这些动作必须符合角色本人，而不是为了显得活跃。
 
@@ -107,13 +110,21 @@ ${candidates.length ? JSON.stringify(candidates, null, 2) : '（没有可用候�
 
 ${input.diaryAvailable ? '- 今天还没有写过角色日记，确实值得时可以选择 diary。' : '- 今天已经写过一篇角色日记，本轮只能选择 message。'}
 ${INDEPENDENT_DIARY_STYLE_GUIDE}
-- ${input.shareAllowed ? '允许分享：shareCandidateIndex 可从候选中选一个；分享时 content 仍要是角色对它的自然反应。' : '未授权分享到聊天：shareCandidateIndex 必须为 null。'}
+- ${input.shareAllowed ? '允许分享：shareCandidateIndex 可从候选中选一个；分享时 messages 仍要包含角色对它的自然反应。' : '未授权分享到聊天：shareCandidateIndex 必须为 null。'}
 - ${input.likeAllowed ? '允许点赞：likeCandidateIndex 可从候选中选一个；没有真心喜欢就填 null。' : '未授权点赞：likeCandidateIndex 必须为 null。'}
 - ${input.repostAllowed ? '允许转推：repostCandidateIndex 可从 X 候选中选一个；不想让它出现在自己主页就填 null。' : '当前不能转推：repostCandidateIndex 必须为 null。'}
 
 只返回 JSON，不要 Markdown：
-{"disposition":"message|diary","content":"角色本人会说或会写的正文","diaryTitle":"diary 时填写","diaryPaperStyle":"plain|grid|dot|lined|dark|pink","shareCandidateIndex":null,"likeCandidateIndex":null,"repostCandidateIndex":null}
+message：{"disposition":"message","messages":["第一条真实聊天消息","还想继续说就继续添加"],"shareCandidateIndex":null,"likeCandidateIndex":null,"repostCandidateIndex":null}
+diary：{"disposition":"diary","content":"角色日记正文","diaryTitle":"日记标题","diaryPaperStyle":"plain|grid|dot|lined|dark|pink","shareCandidateIndex":null,"likeCandidateIndex":null,"repostCandidateIndex":null}
 `;
+}
+
+function completionContent(completion: Record<string, unknown>): string {
+  const first = Array.isArray(completion.choices) ? completion.choices[0] : undefined;
+  const message = first && typeof first === 'object' ? (first as Record<string, unknown>).message : undefined;
+  const content = message && typeof message === 'object' ? (message as Record<string, unknown>).content : '';
+  return typeof content === 'string' ? content : '';
 }
 
 export async function requestToolDigestion(input: {
@@ -133,22 +144,24 @@ export async function requestToolDigestion(input: {
     temperature: 0.82,
     maxTokens: 1_600,
   });
-  const first = Array.isArray(completion.choices) ? completion.choices[0] : undefined;
-  const message = first && typeof first === 'object' ? (first as Record<string, unknown>).message : undefined;
-  const content = message && typeof message === 'object' ? (message as Record<string, unknown>).content : '';
-  const parsed = parseToolDigestion(typeof content === 'string' ? content : '');
-  if (!parsed) {
-    const fallback = input.candidates[0];
-    if (fallback) {
-      return {
-        disposition: 'message',
-        content: `我刚看了${fallback.author ? ` ${fallback.author} 的` : ''}「${fallback.title}」，有点想跟你说说。`,
-        shareCandidateIndex: null,
-        likeCandidateIndex: null,
-        repostCandidateIndex: null,
-      };
-    }
-    throw new Error('角色没有返回有效的工具结果反应。');
-  }
-  return parsed;
+  const content = completionContent(completion);
+  const parsed = parseToolDigestion(content);
+  if (parsed) return parsed;
+
+  const repaired = await createChatCompletion({
+    messages: [
+      ...input.messages,
+      { role: 'user', content: prompt },
+      { role: 'assistant', content },
+      {
+        role: 'user',
+        content: '上一个回答不是要求的有效 JSON。只修复格式并原样保留角色真正想说的全部消息，不要缩减、改写或添加固定兜底句。message 必须使用非空 messages 字符串数组；diary 必须使用非空 content。只返回 JSON。',
+      },
+    ],
+    temperature: 0.2,
+    maxTokens: 1_600,
+  });
+  const repairedParsed = parseToolDigestion(completionContent(repaired));
+  if (!repairedParsed) throw new Error('角色连续两次没有返回有效的工具结果反应 JSON。');
+  return repairedParsed;
 }

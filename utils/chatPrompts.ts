@@ -583,19 +583,21 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
             && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         const strictModeBoundary = char.interactionMode === 'offline'
-            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. Output one continuous third-person narration block followed by one spoken-dialogue block. Use Chinese quotation marks “...” for speech. Put actions and environment in narration, never brackets; no inner thoughts, system labels, timestamps, or teleporting.`
-            : `Internal chat state: you and the user are communicating by text and are not physically together. Never mention the state name or any mode label. Output only compact natural chat messages. Do not write actions, environment, inner thoughts, narration, stage directions, brackets, timestamps, speaker prefixes, or system-log formatting.`;
+            ? `Internal scene state: you are physically together with the user. Never mention the state name or any mode label. Prefix every action, environment, or third-person scene narration block with "> ", then write spoken dialogue with Chinese quotation marks “...”. Never use brackets for actions; no direct inner thoughts, system labels, timestamps, teleporting, or touching across an unclosed physical distance.`
+            : `Internal chat state: follow the original SullyOS mobile-chat rules below. Never mention the state name or any mode label. Do not output internal labels such as [text message], [线上聊天], or speaker/log prefixes.`;
 
         const interactionFormatRules = char.interactionMode === 'offline'
             ? `3. **线下输出格式**:
    - 这里虽然共用同一个消息页面，但当前内容是当面相处，不是手机气泡聊天。
-   - 正文先写一个连续、合并的第三人称场景叙述块，再接一个自然对白块；不要把同一瞬间拆成多条短气泡，不要用括号动作或直接内心独白。
+   - 每个动作、环境或第三人称场景叙述块都必须以 `> ` 开头；说出口的话使用中文引号“……”。可以根据场景自然交替多个叙述块和对白块，不限制段数。
+   - 合并同一瞬间的动作与环境，不要用括号动作或直接内心独白；延续地点和距离，移动写出过程，距离不足时不能突然触碰。
    - 表情包、引用、戳一戳、转账等手机 UI 命令默认不用；只有角色在场景里确实拿起手机操作时才使用对应能力。社交平台、网页、搜索与 MCP 工具仍可照常使用。`
             : `3. **线上输出格式**:
-   - 将回复拆分成简短的聊天气泡（句子）。想分成多条气泡时，必须使用真正的换行符（\\n）分隔；不要用空格冒充分隔。
-   - 严禁在输出中包含时间戳、名字前缀或“[角色名]:”，也不要模仿历史记录中的系统日志格式。
-   - 发送表情包必须且只能使用命令：\`[[SEND_EMOJI: 表情名称]]\`。
-   - 可用表情库：\n${emojiContextStr}`;
+   - 将回复拆分成简短的气泡（句子）。**【极其重要】当你想分成多条消息气泡时，必须使用真正的换行符（\\n）分隔，每一行会变成一个独立气泡。绝对不要用空格代替换行！空格不会产生新气泡！只有换行符（\\n）才会分割气泡。** 正常句子中的标点不会被用来分割气泡，请自然使用。
+   - 【严禁】在输出中包含时间戳、名字前缀或“[角色名]:”。
+   - **【严禁】模仿历史记录中的系统日志格式（如“[你 发送了...]”），也不要输出 [text message]、[线上聊天] 等内部标签。**
+   - **发送表情包**: 必须且只能使用命令：\`[[SEND_EMOJI: 表情名称]]\`。
+   - **可用表情库 (按分类)**:\n${emojiContextStr}`;
 
         baseSystemPrompt += `### 同一互动平台行为规范
 **当前线上 / 线下状态块是唯一有效的互动形式。打开这个页面、发送消息、使用平台工具或调用 MCP 都不会自动把线下状态改成线上。**
@@ -1069,7 +1071,7 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                     if (source === 'call') return '[通话]';
                     if (source === 'date') return '[约会]';
                     if (source === 'story_theater_memory') return `[剧情：${m.metadata?.theaterTitle || '共同经历'}]`;
-                    return m.metadata?.interactionMode === 'offline' ? '[same-place scene]' : '[text message]';
+                    return '';
                 })();
                 
                 if (m.replyTo) {

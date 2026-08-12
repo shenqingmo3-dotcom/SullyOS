@@ -29,7 +29,7 @@ describe('persona-first tool result handling', () => {
 
     expect(prompt).toContain('不能重新选择沉默');
     expect(parseToolDigestion('{"disposition":"silent"}')).toBeNull();
-    expect(parseToolDigestion('{"disposition":"message","content":"这人说话怎么比我还欠。"}')).toMatchObject({
+    expect(parseToolDigestion('{"disposition":"message","messages":["这人说话怎么比我还欠。"]}')).toMatchObject({
       disposition: 'message',
     });
   });

@@ -23,6 +23,7 @@ const event = (platform: 'x' | 'xhs'): BackendConversationEventRecord => ({
             author: '小鲨鱼',
             imageUrl: 'https://img.example/share.jpg',
             likes: 42,
+            retweets: platform === 'x' ? 7 : undefined,
         },
     },
     occurredAt: '2026-08-12T00:00:00.000Z',
@@ -43,6 +44,7 @@ describe('backend platform share cards', () => {
                     platform: 'x',
                     author: '小鲨鱼',
                     likes: 42,
+                    retweets: 7,
                 },
             },
         });

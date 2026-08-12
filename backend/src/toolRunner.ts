@@ -182,24 +182,63 @@ function firstString(...values: unknown[]): string {
   return values.find((value) => typeof value === 'string' && value.trim())?.toString().trim() ?? '';
 }
 
+function nestedRecords(value: unknown): Record<string, any>[] {
+  const records: Record<string, any>[] = [];
+  collectObjects(value, records);
+  return records;
+}
+
+function firstNestedString(records: Record<string, any>[], keys: string[]): string {
+  for (const record of records) {
+    const value = firstString(...keys.map((key) => record[key]));
+    if (value) return value;
+  }
+  return '';
+}
+
+function firstNestedCount(records: Record<string, any>[], keys: string[]): number {
+  for (const record of records) {
+    for (const key of keys) {
+      const raw = record[key];
+      if (typeof raw !== 'number' && typeof raw !== 'string') continue;
+      const value = Number(String(raw).replace(/,/g, ''));
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+  }
+  return 0;
+}
+
 export function extractXShareCandidates(value: unknown): ToolShareCandidate[] {
   const objects: Record<string, any>[] = [];
   collectObjects(value, objects);
   const seen = new Set<string>();
   const candidates: ToolShareCandidate[] = [];
   for (const item of objects) {
-    const url = firstString(item.url, item.tweet_url, item.tweetUrl);
+    const records = nestedRecords(item);
+    const url = firstString(item.url, item.tweet_url, item.tweetUrl, item.status_url, item.permalink);
     if (!/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/.+\/status\/\d+/i.test(url) || seen.has(url)) continue;
     seen.add(url);
-    const description = firstString(item.text, item.content, item.description);
-    const author = firstString(item.author, item.handle && `@${String(item.handle).replace(/^@/, '')}`);
-    const imageUrl = firstString(item.image, item.imageUrl, item.image_url, item.mediaUrl, item.media_url, item.thumbnail, item.thumbnailUrl, item.thumbnail_url);
-    const retweets = Number(item.retweet_count ?? item.retweets ?? item.retweetCount ?? item.repost_count ?? item.reposts ?? item.repostCount ?? item.quote_count ?? 0) || 0;
+    const description = firstNestedString(records, ['text', 'full_text', 'fullText', 'content', 'description']);
+    const handle = firstNestedString(records, ['handle', 'username', 'screen_name', 'screenName']);
+    const displayName = firstNestedString(records, ['author_name', 'authorName', 'display_name', 'displayName', 'name']);
+    const author = firstString(
+      typeof item.author === 'string' ? item.author : '',
+      handle && `@${handle.replace(/^@/, '')}`,
+      displayName,
+    );
+    const imageUrl = firstNestedString(records, [
+      'image', 'imageUrl', 'image_url', 'mediaUrl', 'media_url', 'preview_image_url',
+      'thumbnail', 'thumbnailUrl', 'thumbnail_url',
+    ]);
+    const likes = firstNestedCount(records, ['like_count', 'likes', 'likeCount', 'favorite_count', 'favoriteCount']);
+    const retweets = firstNestedCount(records, [
+      'retweet_count', 'retweets', 'retweetCount', 'repost_count', 'reposts', 'repostCount',
+    ]);
     candidates.push({
       platform: 'x', url,
       title: description.slice(0, 100) || `${author || 'X 用户'} 的帖子`,
       description: description.slice(0, 1_200), author, imageUrl,
-      likes: Number(item.like_count ?? item.likes ?? item.likeCount ?? 0) || 0,
+      likes,
       retweets,
     });
     if (candidates.length >= 12) break;

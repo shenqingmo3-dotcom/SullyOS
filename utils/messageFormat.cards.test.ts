@@ -75,6 +75,24 @@ describe('normalizeMessageContent · webpage_card', () => {
   });
 });
 
+describe('normalizeMessageContent · X webpage card', () => {
+  it('feeds the character the post body, author and exact engagement counts', () => {
+    const out = normalizeMessageContent(
+      mk('webpage_card', '帖子标题', { webpage: {
+        platform: 'x', siteName: 'X', author: '@shark',
+        title: '帖子标题', excerpt: '这是完整帖子正文。',
+        finalUrl: 'https://x.com/shark/status/123', likes: 42, retweets: 7,
+      } }),
+      'Sully',
+      '用户',
+    );
+    expect(out).toContain('@shark');
+    expect(out).toContain('这是完整帖子正文。');
+    expect(out).toContain('点赞 42');
+    expect(out).toContain('转推 7');
+  });
+});
+
 describe('normalizeMessageContent · independent diary and autonomy cards', () => {
   it('把单人日记正文和双方便签整理进模型上下文', () => {
     const card = {

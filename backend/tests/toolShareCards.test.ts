@@ -43,4 +43,24 @@ describe('platform share candidates', () => {
       author: '小鲨鱼',
     });
   });
+
+  it('reads text, media and metrics from nested X payloads', () => {
+    const [candidate] = extractXShareCandidates({
+      data: [{
+        url: 'https://x.com/waffle/status/9876543210',
+        full_text: '华夫饼边缘要烤到刚好发脆。',
+        user: { screen_name: 'waffle', name: '华夫饼研究所' },
+        attachments: { media: [{ preview_image_url: 'https://img.example/waffle.jpg' }] },
+        public_metrics: { like_count: 12003, retweet_count: 876 },
+      }],
+    });
+
+    expect(candidate).toMatchObject({
+      description: '华夫饼边缘要烤到刚好发脆。',
+      author: '@waffle',
+      imageUrl: 'https://img.example/waffle.jpg',
+      likes: 12003,
+      retweets: 876,
+    });
+  });
 });

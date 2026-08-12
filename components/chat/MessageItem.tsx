@@ -14,6 +14,7 @@ import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
 import { useBlobRefUrl } from '../../utils/blobRef';
+import { ArrowsClockwise, Heart, XLogo } from '@phosphor-icons/react';
 
 const ActivityImage: React.FC<{ src: string }> = ({ src }) => {
     const resolved = useBlobRefUrl(src);
@@ -2372,22 +2373,19 @@ const MessageItem = React.memo(({
             const author = String(wp.author || '').trim();
             const likes = Number(wp.likes || 0);
             const retweets = Number(wp.retweets || 0);
+            const postText = excerpt || String(wp.title || '').trim();
             return commonLayout(
                 <div
                     onClick={openPage}
-                    className="w-64 overflow-hidden rounded-2xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer active:opacity-90 transition-opacity">
-                    <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
-                        <div className="flex min-w-0 items-center gap-2">
-                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-sm font-black text-black">{author ? author.replace(/^@/, '')[0]?.toUpperCase() : 'X'}</div>
-                            <span className="truncate text-xs font-semibold text-slate-200">{author || 'X 用户'}</span>
-                        </div>
-                        <span className="text-lg font-black leading-none">𝕏</span>
-                    </div>
+                    role="link"
+                    tabIndex={0}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openPage(); }}
+                    className="w-64 overflow-hidden rounded-xl border border-slate-800 bg-black text-white shadow-[0_4px_16px_rgba(0,0,0,0.18)] cursor-pointer transition-opacity active:opacity-90">
                     {wp.image && (
-                        <div className="mx-3.5 h-36 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+                        <div className="h-36 w-full overflow-hidden bg-slate-900">
                             <img
                                 src={wp.image}
-                                alt=""
+                                alt="X 帖子配图"
                                 className="h-full w-full object-cover"
                                 loading="lazy"
                                 referrerPolicy="no-referrer"
@@ -2395,15 +2393,25 @@ const MessageItem = React.memo(({
                             />
                         </div>
                     )}
-                    <div className="px-3.5 pb-3 pt-2.5">
-                        <div className="line-clamp-2 text-sm font-semibold leading-snug text-white">{wp.title || 'X 帖子'}</div>
-                        {excerpt && excerpt !== wp.title && <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-300">{excerpt}</p>}
-                        <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-400">
-                            <span className="text-pink-300">♥ {likes}</span>
-                            <span className="text-sky-300">↻ {retweets}</span>
+                    <div className="p-3">
+                        <p className="line-clamp-5 whitespace-pre-wrap text-sm leading-relaxed text-slate-100">{postText || 'X 帖子'}</p>
+                        <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2.5">
+                            <div className="flex min-w-0 items-center gap-1.5">
+                                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white text-[9px] font-bold text-black">
+                                    {author ? author.replace(/^@/, '')[0]?.toUpperCase() : 'X'}
+                                </div>
+                                <span className="max-w-[112px] truncate text-[10px] font-medium text-slate-300">{author || 'X 用户'}</span>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2.5 text-[10px] text-slate-400">
+                                <span className="flex items-center gap-1" aria-label={`${likes} 次点赞`}><Heart size={13} weight="fill" className="text-rose-400" />{formatStatCount(likes) || '0'}</span>
+                                <span className="flex items-center gap-1" aria-label={`${retweets} 次转推`}><ArrowsClockwise size={13} weight="bold" className="text-emerald-500" />{formatStatCount(retweets) || '0'}</span>
+                            </div>
                         </div>
-                        <div className="mt-2.5 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px] text-slate-400">
-                            <span>𝕏 · {isUser ? '分享' : '推荐'}</span>
+                        <div className="mt-2 flex items-center gap-1 text-[9px] text-slate-500">
+                            <XLogo size={11} weight="fill" className="text-white" />
+                            <span className="font-semibold text-slate-200">X</span>
+                            <span>·</span>
+                            <span>{isUser ? '分享' : '推荐'}</span>
                         </div>
                     </div>
                 </div>

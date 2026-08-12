@@ -298,6 +298,20 @@ export function normalizeMessageContent(
         const title = meta.title || msg.content || '网页';
         const site = meta.siteName ? `（来自 ${meta.siteName}）` : '';
         const url = meta.finalUrl || meta.url || '';
+        if (meta.platform === 'x' || meta.siteName === 'X') {
+            const author = typeof meta.author === 'string' && meta.author.trim() ? meta.author.trim() : 'X 用户';
+            const body = (typeof meta.excerpt === 'string' && meta.excerpt.trim())
+                ? meta.excerpt.trim()
+                : (typeof title === 'string' ? title.trim() : '');
+            const likes = Number(meta.likes || 0);
+            const retweets = Number(meta.retweets || 0);
+            return [
+                `[X 帖子] ${userName}分享了一条 ${author} 发布的帖子`,
+                body ? `帖子正文：${body}` : '（这条帖子的正文没有获取到。）',
+                url ? `链接：${url}` : '',
+                `互动：点赞 ${formatStatCount(likes) || '0'} · 转推 ${formatStatCount(retweets) || '0'}`,
+            ].filter(Boolean).join('\n');
+        }
         // 视频平台分享（videoParser 解析路径）：没有可读正文，喂给角色的是
         // 「标题 + 作者 + 热度数据」，并明确告知看不到画面内容，防止对着标题瞎编剧情。
         if (meta.video) {

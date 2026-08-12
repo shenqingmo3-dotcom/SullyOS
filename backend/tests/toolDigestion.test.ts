@@ -5,8 +5,8 @@ describe('tool result digestion', () => {
   it('requires a role-facing message or diary body', () => {
     expect(parseToolDigestion('{"disposition":"message"}')).toBeNull();
     expect(parseToolDigestion('{"disposition":"silent","shareCandidateIndex":null}')).toBeNull();
-    expect(parseToolDigestion('{"disposition":"message","content":"这条倒是有点意思。"}')).toMatchObject({
-      disposition: 'message', content: '这条倒是有点意思。',
+    expect(parseToolDigestion('{"disposition":"message","messages":["这条倒是有点意思。","你看第二张图。"]}')).toMatchObject({
+      disposition: 'message', messages: ['这条倒是有点意思。', '你看第二张图。'],
     });
   });
 
@@ -28,5 +28,7 @@ describe('tool result digestion', () => {
     expect(prompt).toContain('shareCandidateIndex');
     expect(prompt).toContain('likeCandidateIndex');
     expect(prompt).toContain('repostCandidateIndex');
+    expect(prompt).toContain('你想说几条就说几条');
+    expect(prompt).not.toContain('通常一两段');
   });
 });

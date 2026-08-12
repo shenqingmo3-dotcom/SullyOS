@@ -48,6 +48,12 @@ function limited(value: unknown, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n[已按上下文预算截断]`;
 }
 
+function cleanInteractionLabels(value: string): string {
+  return value
+    .replace(/^\s*\[(?:text message|same-place scene|线上聊天|线下相处|线上模式|线下模式)\]\s*/gimu, '')
+    .trim();
+}
+
 function queryTerms(text: string): string[] {
   const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
   const words = normalized.match(/[a-z0-9_]{2,}|[\p{Script=Han}]/gu) ?? [];
@@ -236,11 +242,11 @@ export async function buildAgentContextMessages(input: {
         ? metadata.interactionScene as Record<string, unknown>
         : {};
       if (mode === 'online') {
-        return `## 当前互动状态\nSullyOS 原版线上聊天：你和用户通过手机消息交流，不在同一现实场景。只发送真实聊天文本，简短自然；禁止动作、环境、身体反应、内心独白、第三人称旁白、时间戳、姓名前缀和括号动作。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+        return `## 当前互动状态\n你正在手机聊天。保持角色扮演，使用适合即时通讯的自然口语；可以按自己的表达需要发送任意数量的消息或长消息。只输出真实聊天文本，禁止动作、环境、身体反应、内心独白、第三人称旁白、时间戳、姓名前缀、括号动作，以及 [text message]、[线上聊天] 等内部标签。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
       }
       const location = typeof scene.location === 'string' && scene.location ? `地点：${scene.location}。` : '';
       const distance = typeof scene.distance === 'string' && scene.distance ? `距离：${scene.distance}。` : '沿用已经建立的物理距离。';
-      return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n普通文字视为当面说出口的话，不是手机聊天。输出一个连续的第三人称场景叙述块，再输出中文引号对白（“……”）；合并同一瞬间的动作和环境，不写直接内心独白。延续地点和距离，移动写出过程，不瞬移，距离不够时不能突然触碰。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+      return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance}\n普通文字视为当面说出口的话，不是手机聊天。每个动作、环境或第三人称场景叙述块必须以 "> " 开头，说出口的话使用中文引号“……”；可按场景自然交替多个叙述块和对白块，不限制段数。合并同一瞬间的动作和环境，不写直接内心独白。延续地点和距离，移动写出过程，不瞬移，距离不够时不能突然触碰。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
     })(),
   ].filter(Boolean);
 
@@ -248,11 +254,11 @@ export async function buildAgentContextMessages(input: {
     { role: 'system', content: systemSections.join('\n\n') },
     ...recentEvents.map((event): ModelMessage => ({
       role: event.actor_type === 'user' ? 'user' : 'assistant',
-      content: limited(event.content ?? '', 20_000),
+      content: limited(cleanInteractionLabels(event.content ?? ''), 20_000),
     })),
   ];
   if (input.userMessage && !recentEvents.some((event) => event.actor_type === 'user' && event.content === input.userMessage)) {
-    messages.push({ role: 'user', content: limited(input.userMessage, 20_000) });
+    messages.push({ role: 'user', content: limited(cleanInteractionLabels(input.userMessage), 20_000) });
   }
 
   return {

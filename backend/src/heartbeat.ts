@@ -705,14 +705,16 @@ async function processAgent(
       eventId = await insertPlatformShare({ client, agent, runId, candidate: sharedCandidate }) ?? eventId;
     }
 
-    if (digestion?.disposition === 'message' && digestion.content) {
-      eventId = await insertProactiveMessage({
-        client, conversationId: agent.conversation_id, content: digestion.content, runId,
-        idempotencySuffix: 'tool-reaction', metadata: {
-          sourceActivity: toolResult.title, capabilityId: decision.capabilityId ?? '',
-        },
-      }) ?? eventId;
-      pushBody = digestion.content;
+    if (digestion?.disposition === 'message' && digestion.messages?.length) {
+      for (const [index, content] of digestion.messages.entries()) {
+        eventId = await insertProactiveMessage({
+          client, conversationId: agent.conversation_id, content, runId,
+          idempotencySuffix: `tool-reaction-${index}`, metadata: {
+            sourceActivity: toolResult.title, capabilityId: decision.capabilityId ?? '',
+          },
+        }) ?? eventId;
+      }
+      pushBody = digestion.messages[0];
       pushEventType = 'proactive_message';
     } else if (digestion?.disposition === 'diary' && digestion.content
         && !(await hasAssistantDiaryOnDate(client, agent.agent_id, diaryDate))) {
