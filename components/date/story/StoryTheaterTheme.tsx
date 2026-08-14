@@ -130,7 +130,7 @@ const STORY_THEME_CSS = `
   content: '';
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 0;
   pointer-events: none;
   opacity: 0;
   transition: opacity 240ms ease;
@@ -147,7 +147,7 @@ const STORY_THEME_CSS = `
   content: '';
   position: absolute;
   inset: -12% -8%;
-  z-index: 2;
+  z-index: 0;
   pointer-events: none;
   opacity: 0;
   background-image:
@@ -213,28 +213,21 @@ const STORY_THEME_CSS = `
   padding: 15px 16px;
 }
 .story-theme .story-dialog-user { border-radius: 20px 7px 20px 20px; }
-.story-theme .story-dialog-row-character { display: block; }
-.story-theme .story-dialog-character {
+.story-theme .story-dialog-row-character {
   position: relative;
+  display: block;
   isolation: isolate;
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
-  overflow: visible;
-  border: 1px solid var(--story-card-line);
-  border-radius: var(--story-card-radius);
-  color: var(--story-card-ink);
-  background: var(--story-card-paper) !important;
-  box-shadow: var(--story-card-shadow);
-  padding: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  animation: story-card-arrive .34s ease-out both;
+  min-width: 0;
+  padding: 0 8px 17px 0;
 }
-.story-theme .story-dialog-character::before {
+.story-theme .story-dialog-row-character::before {
   content: '';
   position: absolute;
-  z-index: -1;
-  inset: 10px -8px -16px 8px;
+  z-index: 0;
+  inset: 10px 0 0 9px;
   border: 1px solid var(--story-card-line);
   border-radius: var(--story-card-radius);
   background-color: var(--story-card-back);
@@ -246,13 +239,13 @@ const STORY_THEME_CSS = `
   transform: rotate(.7deg);
   pointer-events: none;
 }
-.story-theme .story-dialog-character::after {
+.story-theme .story-dialog-row-character::after {
   content: '';
   position: absolute;
-  z-index: 3;
+  z-index: 2;
   left: 26px;
   right: 19px;
-  bottom: -15px;
+  bottom: 2px;
   height: 12px;
   opacity: .82;
   background-image: radial-gradient(ellipse at 50% 100%, transparent 0 7px, color-mix(in srgb, var(--story-card-accent) 62%, transparent) 7.8px 9px, transparent 9.8px);
@@ -260,6 +253,24 @@ const STORY_THEME_CSS = `
   background-position: left bottom;
   background-size: 31px 13px;
   pointer-events: none;
+}
+.story-theme .story-dialog-character {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--story-card-line);
+  border-radius: var(--story-card-radius);
+  color: var(--story-card-ink);
+  background: var(--story-card-paper) !important;
+  box-shadow: var(--story-card-shadow);
+  padding: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  animation: story-card-arrive .34s ease-out both;
 }
 .story-theme .story-paper-tab {
   position: absolute;
@@ -287,15 +298,17 @@ const STORY_THEME_CSS = `
   padding: 16px 16px 13px;
   border-bottom: 1px solid var(--story-card-hairline);
 }
-.story-theme .story-paper-cast { display: flex; width: 40px; }
-.story-theme .story-paper-cast .story-dialog-avatar {
+.story-theme .story-paper-avatar {
+  display: block;
   width: 40px;
   height: 40px;
   flex: 0 0 40px;
-  border-color: color-mix(in srgb, var(--story-card-accent) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--story-card-accent) 30%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--story-card-accent) 13%, var(--story-card-paper));
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--story-card-paper) 72%, transparent);
+  object-fit: cover;
 }
-.story-theme .story-paper-cast img + img { margin-left: -22px; margin-top: 15px; }
 .story-theme .story-paper-meta strong { display: block; overflow: hidden; color: var(--story-card-ink); font-size: 13px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
 .story-theme .story-paper-meta > span { display: block; margin-top: 3px; color: var(--story-card-muted); font-size: 9px; letter-spacing: .07em; }
 .story-theme .story-paper-issue { align-self: end; color: var(--story-card-muted); font-size: 10px; line-height: 1.2; }
@@ -312,6 +325,8 @@ const STORY_THEME_CSS = `
   letter-spacing: .012em;
   overflow-wrap: anywhere;
 }
+.story-theme .story-page-scroll > div,
+.story-theme .story-page-scroll article { min-width: 0; max-width: 100%; }
 .story-theme .story-ocean-prose [role='separator'] { border-color: var(--story-card-hairline) !important; }
 .story-theme .story-ocean-slate,
 .story-theme .story-ocean-drama,
