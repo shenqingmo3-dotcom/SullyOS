@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowBendDownRight, ArrowClockwise, ArrowLeft, Broadcast, CaretDown, CaretLeft, CaretRight, ChatCircleDots, Clock, Database, Eye, EyeSlash, FilmSlate, GearSix, HeartStraight, Key, MapPin, PaperPlaneTilt, PencilSimple, SlidersHorizontal, SpinnerGap, Trash, X } from '@phosphor-icons/react';
+import { Archive, ArrowBendDownRight, ArrowClockwise, ArrowLeft, Broadcast, CaretDown, CaretLeft, CaretRight, ChatCircleDots, Clock, Database, Eye, EyeSlash, FileText, FilmSlate, GearSix, HeartStraight, Key, MapPin, PaperPlaneTilt, PencilSimple, SlidersHorizontal, SpinnerGap, Stop, Trash, X } from '@phosphor-icons/react';
 import { useOS } from '../../../context/OSContext';
 import type { CharacterProfile, Message, StoryTheaterEntry, StoryTheaterMask, StoryTheaterPreset } from '../../../types';
 import { DB } from '../../../utils/db';
 import { ContextBuilder } from '../../../utils/context';
-import { safeResponseJson, extractContent } from '../../../utils/safeApi';
+import { safeFetchJson, type StreamHooks } from '../../../utils/safeApi';
 import {
     appendStoryAffinityInputs,
     appendStoryUserTurn,
@@ -38,6 +38,10 @@ import {
     storyTheaterThreadId,
     type StoryAffinityInput,
 } from '../../../utils/storyTheater';
+import { isStoryPresetPromptEnabled } from '../../../utils/storyPresetCompat';
+import { runStoryRegex, runStoryRegexOnMessages, STORY_REGEX_PLACEMENT } from '../../../utils/storyRegex';
+import { appendStoryContinuation, finalStoryStreamStatus, readStoryCompletion, type StoryCompletionResult, type StoryStreamStatus } from '../../../utils/storyStream';
+import { injectStoryWorldbookDepthEntries, runStoryWorldbooks } from '../../../utils/storyWorldbookCompat';
 import {
     getMemoryPalaceHighWaterMark,
     processMessageRange,
@@ -47,6 +51,7 @@ import { processNewMessagesWithAutoArchive } from '../../../utils/memoryPalace/a
 import { incrementDigestRound, runCognitiveDigestion } from '../../../utils/memoryPalace';
 import StoryQuickPresetPanel from './StoryQuickPresetPanel';
 import { StoryAppearanceButton } from './StoryTheaterTheme';
+import HtmlCard from '../../chat/HtmlCard';
 
 interface Props {
     entry: StoryTheaterEntry;
@@ -58,12 +63,21 @@ interface Props {
     onEntryChange: (entry: StoryTheaterEntry) => Promise<void> | void;
 }
 
-const textFromHistory = (messages: Message[], identityName: string): string => buildStoryHistory(messages).map(message => {
-    const label = message.role === 'user' ? `${identityName}给出的推进（用户侧）` : '上一层剧场正文';
-    return `[${label}]\n${message.content}`;
-}).join('\n\n');
-
 const STORY_PAGE_SIZE = 10;
+
+interface StoryRequestPreview {
+    trigger: 'normal' | 'continue' | 'regenerate';
+    messages: Array<{ role: string; content: string }>;
+    worldbookHits: string[];
+    createdAt: number;
+}
+
+interface StoryStreamDraft {
+    targetId?: number;
+    content: string;
+    reasoning: string;
+    status: StoryStreamStatus;
+}
 
 const swipeCandidatesFor = (message: Message): string[] => {
     const stored = message.metadata?.theaterSwipeCandidates;
@@ -184,8 +198,41 @@ const StorySceneRelationships: React.FC<{ inputs: StoryAffinityInput[] }> = ({ i
     })}</div>
 </div>;
 
-const StoryOutput: React.FC<{ content: string; onChoose?: (text: string) => void; affinityInputs: StoryAffinityInput[] }> = ({ content, onChoose, affinityInputs }) => {
-    const blocks = parseStoryDisplayBlocks(content);
+const StoryBranchIcon: React.FC<{ index: number }> = ({ index }) => {
+    const kind = index % 3;
+    return <span className='story-branch-icon' aria-hidden='true'>{kind === 0
+        ? <svg viewBox='0 0 24 24'><path d='M3 12c4-5 10-6 15-2l3-3v10l-3-3c-5 4-11 3-15-2Z' /><circle cx='15.5' cy='11' r='.7' /></svg>
+        : kind === 1
+            ? <svg viewBox='0 0 24 24'><path d='m12 2 2.5 6.7 7 .3-5.5 4.4 1.9 6.8-5.9-3.8-5.9 3.8 1.9-6.8L2.5 9l7-.3L12 2Z' /></svg>
+            : <svg viewBox='0 0 24 24'><path d='M12 22V6M12 11c-5 0-7-3-7-7 5 0 7 3 7 7Zm0 5c5 0 7-3 7-7-5 0-7 3-7 7Z' /></svg>}</span>;
+};
+
+const STREAM_STATUS_LABEL: Record<StoryStreamStatus, string> = {
+    streaming: '正在写', complete: '已完成', stopped: '已停止', interrupted: '连接中断', length: '到达本次上限',
+};
+
+const StoryReasoningCard: React.FC<{ reasoning?: string; streaming?: boolean }> = ({ reasoning, streaming }) => reasoning?.trim() ? <details className={`story-ocean-think group ${streaming ? 'story-streaming' : ''}`}>
+    <summary className='list-none cursor-pointer flex items-center justify-between gap-3'><span><span className='story-ocean-kicker'>visible reasoning</span><strong className='block mt-1 text-xs'>模型公开的思考内容</strong></span><CaretDown size={13} className='transition-transform group-open:rotate-180' /></summary>
+    <p className='mt-4 whitespace-pre-wrap text-[11px] leading-6'>{reasoning}</p>
+</details> : null;
+
+const StoryStreamBadge: React.FC<{ status?: StoryStreamStatus; contentLength: number; target?: number }> = ({ status, contentLength, target }) => {
+    if (!status && !target) return null;
+    const progress = target ? Math.min(100, Math.round(contentLength / target * 100)) : 0;
+    return <div className='mt-3 flex items-center gap-2 text-[9px] text-slate-400'><span className={`inline-flex items-center gap-1 font-bold ${status === 'interrupted' ? 'text-rose-500' : status === 'length' ? 'text-amber-600' : 'text-violet-600'}`}>{status === 'streaming' && <span className='story-stream-cursor' />}{status ? STREAM_STATUS_LABEL[status] : '字数进度'}</span>{target ? <><span>·</span><span>{contentLength.toLocaleString()} / {target.toLocaleString()} 字</span><span className='h-1 min-w-12 flex-1 overflow-hidden rounded-full bg-slate-200'><span className='block h-full bg-violet-500' style={{ width: `${progress}%` }} /></span></> : null}</div>;
+};
+
+const StoryOutput: React.FC<{ content: string; onChoose?: (text: string) => void; affinityInputs: StoryAffinityInput[]; regexScripts?: StoryTheaterPreset['document']['regexScripts'] }> = ({ content, onChoose, affinityInputs, regexScripts }) => {
+    const [displayContent, setDisplayContent] = useState(content);
+    useEffect(() => {
+        let active = true;
+        setDisplayContent(content);
+        void runStoryRegex(content, regexScripts, { placement: STORY_REGEX_PLACEMENT.aiOutput, isMarkdown: true }).then(value => {
+            if (active) setDisplayContent(value);
+        });
+        return () => { active = false; };
+    }, [content, regexScripts]);
+    const blocks = parseStoryDisplayBlocks(displayContent);
     const relationshipSceneIndex = blocks.findIndex(block => block.kind === 'scene');
     const hasScene = relationshipSceneIndex >= 0;
     const relationship = affinityInputs.length > 0 ? <StorySceneRelationships inputs={affinityInputs} /> : null;
@@ -201,7 +248,13 @@ const StoryOutput: React.FC<{ content: string; onChoose?: (text: string) => void
         {!hasScene && relationship}
         {blocks.map((block, index) => {
             const lines = splitDisplayLines(block.text);
-            if (block.kind === 'story') return <p key={index} className='font-serif text-[15px] leading-8 text-slate-800 whitespace-pre-wrap'>{block.text}</p>;
+            if (block.kind === 'story') return <p key={index} className='story-ocean-prose font-serif text-[15px] leading-8 text-slate-800 whitespace-pre-wrap'>{block.text}</p>;
+            if (block.kind === 'slate') return <section key={index} className='story-ocean-slate'><div className='story-ocean-kicker'>chapter tide</div><div className='mt-3'><LabeledRows lines={lines} /></div></section>;
+            if (block.kind === 'drama') return <details key={index} className='story-ocean-drama group' open>
+                <summary className='list-none cursor-pointer flex items-center gap-3'><span className='story-ocean-clip' aria-hidden='true' /><span className='min-w-0 flex-1'><span className='story-ocean-kicker'>preset theater</span><strong className='block mt-1 truncate text-sm'>{block.title || '预设小剧场'}</strong></span><CaretDown size={14} className='transition-transform group-open:rotate-180' /></summary>
+                <div className='mt-4'>{block.html ? <HtmlCard html={block.html} /> : <p className='whitespace-pre-wrap text-[12px] leading-6'>{block.text}</p>}</div>
+            </details>;
+            if (block.kind === 'think') return <details key={index} className='story-ocean-think group'><summary className='list-none cursor-pointer flex items-center justify-between gap-3'><span><span className='story-ocean-kicker'>thinking trace</span><strong className='block mt-1 text-xs'>思维链（默认收起）</strong></span><CaretDown size={13} className='transition-transform group-open:rotate-180' /></summary><p className='mt-4 whitespace-pre-wrap text-[11px] leading-6'>{block.text}</p></details>;
             if (block.kind === 'scene') return <section key={index} className='py-4 border-y border-slate-300'>
                 <div className='flex items-center gap-2 text-[9px] tracking-[.22em] uppercase font-bold text-violet-600'><FilmSlate size={14} weight='fill' />{block.title}</div>
                 <div className='mt-3 grid grid-cols-2 gap-x-5 gap-y-3'>{lines.map((line, lineIndex) => <div key={lineIndex} className={line.label === '场面' ? 'col-span-2' : ''}><div className='flex items-center gap-1 text-[9px] font-bold text-slate-400'>{line.label === '时间' ? <Clock size={11} /> : line.label === '地点' ? <MapPin size={11} /> : null}{line.label || '场景'}</div><div className='mt-1 text-[12px] leading-5 text-slate-700'>{line.value}</div></div>)}</div>
@@ -233,7 +286,7 @@ const StoryOutput: React.FC<{ content: string; onChoose?: (text: string) => void
             if (block.kind === 'choices') {
                 const replies = lines.filter(line => line.label === '推进' && line.value).map(line => line.value);
                 const options = replies.length > 0 ? replies : lines.filter(line => line.value).map(line => line.value);
-                return <section key={index} className='py-4 border-y border-slate-300'><div className='flex items-center gap-2 text-[10px] font-bold text-slate-600'><ArrowBendDownRight size={15} />下一步可以这样写</div><div className='mt-3 divide-y divide-slate-200'>{options.map((option, optionIndex) => <button key={optionIndex} onClick={() => onChoose?.(option)} className='w-full py-3 flex items-start gap-3 text-left'><span className='w-5 h-5 shrink-0 rounded-full bg-violet-100 text-violet-700 grid place-items-center text-[9px] font-bold'>{optionIndex + 1}</span><span className='text-[12px] leading-5 text-slate-700'>{option}</span></button>)}</div></section>;
+                return <section key={index} className='story-ocean-choices'><div className='flex items-center gap-2 text-[10px] font-bold text-slate-600'><span className='story-ocean-clip' aria-hidden='true' />{block.title || '下一步可以这样写'}</div><div className='mt-3 space-y-2'>{options.map((option, optionIndex) => <button key={optionIndex} onClick={() => onChoose?.(option)} className='story-ocean-choice w-full flex items-start gap-3 text-left'><StoryBranchIcon index={optionIndex} /><span className='text-[12px] leading-5 text-slate-700'>{option}</span></button>)}</div></section>;
             }
             if (block.kind === 'affinity') {
                 const personGroups = groupDisplayLines(lines, '人物', ['角色 ID']);
@@ -269,7 +322,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         document: resolveStoryPresetDocument(preset, entry.presetOverride),
     }), [entry.presetOverride, preset]);
     const activeMiniTheater = useMemo(() => getActiveStoryMiniTheaterPrompt(effectivePreset.document), [effectivePreset.document]);
-    const affinityEnabled = useMemo(() => effectivePreset.document.prompts.some(prompt => prompt.id === 'nmj-v65-affinity-control' && prompt.enabled), [effectivePreset.document]);
+    const affinityEnabled = useMemo(() => effectivePreset.document.prompts.some(prompt => prompt.id === 'nmj-v65-affinity-control' && isStoryPresetPromptEnabled(effectivePreset.document, prompt.id)), [effectivePreset.document]);
     const selectedBooks = useMemo(() => dedupeTheaterWorldbooks(actors).filter(book => entry.selectedWorldbookIds.includes(book.id)), [actors, entry.selectedWorldbookIds]);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
@@ -288,7 +341,12 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
     const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
     const [editDraft, setEditDraft] = useState('');
     const [mutatingMessage, setMutatingMessage] = useState(false);
+    const [requestPreview, setRequestPreview] = useState<StoryRequestPreview | null>(null);
+    const [showRequestPreview, setShowRequestPreview] = useState(false);
+    const [streamDraft, setStreamDraft] = useState<StoryStreamDraft | null>(null);
     const archiveLock = useRef(false);
+    const requestLock = useRef(false);
+    const requestAbort = useRef<AbortController | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
@@ -308,7 +366,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         setMessageMenu(null);
         setEditingMessage(null);
         setDeletingMessage(null);
+        setRequestPreview(null);
+        setShowRequestPreview(false);
+        setStreamDraft(null);
     }, [entry.id]);
+    useEffect(() => () => requestAbort.current?.abort(), []);
     const patchAffinityDraft = useCallback((characterId: string, patch: Partial<AffinityDraft>) => {
         setAffinityDrafts(current => ({
             ...current,
@@ -410,25 +472,29 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
     }, [messages]);
     const displayedTokenInfo = contextTokens > 0 ? { count: contextTokens, exact: contextTokensExact } : storedTokenInfo;
 
-    const callCompletion = useCallback(async (payload: Array<{ role: string; content: string }>, settings?: object, onPromptTokens?: (tokens: number) => void): Promise<string> => {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    const callCompletion = useCallback(async (
+        payload: Array<{ role: string; content: string }>,
+        settings?: object,
+        onPromptTokens?: (tokens: number) => void,
+        streamHooks?: StreamHooks,
+        signal?: AbortSignal,
+    ): Promise<StoryCompletionResult> => {
+        const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({ model: apiConfig.model, messages: payload, stream: false, ...settings }),
-        });
-        if (!response.ok) throw new Error(`API Error ${response.status}`);
-        const data = await safeResponseJson(response);
-        const reportedPromptTokens = Number(data?.usage?.prompt_tokens);
-        if (Number.isFinite(reportedPromptTokens) && reportedPromptTokens > 0) onPromptTokens?.(reportedPromptTokens);
-        const content = extractContent(data).trim();
-        if (!content) throw new Error('没有生成正文，请重试');
-        return content;
+            body: JSON.stringify({ model: apiConfig.model, messages: payload, ...settings, stream: Boolean(streamHooks) }),
+            signal,
+        }, 0, 0, { appId: 'date', appName: '剧情模式', purpose: '剧情续写' }, streamHooks);
+        const result = readStoryCompletion(data);
+        const reportedPromptTokens = result.usage?.promptTokens;
+        if (typeof reportedPromptTokens === 'number' && Number.isFinite(reportedPromptTokens) && reportedPromptTokens > 0) onPromptTokens?.(reportedPromptTokens);
+        return result;
     }, [apiConfig]);
 
-    const saveCentralAndMirrors = useCallback(async (role: 'user' | 'assistant', content: string, centralMetadata: Record<string, unknown> = {}): Promise<number> => {
+    const saveCentralAndMirrors = useCallback(async (role: 'user' | 'assistant', content: string, centralMetadata: Record<string, unknown> = {}): Promise<{ centralId: number; relatedIds: number[] }> => {
         const now = Date.now();
         const centralId = await DB.saveMessage({ charId: threadId, role, type: 'text', content, timestamp: now, metadata: { source: 'story_theater', theaterId: entry.id, ...centralMetadata } });
-        if (!entry.writesToCharacterMemory) return centralId;
+        if (!entry.writesToCharacterMemory) return { centralId, relatedIds: [centralId] };
         const theaterMirrorIds: Record<string, number> = {};
         for (const actor of memoryActors) {
             theaterMirrorIds[actor.id] = await DB.saveMessage({
@@ -441,7 +507,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             });
         }
         await DB.updateMessageMetadata(centralId, previous => ({ ...previous, theaterMirrorIds }));
-        return centralId;
+        return { centralId, relatedIds: [centralId, ...Object.values(theaterMirrorIds)] };
     }, [entry, memoryActors, threadId]);
 
     const buildActorContexts = useCallback(async (query: string): Promise<string> => {
@@ -540,10 +606,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             if (entry.archiveStrategy === 'summary') {
                 setMemoryStatus(`正在把 ${batch.length} 条正文压成事件盒……`);
                 const transcript = batch.map(message => `${message.role === 'user' ? '推进' : '正文'}：${message.content}`).join('\n\n');
-                summary = await callCompletion([
+                summary = (await callCompletion([
                     { role: 'system', content: '把剧场片段压缩成一只可长期常驻上下文的事件盒。使用第三人称，严格保留人物、因果、承诺、关系变化、未解决冲突和当前场景落点；不要评论写作，不要虚构片段外事实。控制在 800 字以内。' },
                     { role: 'user', content: `剧情：${entry.title}\n\n${transcript}` },
-                ], { temperature: 0.2, max_tokens: 1600 });
+                ], { temperature: 0.2, max_tokens: 1600 })).content.trim();
+                if (!summary) throw new Error('事件盒没有生成可用摘要');
             } else {
                 const embedding = memoryPalaceConfig.embedding;
                 const light = memoryPalaceConfig.lightLLM?.baseUrl ? memoryPalaceConfig.lightLLM : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
@@ -557,9 +624,10 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             }
 
             await Promise.all(batch.map(message => DB.updateMessageMetadata(message.id, previous => ({ ...previous, theaterArchived: true, theaterArchiveStrategy: entry.archiveStrategy }))));
+            const storedEntry = (await DB.getStoryTheaters()).find(item => item.id === entry.id) || entry;
             const next: StoryTheaterEntry = {
-                ...entry,
-                archives: [...entry.archives, {
+                ...storedEntry,
+                archives: [...storedEntry.archives, {
                     id: makeStoryTheaterId(),
                     strategy: entry.archiveStrategy,
                     fromMessageId: first.id,
@@ -582,17 +650,24 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         }
     }, [addToast, apiConfig, callCompletion, entry, loadMessages, mask.name, memoryPalaceConfig, onEntryChange, threadId]);
 
-    const send = useCallback(async (rerollTarget?: Message, control?: { text: string; hideUser?: boolean }) => {
-        if (sending || actors.length === 0) return;
+    const send = useCallback(async (rerollTarget?: Message, control?: { text: string; hideUser?: boolean; action?: 'continue'; target?: Message }) => {
+        if (requestLock.current || actors.length === 0) return;
+        requestLock.current = true;
         setSending(true);
         setRerollingId(rerollTarget?.id || null);
+        const controller = new AbortController();
+        requestAbort.current = controller;
+        let finalizeInterrupted: ((status: 'stopped' | 'interrupted') => Promise<boolean>) | undefined;
         try {
             const before = (await DB.getMessagesByCharId(threadId, true))
                 .filter(message => message.metadata?.source === 'story_theater')
                 .sort((a, b) => a.id - b.id);
             const latest = before[before.length - 1];
             const isReroll = Boolean(rerollTarget && latest?.id === rerollTarget.id && latest.role === 'assistant' && !mirrorArchived(latest, entry));
+            const continueTarget = control?.action === 'continue' ? control.target : undefined;
+            const isContinue = Boolean(continueTarget && latest?.id === continueTarget.id && latest.role === 'assistant' && !mirrorArchived(latest, entry));
             if (rerollTarget && !isReroll) return;
+            if (control?.action === 'continue' && !isContinue) return;
             const openingPrompt = `请直接写出「${entry.title}」的第一幕。${entry.premise ? `剧情介绍：${entry.premise}` : '没有额外剧情介绍，请根据角色、世界与预设自然建立场景。'}直接开始，不要求补充信息，也不要替当前由你执笔的身份做重大决定。`;
             const typedText = control?.text.trim() || input.trim();
             const rerollIndex = isReroll ? before.findIndex(message => message.id === rerollTarget?.id) : -1;
@@ -616,7 +691,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                     ? 0
                     : retry
                         ? latest.id
-                        : await saveCentralAndMirrors('user', text, affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {});
+                        : (await saveCentralAndMirrors('user', text, affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {})).centralId;
             if (!isReroll && !assistantOpening && !control?.hideUser) await loadMessages();
 
             const current = (await DB.getMessagesByCharId(threadId, true))
@@ -639,20 +714,63 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 visibleHistory.map(message => ({ role: message.role, content: message.content })),
                 text,
             );
-            const worldbookSlots = buildTheaterWorldbookSlots(selectedBooks, worldbookScanMessages, promptIdentityName, actors.map(actor => actor.name));
+            const nativeWorldbookSlots = buildTheaterWorldbookSlots(selectedBooks, worldbookScanMessages, promptIdentityName, actors.map(actor => actor.name));
+            const trigger = isReroll ? 'regenerate' : isContinue ? 'continue' : 'normal';
+            const requestSeed = `${entry.id}:${userMessageId || Date.now()}:${trigger}`;
+            const tavernWorldbooks = runStoryWorldbooks({
+                documents: entry.tavernWorldbooks || [],
+                messages: worldbookScanMessages,
+                state: entry.tavernWorldbookState,
+                seed: requestSeed,
+                trigger,
+                userName: promptIdentityName,
+                characterNames: actors.map(actor => actor.name),
+                personaDescription: [mask.description, mask.coreInstruction, mask.worldview].filter(Boolean).join('\n'),
+                characterDescription: actorContext,
+                characterPersonality: actors.map(actor => `${actor.name}：${actor.personalityStyle || '沿用角色资料'}`).join('\n'),
+                characterDepthPrompt: actors.map(actor => actor.writerPersona || '').filter(Boolean).join('\n'),
+                scenario,
+            });
+            const worldbookSlots = {
+                worldBefore: [nativeWorldbookSlots.worldBefore, tavernWorldbooks.worldBefore].filter(Boolean).join('\n\n'),
+                worldAfter: [nativeWorldbookSlots.worldAfter, tavernWorldbooks.worldAfter].filter(Boolean).join('\n\n'),
+            };
+            const regexVariables = { user: promptIdentityName, char: actors[0]?.name || '', group: actors.map(actor => actor.name).join('、') };
+            const regexWorldbookSlots = {
+                worldBefore: await runStoryRegex(worldbookSlots.worldBefore, effectivePreset.document.regexScripts, { placement: STORY_REGEX_PLACEMENT.worldInfo, isPrompt: true, variables: regexVariables }),
+                worldAfter: await runStoryRegex(worldbookSlots.worldAfter, effectivePreset.document.regexScripts, { placement: STORY_REGEX_PLACEMENT.worldInfo, isPrompt: true, variables: regexVariables }),
+            };
             const compiled = compileStoryPreset({
                 preset: effectivePreset,
                 userName: promptIdentityName,
                 characterNames: actors.map(actor => actor.name),
+                history: buildStoryHistory(visibleHistory),
+                trigger,
+                variables: entry.presetVariables,
+                seed: requestSeed,
+                now: new Date(),
+                lastUserMessage: text,
+                charDescription: actorContext,
+                charPersonality: actors.map(actor => `${actor.name}：${actor.personalityStyle || '沿用角色资料'}`).join('\n'),
+                continueContent: isContinue ? continueTarget!.content : undefined,
                 slots: {
                     actors: actorContext,
                     persona: [buildTheaterPersona(mask), maskMemoryContext].filter(Boolean).join('\n\n'),
                     scenario,
-                    worldBefore: worldbookSlots.worldBefore,
-                    worldAfter: worldbookSlots.worldAfter,
-                    history: textFromHistory(visibleHistory, promptIdentityName),
+                    worldBefore: regexWorldbookSlots.worldBefore,
+                    worldAfter: regexWorldbookSlots.worldAfter,
                 },
             });
+            const variablesChanged = JSON.stringify(compiled.variables) !== JSON.stringify(entry.presetVariables || {});
+            const worldbookStateChanged = JSON.stringify(tavernWorldbooks.state) !== JSON.stringify(entry.tavernWorldbookState || { turn: 0, stickyUntil: {}, cooldownUntil: {} });
+            if (variablesChanged || worldbookStateChanged) {
+                await onEntryChange({
+                    ...entry,
+                    ...(variablesChanged ? { presetVariables: compiled.variables } : {}),
+                    ...(worldbookStateChanged ? { tavernWorldbookState: tavernWorldbooks.state } : {}),
+                    updatedAt: Date.now(),
+                });
+            }
             const miniTheaterReminder = buildStoryMiniTheaterReminder(effectivePreset.document, promptIdentityName, actors.map(actor => actor.name));
             const backstageAftermathReminder = buildStoryBackstageAftermathReminder(effectivePreset.document);
             const multiAffinityGuide = affinityEnabled ? buildStoryMultiAffinityGuide(actors.map(actor => ({ id: actor.id, name: actor.name }))) : '';
@@ -660,7 +778,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const identityGuard = buildStoryIdentityGuard(effectivePreset.document, promptIdentityName, actors.map(actor => actor.name));
             const modelInput = appendStoryAffinityInputs(text, affinityInputs);
             const payloadBeforeTurn = [
-                ...compiled.messages,
+                ...injectStoryWorldbookDepthEntries(compiled.messages, tavernWorldbooks.depthEntries),
                 ...(entry.writesToCharacterMemory ? [{ role: 'system' as const, content: REAL_COMPANION_MEMORY_GUARD }] : []),
                 ...(backstageAftermathReminder ? [{ role: 'system' as const, content: backstageAftermathReminder }] : []),
                 ...(miniTheaterReminder ? [{ role: 'system' as const, content: miniTheaterReminder }] : []),
@@ -669,48 +787,149 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 ...(affinityAwarenessReminder ? [{ role: 'system' as const, content: affinityAwarenessReminder }] : []),
                 { role: 'system' as const, content: identityGuard },
             ];
-            const payload = appendStoryUserTurn(payloadBeforeTurn, modelInput, compiled.assistantPrefill, entry.forceUserLastMessage === true);
+            const payload = await runStoryRegexOnMessages(
+                appendStoryUserTurn(payloadBeforeTurn, modelInput, compiled.assistantPrefill, entry.forceUserLastMessage === true),
+                effectivePreset.document.regexScripts,
+                regexVariables,
+            );
             let promptTokenCount = estimateStoryTokens(payload.map(message => `${message.role}\n${message.content}`).join('\n'));
             let promptTokenCountExact = false;
             setContextTokens(promptTokenCount);
             setContextTokensExact(false);
-            const generated = await callCompletion(payload, compiled.settings, reported => {
+            const worldbookHits = [
+                ...selectedBooks.map(book => `SharkOS · ${book.title}`),
+                ...(entry.tavernWorldbooks || []).flatMap(document => document.entries)
+                .filter(item => tavernWorldbooks.activatedEntryIds.includes(item.id))
+                .map(item => `酒馆 · ${item.name}`),
+            ];
+            setRequestPreview({ trigger, messages: payload.map(message => ({ ...message })), worldbookHits, createdAt: Date.now() });
+
+            const baseContent = isContinue ? continueTarget!.content : '';
+            const prefill = compiled.assistantPrefill?.content || '';
+            let latestRaw = '';
+            let latestReasoning = '';
+            let latestVisible = isReroll ? rerollTarget!.content : baseContent;
+            let createPromise: Promise<{ centralId: number; relatedIds: number[] }> | null = isReroll || isContinue
+                ? Promise.resolve({ centralId: (isReroll ? rerollTarget : continueTarget)!.id, relatedIds: relatedMessageIds((isReroll ? rerollTarget : continueTarget)!) })
+                : null;
+            let persistTimer: number | null = null;
+            let renderTimer: number | null = null;
+            let persistChain = Promise.resolve();
+            const attemptText = (raw: string) => prefill && !raw.startsWith(prefill) ? `${prefill}${raw}` : raw;
+            const visibleText = (raw: string) => appendStoryContinuation(baseContent, attemptText(raw));
+            const canTakeOver = () => isReroll ? latestRaw.trim().length > 0 : latestVisible.trim().length > 0 || latestReasoning.trim().length > 0;
+            const ensureMessage = async () => {
+                if (!createPromise) {
+                    createPromise = saveCentralAndMirrors('assistant', latestVisible, {
+                        streamStatus: 'streaming',
+                        reasoning: latestReasoning,
+                        continuationCount: 0,
+                        targetCharacters: entry.targetCharacters,
+                        ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
+                    });
+                }
+                const handle = await createPromise;
+                setStreamDraft(current => current ? { ...current, targetId: handle.centralId } : current);
+                return handle;
+            };
+            const queuePersist = (status: StoryStreamStatus, finishReason?: string, usage?: StoryCompletionResult['usage']) => {
+                const contentSnapshot = latestVisible;
+                const reasoningSnapshot = latestReasoning;
+                if (!canTakeOver()) return persistChain;
+                persistChain = persistChain.then(async () => {
+                    const handle = await ensureMessage();
+                    await Promise.all(handle.relatedIds.map(id => DB.updateMessage(id, contentSnapshot)));
+                    await DB.updateMessageMetadata(handle.centralId, previous => ({
+                        ...previous,
+                        streamStatus: status,
+                        ...(finishReason ? { finishReason } : {}),
+                        reasoning: reasoningSnapshot,
+                        ...(usage ? { usage } : {}),
+                        continuationCount: isContinue ? (Number(previous?.continuationCount) || 0) + (status === 'streaming' ? 0 : 1) : 0,
+                        targetCharacters: entry.targetCharacters,
+                        ...(isReroll ? { theaterSwipeCandidates: undefined, theaterSwipeIndex: undefined } : {}),
+                        theaterPromptTokens: promptTokenCount,
+                        theaterPromptTokensExact: promptTokenCountExact,
+                        ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
+                    }));
+                });
+                return persistChain;
+            };
+            const schedulePersist = () => {
+                if (persistTimer !== null) return;
+                persistTimer = window.setTimeout(() => {
+                    persistTimer = null;
+                    void queuePersist('streaming');
+                }, 220);
+            };
+            const flushDraft = () => {
+                renderTimer = null;
+                const content = isReroll && !latestRaw ? rerollTarget!.content : latestVisible;
+                setStreamDraft(current => ({ targetId: current?.targetId || (isReroll || isContinue ? (isReroll ? rerollTarget : continueTarget)!.id : undefined), content, reasoning: latestReasoning, status: 'streaming' }));
+                schedulePersist();
+            };
+            const updateDraft = () => {
+                if (renderTimer === null) renderTimer = window.setTimeout(flushDraft, 42);
+            };
+            finalizeInterrupted = async status => {
+                if (persistTimer !== null) window.clearTimeout(persistTimer);
+                if (renderTimer !== null) window.clearTimeout(renderTimer);
+                persistTimer = null;
+                renderTimer = null;
+                if (!canTakeOver()) {
+                    setStreamDraft(null);
+                    return false;
+                }
+                setStreamDraft(current => current ? { ...current, status } : current);
+                await queuePersist(status, status);
+                await loadMessages();
+                setStreamDraft(null);
+                return true;
+            };
+
+            setStreamDraft({ targetId: isReroll || isContinue ? (isReroll ? rerollTarget : continueTarget)!.id : undefined, content: latestVisible, reasoning: '', status: 'streaming' });
+            const result = await callCompletion(payload, compiled.settings, reported => {
                 promptTokenCount = reported;
                 promptTokenCountExact = true;
                 setContextTokens(reported);
                 setContextTokensExact(true);
-            });
-            const prefill = compiled.assistantPrefill?.content || '';
-            const content = prefill && !generated.startsWith(prefill) ? `${prefill}${generated}` : generated;
-            if (isReroll && rerollTarget) {
-                const candidates = [...swipeCandidatesFor(rerollTarget), content];
-                await Promise.all(relatedMessageIds(rerollTarget).map(id => DB.updateMessage(id, content)));
-                await DB.updateMessageMetadata(rerollTarget.id, previous => ({
-                    ...previous,
-                    theaterPromptTokens: promptTokenCount,
-                    theaterPromptTokensExact: promptTokenCountExact,
-                    theaterSwipeCandidates: candidates,
-                    theaterSwipeIndex: candidates.length - 1,
-                    ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
-                }));
-            } else {
-                await saveCentralAndMirrors('assistant', content, {
-                    theaterPromptTokens: promptTokenCount,
-                    theaterPromptTokensExact: promptTokenCountExact,
-                    theaterSwipeCandidates: [content],
-                    theaterSwipeIndex: 0,
-                    ...(affinityInputs.length > 0 ? { theaterAffinityInputs: affinityInputs } : {}),
-                });
-            }
+            }, {
+                onDelta: (_delta, fullText) => { latestRaw = fullText; latestVisible = visibleText(fullText); updateDraft(); },
+                onReasoningDelta: (_delta, fullReasoning) => { latestReasoning = fullReasoning; updateDraft(); },
+            }, controller.signal);
+            latestRaw = latestRaw || result.content;
+            latestReasoning = latestReasoning || result.reasoning;
+            const assembled = attemptText(latestRaw);
+            const filteredAddition = await runStoryRegex(assembled, effectivePreset.document.regexScripts, { placement: STORY_REGEX_PLACEMENT.aiOutput, variables: regexVariables });
+            latestVisible = appendStoryContinuation(baseContent, filteredAddition);
+            if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError');
+            if (!latestVisible.trim() && !latestReasoning.trim()) throw new Error('没有生成正文，请重试');
+            if (isReroll && !latestRaw.trim()) throw new Error('重新生成没有返回正文，旧正文已保留');
+            const terminalStatus = finalStoryStreamStatus(result.finishReason);
+            if (persistTimer !== null) window.clearTimeout(persistTimer);
+            if (renderTimer !== null) window.clearTimeout(renderTimer);
+            persistTimer = null;
+            renderTimer = null;
+            setStreamDraft(current => current ? { ...current, content: latestVisible, reasoning: latestReasoning, status: terminalStatus } : current);
+            await queuePersist(terminalStatus, result.finishReason, result.usage);
+            finalizeInterrupted = undefined;
             setInput('');
             setAffinityDrafts({});
             setShowAffinityInput(false);
             await loadMessages();
+            setStreamDraft(null);
             if (entry.writesToCharacterMemory) void applyActorMemoryPipeline();
             else void archiveIfNeeded();
         } catch (error: any) {
             console.error('[StoryTheater] send failed', error);
             const message = String(error?.message || error);
+            const stopped = requestAbort.current?.signal.aborted === true || /abort/i.test(message);
+            const partialSaved = finalizeInterrupted ? await finalizeInterrupted(stopped ? 'stopped' : 'interrupted') : false;
+            requestAbort.current = null;
+            if (stopped) {
+                addToast(partialSaved ? '已停止，收到的正文已经保留' : '已停止，原正文保持不变', 'info');
+                return;
+            }
             addToast(
                 message.includes('API Error 400') && !entry.forceUserLastMessage
                     ? '剧情续写失败：API 400。若日志提示最后一条必须是 user，可在右上角设置开启“400 兼容模式”；更建议更换模型。'
@@ -718,6 +937,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 'error',
             );
         } finally {
+            requestAbort.current = null;
+            requestLock.current = false;
             setSending(false);
             setRerollingId(null);
         }
@@ -738,6 +959,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             <div className='h-16 px-4 flex items-center gap-3'>
                 <button onClick={onBack} className='w-9 h-9 rounded-full grid place-items-center'><ArrowLeft size={20} /></button>
                 <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Meeting · Tavern play</div><h1 className='font-serif font-semibold truncate'>{entry.title}</h1></div>
+                {requestPreview && <button onClick={() => setShowRequestPreview(true)} className='w-9 h-9 rounded-full grid place-items-center text-violet-600' title='查看上一轮真实请求' aria-label='查看上一轮真实请求'><FileText size={18} /></button>}
                 {onOpenVectorMemory && <button onClick={onOpenVectorMemory} className='w-9 h-9 rounded-full grid place-items-center text-violet-600' title='本剧情向量记忆' aria-label='本剧情向量记忆'><Database size={18} /></button>}
                 <StoryAppearanceButton />
                 <button onClick={onEdit} className='w-9 h-9 rounded-full grid place-items-center'><GearSix size={19} /></button>
@@ -788,7 +1010,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                                 <div className='pb-5 pl-7'>
                                     {message.role === 'user'
                                         ? <p className='text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p>
-                                        : <StoryOutput content={message.content} affinityInputs={affinityInputsFromMessage(message, actors)} />}
+                                        : <StoryOutput content={message.content} regexScripts={effectivePreset.document.regexScripts} affinityInputs={affinityInputsFromMessage(message, actors)} />}
                                 </div>
                             </details>;
                         }
@@ -799,16 +1021,22 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                         const isLatest = message.id === messages[messages.length - 1]?.id;
                         const swipeCandidates = swipeCandidatesFor(message);
                         const swipeIndex = Math.max(0, Math.min(swipeCandidates.length - 1, Number(message.metadata?.theaterSwipeIndex) || 0));
+                        const liveDraft = streamDraft?.targetId === message.id ? streamDraft : null;
+                        const displayContent = liveDraft?.content ?? message.content;
+                        const displayReasoning = liveDraft?.reasoning ?? String(message.metadata?.reasoning || '');
+                        const streamStatus = (liveDraft?.status || message.metadata?.streamStatus) as StoryStreamStatus | undefined;
+                        const targetCharacters = Number(message.metadata?.targetCharacters || entry.targetCharacters) || undefined;
                         return <article key={message.id} {...pressHandlersFor(message)}><div className='story-dialog-row'>
                             <span className='story-dialog-cast'>{actors.slice(0, 2).map(actor => <img key={actor.id} src={actor.avatar} alt='' className='story-dialog-avatar' />)}</span>
-                            <div className='story-dialog-card story-dialog-character'><div className='mb-3 text-[9px] tracking-[.16em] font-bold text-violet-500'>{actors.map(actor => actor.name).join('、') || '场景'}</div><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} /></div>
+                            <div className={`story-dialog-card story-dialog-character ${streamStatus === 'streaming' ? 'story-streaming' : ''}`}><div className='mb-3 text-[9px] tracking-[.16em] font-bold text-violet-500'>{actors.map(actor => actor.name).join('、') || '场景'}</div><StoryReasoningCard reasoning={displayReasoning} streaming={streamStatus === 'streaming'} /><StoryOutput content={displayContent} regexScripts={effectivePreset.document.regexScripts} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} /><StoryStreamBadge status={streamStatus} contentLength={displayContent.length} target={targetCharacters} /></div>
                         </div>{isLatest && <div className='mt-4 flex flex-wrap items-center justify-end gap-2'>
                             {swipeCandidates.length > 1 && <div className='inline-flex items-center rounded-full border border-slate-200 bg-white'><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, -1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='上一个回复版本'><CaretLeft size={13} /></button><span className='min-w-8 text-center text-[9px] font-bold text-slate-400'>{swipeIndex + 1}/{swipeCandidates.length}</span><button disabled={sending || mutatingMessage} onClick={() => void selectSwipe(message, 1)} className='w-8 h-8 grid place-items-center disabled:opacity-30' aria-label='下一个回复版本'><CaretRight size={13} /></button></div>}
-                            <button disabled={sending || mutatingMessage} onClick={() => void send(undefined, { text: '请紧接上一层正文自然继续，不重复已经发生的内容，也不要代替用户侧身份作重大决定。', hideUser: true })} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'><ArrowBendDownRight size={12} />继续</button>
+                            <button disabled={sending || mutatingMessage} onClick={() => void send(undefined, { text: '请紧接上一层正文自然继续，不重复已经发生的内容，也不要代替用户侧身份作重大决定。', hideUser: true, action: 'continue', target: message })} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'><ArrowBendDownRight size={12} />从这里继续</button>
                             <button disabled={sending || mutatingMessage} onClick={() => void send(message)} className='inline-flex items-center gap-1.5 px-3 py-2 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'>{rerollingId === message.id ? <SpinnerGap size={12} className='animate-spin' /> : <ArrowClockwise size={12} />}重生成</button>
                         </div>}</article>;
                     })}
                 </div>
+                {streamDraft && (!streamDraft.targetId || !messages.some(message => message.id === streamDraft.targetId)) && <article aria-live='polite'><div className='story-dialog-row'><span className='story-dialog-cast'>{actors.slice(0, 2).map(actor => <img key={actor.id} src={actor.avatar} alt='' className='story-dialog-avatar' />)}</span><div className='story-dialog-card story-dialog-character story-streaming'><div className='mb-3 text-[9px] tracking-[.16em] font-bold text-violet-500'>{actors.map(actor => actor.name).join('、') || '场景'}</div><StoryReasoningCard reasoning={streamDraft.reasoning} streaming /><StoryOutput content={streamDraft.content} regexScripts={effectivePreset.document.regexScripts} affinityInputs={[]} /><StoryStreamBadge status={streamDraft.status} contentLength={streamDraft.content.length} target={entry.targetCharacters} /></div></div></article>}
                 {archivedCount > 0 && <div className='mt-10 flex items-center justify-center gap-2 text-[9px] text-slate-400'><Archive size={13} />{archivedCount} 条旧内容已归档，仍会通过所选记忆方式参与续写</div>}
                 <div ref={bottomRef} className='h-6' />
             </div>
@@ -844,7 +1072,9 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 </div>}
                 <div className='flex items-end gap-2 p-2 rounded-2xl bg-white border border-slate-200 shadow-sm'>
                     <textarea value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void send(); } }} disabled={sending} rows={2} placeholder={pendingRetryInput ? '留空并点击推进，可继续上次中断' : canWriteOpening ? '也可以先写一句；留空推进则由故事开场' : '写下动作、对白、时间跳转，或你希望故事发生的事……'} className='min-h-12 max-h-36 flex-1 px-2 py-2 bg-transparent text-sm leading-6 resize-none outline-none disabled:opacity-50' />
-                    <button onClick={() => void send()} disabled={sending || (!input.trim() && !pendingRetryInput && !canWriteOpening)} title={!input.trim() && pendingRetryInput ? '继续上次中断' : canWriteOpening && !input.trim() ? '让故事先开场' : '推进'} className='story-send-button self-end w-11 h-11 shrink-0 rounded-xl bg-slate-900 text-white grid place-items-center disabled:opacity-30'>{sending ? <SpinnerGap size={18} className='animate-spin' /> : <PaperPlaneTilt size={18} weight='fill' />}</button>
+                    {sending
+                        ? <button onClick={() => requestAbort.current?.abort()} title='停止生成并保留已收到内容' className='story-send-button self-end w-11 h-11 shrink-0 rounded-xl bg-rose-600 text-white grid place-items-center'><Stop size={18} weight='fill' /></button>
+                        : <button onClick={() => void send()} disabled={!input.trim() && !pendingRetryInput && !canWriteOpening} title={!input.trim() && pendingRetryInput ? '继续上次中断' : canWriteOpening && !input.trim() ? '让故事先开场' : '推进'} className='story-send-button self-end w-11 h-11 shrink-0 rounded-xl bg-slate-900 text-white grid place-items-center disabled:opacity-30'><PaperPlaneTilt size={18} weight='fill' /></button>}
                 </div>
                 <div className='mt-2 text-center text-[9px] text-slate-400'>Ctrl / ⌘ + Enter 发送 · 回复可继续、重生成与左右切换 · 长按楼层可编辑</div>
             </div>
@@ -856,6 +1086,13 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             onReset={async () => { await onEntryChange({ ...entry, presetOverride: undefined, updatedAt: Date.now() }); addToast('已恢复本剧情的原预设', 'info'); }}
             onClose={() => setShowQuickPreset(false)}
         />}
+        {showRequestPreview && requestPreview && <div className='fixed inset-0 z-[78] flex items-end bg-slate-900/35' onClick={() => setShowRequestPreview(false)}>
+            <section className='story-safe-sheet story-keyboard-sheet flex max-h-[88dvh] w-full flex-col rounded-t-3xl bg-stone-100 px-5 pt-5 shadow-2xl' onClick={event => event.stopPropagation()}>
+                <div className='flex items-start gap-3'><div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.2em] font-bold text-violet-500'>ACTUAL REQUEST</div><h2 className='mt-1 text-lg font-semibold'>上一轮真正发送的内容</h2><p className='mt-1 text-[9px] text-slate-400'>{requestPreview.trigger.toUpperCase()} · {requestPreview.messages.length} 条 messages · {new Date(requestPreview.createdAt).toLocaleTimeString()}</p></div><button onClick={() => setShowRequestPreview(false)} className='w-9 h-9 rounded-full grid place-items-center text-slate-400'><X size={17} /></button></div>
+                <div className='mt-4 rounded-2xl border border-cyan-200 bg-cyan-50/60 p-3'><div className='text-[9px] font-bold text-cyan-700'>本轮世界书命中</div><p className='mt-1 text-[10px] leading-5 text-slate-600'>{requestPreview.worldbookHits.length > 0 ? requestPreview.worldbookHits.join('、') : '本轮没有注入世界书条目'}</p></div>
+                <div className='mt-4 flex-1 overflow-y-auto divide-y divide-slate-200 border-y border-slate-200'>{requestPreview.messages.map((message, index) => <details key={index} className='group'><summary className='list-none cursor-pointer py-3 flex items-center gap-3'><span className='w-16 shrink-0 text-[9px] font-bold uppercase text-violet-600'>{message.role}</span><span className='min-w-0 flex-1 truncate text-[10px] text-slate-500'>{message.content.replace(/\s+/g, ' ')}</span><CaretDown size={12} className='transition-transform group-open:rotate-180' /></summary><pre className='mb-3 overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-[9px] leading-5 text-slate-600'>{message.content}</pre></details>)}</div>
+            </section>
+        </div>}
         {messageMenu && <div className='fixed inset-0 z-[70] flex items-end bg-slate-900/25' onClick={() => setMessageMenu(null)}>
             <div className='story-safe-sheet w-full rounded-t-3xl bg-stone-100 px-5 pt-4 shadow-2xl' onClick={event => event.stopPropagation()}>
                 <div className='mx-auto mb-4 h-1 w-9 rounded-full bg-slate-300' />

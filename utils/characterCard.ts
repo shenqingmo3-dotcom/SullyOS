@@ -46,6 +46,7 @@ export const CARD_STRIPPED_FIELDS = [
   'chatVoiceAutoPlay',
   'dateVoiceEnabled',
   'memoryPalaceWaterline', // 发卡人的使用节奏；接收方按自己的聊天习惯选择
+  'backendContextUpdatedAt', // Shark 后端同步修订号，只属于当前设备的数据链路
 
   // 4) 运行时状态残留
   'activeBuffs',

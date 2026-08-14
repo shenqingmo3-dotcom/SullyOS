@@ -74,7 +74,20 @@ import { exportMcpLocal } from '../utils/mcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { startBackendEventRuntime } from '../utils/backendEventRuntime';
-import { deleteBackendCharacter, flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { BackendContextValidationError, deleteBackendCharacter, flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import {
+  BACKEND_PROFILE_SYNC_EVENT,
+  BACKEND_PROFILE_BACKFILL_KEY,
+  hasBackendCharacterProfileChanged,
+  hasBackendUserProfileChanged,
+  queueBackendCharacterProfile,
+  queueBackendCharacterProfiles,
+  refreshBackendCharacterProfileRevision,
+  refreshBackendUserProfileRevision,
+  registerBackendProfileBackfill,
+  reviseBackendCharacterProfile,
+  reviseBackendUserProfile,
+} from '../utils/backendProfileSync';
 import { startCinemaAgentRuntime } from '../utils/cinemaAgentRuntime';
 
 interface ProactiveQueueEntry {
@@ -885,30 +898,86 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   useEffect(() => {
       if (!isDataLoaded) return;
       let stopped = false;
-      let flushing = false;
-      const flush = async () => {
-          if (stopped || flushing) return;
-          const config = loadBackendChatConfig();
-          if (!config.enabled) return;
-          flushing = true;
-          try {
-              for (const character of characters) {
-                  if (stopped) break;
-                  await flushBackendMemorySyncQueue({ config, character, user: userProfile });
-              }
-          } catch (error) {
-              console.debug('[BackendSyncQueue] background flush deferred', error);
-          } finally {
-              flushing = false;
+      let activeFlushes = 0;
+      const shownFailures = new Set<string>();
+      const ready = new Set<string>();
+      const timers = new Map<string, number>();
+      const pump = () => {
+          if (stopped) return;
+          while (activeFlushes < 2 && ready.size > 0) {
+              const charId = ready.values().next().value as string;
+              ready.delete(charId);
+              activeFlushes += 1;
+              void flushLatest(charId).finally(() => {
+                  activeFlushes -= 1;
+                  pump();
+              });
           }
       };
-      void flush();
-      const timer = window.setInterval(() => void flush(), 30_000);
+      const flushLatest = async (charId: string) => {
+          const config = loadBackendChatConfig();
+          if (!config.enabled) return;
+          try {
+              const [latestCharacters, latestUser] = await Promise.all([
+                  DB.getAllCharacters(),
+                  DB.getUserProfile(),
+              ]);
+              const character = latestCharacters.find(candidate => candidate.id === charId);
+              if (!character || stopped) return;
+              await flushBackendMemorySyncQueue({
+                  config,
+                  character,
+                  user: latestUser ?? defaultUserProfile,
+              });
+          } catch (error) {
+              console.debug('[BackendSyncQueue] background flush deferred', error);
+              const message = error instanceof Error ? error.message : String(error);
+              const visibleMessage = error instanceof BackendContextValidationError
+                  ? message
+                  : 'Shark 后端暂时不可用，角色资料已保留并会自动重试';
+              if (!shownFailures.has(visibleMessage)) {
+                  shownFailures.add(visibleMessage);
+                  addToast(visibleMessage, 'error');
+              }
+          }
+      };
+      const schedule = (charId: string, delay = 1_200, replacePending = true) => {
+          const current = timers.get(charId);
+          if (current !== undefined && !replacePending) return;
+          if (current !== undefined) window.clearTimeout(current);
+          timers.set(charId, window.setTimeout(() => {
+              timers.delete(charId);
+              ready.add(charId);
+              pump();
+          }, delay));
+      };
+      const scheduleAllStored = async (delay = 0, replacePending = true) => {
+          const stored = await DB.getAllCharacters().catch(() => [] as CharacterProfile[]);
+          for (const character of stored) schedule(character.id, delay, replacePending);
+      };
+      const handleProfileSync = (event: Event) => {
+          const detail = (event as CustomEvent<{ charIds?: unknown }>).detail;
+          if (!Array.isArray(detail?.charIds)) return;
+          for (const charId of detail.charIds) {
+              if (typeof charId === 'string' && charId) schedule(charId);
+          }
+      };
+      const handleOnline = () => {
+          shownFailures.clear();
+          void scheduleAllStored(0);
+      };
+      window.addEventListener(BACKEND_PROFILE_SYNC_EVENT, handleProfileSync);
+      window.addEventListener('online', handleOnline);
+      void scheduleAllStored(0);
+      const interval = window.setInterval(() => void scheduleAllStored(0, false), 30_000);
       return () => {
           stopped = true;
-          window.clearInterval(timer);
+          for (const timer of timers.values()) window.clearTimeout(timer);
+          window.clearInterval(interval);
+          window.removeEventListener(BACKEND_PROFILE_SYNC_EVENT, handleProfileSync);
+          window.removeEventListener('online', handleOnline);
       };
-  }, [isDataLoaded, characters, userProfile]);
+  }, [isDataLoaded]);
   const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
     try { const s = localStorage.getItem('os_memory_palace_config'); return s ? { ...defaultMemoryPalaceConfig, ...JSON.parse(s) } : defaultMemoryPalaceConfig; } catch { return defaultMemoryPalaceConfig; }
   });
@@ -1636,6 +1705,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           ), 1200);
         }
 
+        if (finalChars.length === 0) {
+          await DB.saveCharacter(initialCharacter);
+          finalChars = [initialCharacter];
+        }
+        let finalUser = dbUser ?? defaultUserProfile;
+        try {
+          const backfill = await registerBackendProfileBackfill({
+            characters: finalChars,
+            user: finalUser,
+          });
+          finalChars = backfill.characters;
+          finalUser = backfill.user;
+        } catch (error) {
+          console.warn('[BackendProfileSync] 首次补传登记失败，下次启动重试', error);
+        }
+
         if (finalChars.length > 0) {
           setCharacters(finalChars);
           const lastActiveId = localStorage.getItem('os_last_active_char_id');
@@ -1646,10 +1731,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } else {
             setActiveCharacterId(finalChars[0].id);
           }
-        } else {
-          await DB.saveCharacter(initialCharacter);
-          setCharacters([initialCharacter]);
-          setActiveCharacterId(initialCharacter.id);
         }
 
         setGroups(dbGroups);
@@ -1658,7 +1739,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         setNovels(dbNovels);
         setSongs(dbSongs);
         setCustomThemes(dbThemes);
-        if (dbUser) setUserProfile(dbUser);
+        setUserProfile(finalUser);
 
         // amsg2 脏标记兜底补传：上次会话打了脏、但请求还没落地（在飞或躺在退避重排里）
         // 就被杀进程的角色，按 localStorage 底账用刚从 DB 读回的数据重建快照传一次。
@@ -1668,7 +1749,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const savedApiRaw = localStorage.getItem('os_api_config');
           resumePendingAmsgStateSync({
             characters: finalChars,
-            userProfile: dbUser ?? defaultUserProfile,
+            userProfile: finalUser,
             groups: dbGroups,
             realtimeConfig: savedRealtime
               ? { ...defaultRealtimeConfig, ...JSON.parse(savedRealtime) }
@@ -3024,7 +3105,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     // 时副 API 不会触发，所以这里默认 true 安全。
     // 注意：memoryPalaceEnabled 不在这里默认开 —— 那是用户在记忆宫殿 App 显式 opt-in
     // 的功能，自动开会替用户决策。
-    const newChar: CharacterProfile = {
+    const newChar = reviseBackendCharacterProfile(undefined, {
       id: `char-${Date.now()}`,
       name,
       avatar: generateAvatar(name),
@@ -3035,22 +3116,36 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       contextRangeMode: 'manual',
       contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
       emotionConfig: { enabled: true },
-    };
+    });
     setCharacters(prev => [...prev, newChar]);
     setActiveCharacterId(newChar.id);
     await DB.saveCharacter(newChar);
+    await queueBackendCharacterProfile(newChar);
     return newChar;
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => {
     setCharacters(prev => {
-      const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c);
+      const updated = prev.map(c => {
+        if (c.id !== id) return c;
+        const rawUpdates = typeof updates === 'function' ? updates(c) : updates;
+        const editableUpdates = { ...rawUpdates };
+        delete editableUpdates.backendContextUpdatedAt;
+        const candidate = normalizeCharacterImpression({ ...c, ...editableUpdates });
+        return reviseBackendCharacterProfile(c, candidate);
+      });
       const target = updated.find(c => c.id === id);
       if (target) {
         const before = prev.find(c => c.id === id);
+        const backendProfileChanged = hasBackendCharacterProfileChanged(before, target);
         // 落库成功后给 amsg2 云端快照打脏：改人设 / 改记忆 / 面板取消任务等所有落库路径都
         // 汇到这里，不打的话云端 fire_pack 停在上一轮聊天，角色到点拿旧世界说话。
         // markDirty 内部自带「没开 2.0 / 没挂 AI 任务就 return」的门，普通角色零成本。
         DB.saveCharacter(target).then(() => {
+          if (backendProfileChanged) {
+            void queueBackendCharacterProfile(target).catch(error => {
+              console.warn('[BackendProfileSync] 角色资料排队失败', target.id, error);
+            });
+          }
           markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
           // 时区和名字是另一条路：它们冻在远端任务行里，fire_pack 刷新盖不到。
           // 上游按任务行的 tzId 推进循环任务的下次触发时刻；fixed 模式的推送标题也直接
@@ -3335,10 +3430,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           ? toMountedWorldbook(fullUpdatedWb)
                           : m
                   );
-                  const newChar = { ...char, mountedWorldbooks: newMounted };
+                  const newChar = reviseBackendCharacterProfile(char, { ...char, mountedWorldbooks: newMounted });
                   // 这条落库绕开了 updateCharacter，得自己打脏：世界书正文进 fire_pack 的系统
                   // 提示词，不刷的话角色到点还照着改之前的设定说话。
                   DB.saveCharacter(newChar).then(() => {
+                      void queueBackendCharacterProfile(newChar).catch(error => {
+                          console.warn('[BackendProfileSync] 世界书更新排队失败', newChar.id, error);
+                      });
                       markAmsgStateDirty({ char: newChar, userProfile, groups, realtimeConfig });
                   });
                   return newChar;
@@ -3358,10 +3456,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const updatedChars = characters.map(char => {
           if (char.mountedWorldbooks?.some(m => m.id === id)) {
               const newMounted = char.mountedWorldbooks.filter(m => m.id !== id);
-              const newChar = { ...char, mountedWorldbooks: newMounted };
+              const newChar = reviseBackendCharacterProfile(char, { ...char, mountedWorldbooks: newMounted });
               // 同 updateWorldbook：绕开 updateCharacter 的落库要自己打脏，否则云端提示词
               // 里还挂着这本已经删掉的世界书。
               DB.saveCharacter(newChar).then(() => {
+                  void queueBackendCharacterProfile(newChar).catch(error => {
+                      console.warn('[BackendProfileSync] 世界书删除排队失败', newChar.id, error);
+                  });
                   markAmsgStateDirty({ char: newChar, userProfile, groups, realtimeConfig });
               });
               return newChar;
@@ -3414,11 +3515,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const updateUserProfile = async (updates: Partial<UserProfile>) => {
       setUserProfile(prev => {
-          const next = { ...prev, ...updates };
+          const editableUpdates = { ...updates };
+          delete editableUpdates.backendContextUpdatedAt;
+          const candidate = { ...prev, ...editableUpdates };
+          const backendProfileChanged = hasBackendUserProfileChanged(prev, candidate);
+          const next = reviseBackendUserProfile(prev, candidate);
           // 用户资料是所有角色共享的素材（名字、人设直接烤进 fire_pack 模板），改完不打脏的话
           // 角色到点还按旧名字叫你。仿表情库：逐个打脏，没开 2.0 的角色被 markDirty 的门筛掉。
-          DB.saveUserProfile(next).then(() => {
+          DB.saveUserProfile(next).then(async () => {
               markAmsgStateDirtyForAll({ characters, userProfile: next, groups, realtimeConfig });
+              if (backendProfileChanged) {
+                  const storedCharacters = await DB.getAllCharacters();
+                  await queueBackendCharacterProfiles(storedCharacters.map(character => ({
+                    charId: character.id,
+                    updatedAt: next.backendContextUpdatedAt!,
+                  })));
+              }
+          }).catch(error => {
+              console.warn('[BackendProfileSync] 用户资料保存或排队失败', error);
           });
           return next;
       });
@@ -4817,20 +4931,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
 
           // 导入后的角色清单（下面主动消息 2.0 对账要用规范化之后的那份）
+          const importedProfileRevision = Date.now();
           let importedChars = chars;
+          let importedUser = user;
           if (chars.length > 0) {
               let importedAutoContextCount = 0;
-              let importedContextMigrated = false;
               const normalizedChars = chars.map(c => {
                   const normalized = normalizeCharacterDefaults(normalizeCharacterImpression(c));
                   const migration = migrateCharacterContextRange(normalized);
-                  if (migration.migrated) importedContextMigrated = true;
                   if (migration.resetAutoContext) importedAutoContextCount++;
-                  return migration.character;
+                  return refreshBackendCharacterProfileRevision(migration.character, importedProfileRevision);
               });
-              if (importedContextMigrated) {
-                  await Promise.all(normalizedChars.map(c => DB.saveCharacter(c)));
-              }
+              await Promise.all(normalizedChars.map(c => DB.saveCharacter(c)));
               setCharacters(normalizedChars);
               importedChars = normalizedChars;
               if (importedAutoContextCount > 0) {
@@ -4840,9 +4952,23 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   ), 600);
               }
           }
+          if (user) {
+              importedUser = refreshBackendUserProfileRevision(user, importedProfileRevision);
+              await DB.saveUserProfile(importedUser);
+          }
+          try {
+              const userRevision = Number(importedUser?.backendContextUpdatedAt) || 0;
+              await queueBackendCharacterProfiles(importedChars.map(character => ({
+                  charId: character.id,
+                  updatedAt: Math.max(Number(character.backendContextUpdatedAt) || 0, userRevision),
+              })));
+          } catch (error) {
+              localStorage.removeItem(BACKEND_PROFILE_BACKFILL_KEY);
+              console.warn('[BackendProfileSync] 导入资料排队失败，将在重启后补传', error);
+          }
           if (groupsList.length > 0) setGroups(groupsList);
           if (themes.length > 0) setCustomThemes(themes);
-          if (user) setUserProfile(user);
+          if (importedUser) setUserProfile(importedUser);
           if (books.length > 0) setWorldbooks(books);
           if (novelList.length > 0) setNovels(novelList);
           if (songList.length > 0) setSongs(songList);
@@ -4869,7 +4995,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 有 AI 任务的角色才会真的上传（门在 markAmsgStateDirty 里）。
                   syncAmsgToolConfigAndPrompts(
                       data.realtimeConfig || realtimeConfig,
-                      { characters: importedChars, userProfile: user || userProfile, groups: groupsList },
+                      { characters: importedChars, userProfile: importedUser || userProfile, groups: groupsList },
                   );
               }
           } catch (e) {

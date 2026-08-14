@@ -18,6 +18,7 @@ import type {
 } from './memoryPalace/types';
 import {
     acknowledgeBackendMemoryChanges,
+    backendCharacterProfileChangeKey,
     getBackendMemoryChanges,
     getBackendMemoryChangesByKeys,
     type BackendMemoryChange,
@@ -619,6 +620,9 @@ export async function updateBackendAgentAutonomy(
 }
 
 const MAX_MESSAGE_CONTENT = 190_000;
+const MAX_MOUNTED_WORLDBOOKS = 500;
+const MAX_WORLDBOOK_CONTENT = 200_000;
+const MAX_WORLDBOOK_TOTAL_CONTENT = 200_000;
 const MEMORY_ROOMS = new Set([
     'living_room', 'bedroom', 'study', 'user_room', 'self_room', 'attic', 'windowsill',
 ]);
@@ -633,6 +637,118 @@ function safeTimestamp(value: unknown, fallback = Date.now()): number {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return Math.max(0, Math.trunc(fallback));
     return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(numeric)));
+}
+
+export class BackendContextValidationError extends Error {
+    constructor(
+        message: string,
+        readonly code: 'worldbook_too_many' | 'worldbook_too_large' | 'worldbook_invalid',
+    ) {
+        super(message);
+        this.name = 'BackendContextValidationError';
+    }
+}
+
+export function mapMountedWorldbooksForBackend(character: CharacterProfile) {
+    const books = Array.isArray(character.mountedWorldbooks) ? character.mountedWorldbooks : [];
+    if (books.length > MAX_MOUNTED_WORLDBOOKS) {
+        throw new BackendContextValidationError(
+            `角色“${character.name}”最多可同步 ${MAX_MOUNTED_WORLDBOOKS} 个挂载世界书条目`,
+            'worldbook_too_many',
+        );
+    }
+
+    let totalContent = 0;
+    return books.map((book, index) => {
+        if (!book || typeof book.id !== 'string' || !book.id.trim() || typeof book.content !== 'string') {
+            throw new BackendContextValidationError(
+                `角色“${character.name}”的第 ${index + 1} 个挂载世界书缺少有效 id 或正文`,
+                'worldbook_invalid',
+            );
+        }
+        if (book.content.length > MAX_WORLDBOOK_CONTENT) {
+            throw new BackendContextValidationError(
+                `世界书“${book.title || book.id}”正文超过 ${MAX_WORLDBOOK_CONTENT} 字符，未截断也未同步`,
+                'worldbook_too_large',
+            );
+        }
+        totalContent += book.content.length;
+        if (totalContent > MAX_WORLDBOOK_TOTAL_CONTENT) {
+            throw new BackendContextValidationError(
+                `角色“${character.name}”的挂载世界书正文合计超过 ${MAX_WORLDBOOK_TOTAL_CONTENT} 字符，未截断也未同步`,
+                'worldbook_too_large',
+            );
+        }
+        const stringList = (value: unknown): string[] | undefined => Array.isArray(value)
+            ? value.slice(0, 200).map(item => boundedText(item, 500)).filter(Boolean)
+            : undefined;
+        return {
+            id: boundedText(book.id, 200),
+            title: boundedText(book.title || '未命名世界书', 500),
+            content: book.content,
+            ...(book.category ? { category: boundedText(book.category, 500) } : {}),
+            ...(book.key !== undefined ? { key: stringList(book.key) } : {}),
+            ...(book.keysecondary !== undefined ? { keysecondary: stringList(book.keysecondary) } : {}),
+            ...(book.constant !== undefined ? { constant: book.constant === true } : {}),
+            ...(book.selective !== undefined ? { selective: book.selective === true } : {}),
+            ...(book.selectiveLogic !== undefined ? { selectiveLogic: book.selectiveLogic } : {}),
+            ...(book.order !== undefined ? { order: book.order } : {}),
+            ...(book.position !== undefined ? { position: book.position } : {}),
+            ...(book.disable !== undefined ? { disable: book.disable === true } : {}),
+            ...(book.probability !== undefined ? { probability: book.probability } : {}),
+            ...(book.useProbability !== undefined ? { useProbability: book.useProbability === true } : {}),
+            ...(book.depth !== undefined ? { depth: book.depth } : {}),
+            ...(book.role !== undefined ? { role: book.role } : {}),
+            ...(book.scanDepth !== undefined ? { scanDepth: book.scanDepth } : {}),
+            ...(book.caseSensitive !== undefined ? { caseSensitive: book.caseSensitive } : {}),
+            ...(book.matchWholeWords !== undefined ? { matchWholeWords: book.matchWholeWords } : {}),
+            ...(book.sourceUid !== undefined ? { sourceUid: book.sourceUid } : {}),
+        };
+    });
+}
+
+export function buildBackendCharacterContextPayload(input: {
+    character: CharacterProfile;
+    user: UserProfile;
+    currentDailySchedule?: unknown;
+}) {
+    const { character, user, currentDailySchedule } = input;
+    const profileUpdatedAt = Math.max(
+        Number(character.backendContextUpdatedAt) || 0,
+        Number(user.backendContextUpdatedAt) || 0,
+    );
+    return {
+        id: boundedText(character.id, 200),
+        name: boundedText(character.name, 200, '未命名角色') || '未命名角色',
+        description: boundedText(character.description || '', 100_000),
+        systemPrompt: boundedText(character.systemPrompt || '', 200_000),
+        worldview: character.worldview == null ? null : boundedText(character.worldview, 100_000),
+        writerPersona: character.writerPersona == null ? null : boundedText(character.writerPersona, 100_000),
+        mountedWorldbooks: mapMountedWorldbooksForBackend(character),
+        selfInsights: (character.selfInsights || []).slice(0, 2_000).map(insight => boundedText(insight, 20_000)),
+        impression: character.impression ?? null,
+        legacyMemories: (Array.isArray(character.memories) ? character.memories : []).slice(0, 5_000).map((memory, index) => ({
+            id: boundedText(memory?.id, 200, `legacy-${index}`) || `legacy-${index}`,
+            date: boundedText(memory?.date, 100),
+            summary: boundedText(memory?.summary, 20_000),
+            ...(memory?.mood ? { mood: boundedText(memory.mood, 200) } : {}),
+        })),
+        refinedMemories: Object.fromEntries(
+            Object.entries(character.refinedMemories || {}).map(([key, value]) => [
+                boundedText(key, 500), boundedText(value, 100_000),
+            ]),
+        ),
+        metadata: {
+            interactionMode: character.interactionMode === 'offline' ? 'offline' : 'online',
+            ...(character.interactionScene ? { interactionScene: character.interactionScene } : {}),
+            ...(currentDailySchedule ? { currentDailySchedule } : {}),
+            npcNetwork: relevantNpcNetwork(user.npcNetwork, character.id),
+        },
+        timezone: resolveCharTimeZone(character)
+            || Intl.DateTimeFormat().resolvedOptions().timeZone
+            || 'UTC',
+        ...(profileUpdatedAt > 0 ? { updatedAt: safeTimestamp(profileUpdatedAt) } : {}),
+    };
 }
 
 function normalizedMessageContent(message: Message): string {
@@ -723,34 +839,7 @@ export async function syncBackendContext(input: {
                 name: boundedText(user.name, 200, '用户') || '用户',
                 bio: boundedText(user.bio || '', 100_000),
             },
-            character: {
-                id: boundedText(character.id, 200),
-                name: boundedText(character.name, 200, '未命名角色') || '未命名角色',
-                description: boundedText(character.description || '', 100_000),
-                systemPrompt: boundedText(character.systemPrompt || '', 200_000),
-                worldview: character.worldview == null ? null : boundedText(character.worldview, 100_000),
-                writerPersona: character.writerPersona == null ? null : boundedText(character.writerPersona, 100_000),
-                legacyMemories: (Array.isArray(character.memories) ? character.memories : []).slice(0, 5_000).map((memory, index) => ({
-                    id: boundedText(memory?.id, 200, `legacy-${index}`) || `legacy-${index}`,
-                    date: boundedText(memory?.date, 100),
-                    summary: boundedText(memory?.summary, 20_000),
-                    ...(memory?.mood ? { mood: boundedText(memory.mood, 200) } : {}),
-                })),
-                refinedMemories: Object.fromEntries(
-                    Object.entries(character.refinedMemories || {}).map(([key, value]) => [
-                        boundedText(key, 500), boundedText(value, 100_000),
-                    ]),
-                ),
-                metadata: {
-                    interactionMode: character.interactionMode === 'offline' ? 'offline' : 'online',
-                    ...(character.interactionScene ? { interactionScene: character.interactionScene } : {}),
-                    ...(currentDailySchedule ? { currentDailySchedule } : {}),
-                    npcNetwork: relevantNpcNetwork(user.npcNetwork, character.id),
-                },
-                timezone: resolveCharTimeZone(character)
-                    || Intl.DateTimeFormat().resolvedOptions().timeZone
-                    || 'UTC',
-            },
+            character: buildBackendCharacterContextPayload({ character, user, currentDailySchedule }),
             // 后端生成的 assistant 消息已经在 conversation_events 中；前端只保留其
             // 展示副本，下一轮同步时跳过，避免同一回复被写两遍。
             messages: input.messages
@@ -791,6 +880,12 @@ export async function syncBackendCharacterFully(input: {
     snapshotId?: string;
     onProgress?: (done: number, total: number) => void;
 }): Promise<{ messages: number; memories: number; rounds: number }> {
+    const [storedCharacters, storedUser] = await Promise.all([
+        DB.getAllCharacters(),
+        DB.getUserProfile(),
+    ]);
+    const character = storedCharacters.find(candidate => candidate.id === input.character.id) ?? input.character;
+    const user = storedUser ?? input.user;
     const messages = input.messages.filter(
         message => !(message.role === 'assistant' && message.metadata?.backendEventId),
     );
@@ -801,8 +896,8 @@ export async function syncBackendCharacterFully(input: {
     for (let index = 0; index < rounds; index += 1) {
         await syncBackendContext({
             config: input.config,
-            character: input.character,
-            user: input.user,
+            character,
+            user,
             messages: messages.slice(index * 1_000, (index + 1) * 1_000),
             memories: input.memories.slice(index * 5_000, (index + 1) * 5_000),
             snapshotId: input.snapshotId,
@@ -1012,7 +1107,9 @@ export async function flushBackendMemorySyncQueue(input: {
     priorityDeletedMessageIds?: number[];
     priorityDeletedEventIds?: string[];
 }): Promise<{ synced: number }> {
+    const profileKey = backendCharacterProfileChangeKey(input.character.id);
     const priorityKeys = [
+        profileKey,
         ...(input.priorityDeletedMessageIds || []).map(id => `${input.character.id}:chat_message:${id}`),
         ...(input.priorityDeletedEventIds || []).map(id => `${input.character.id}:backend_event:${id}`),
     ];
@@ -1022,6 +1119,20 @@ export async function flushBackendMemorySyncQueue(input: {
     ]);
     const changes = [...new Map([...priorityChanges, ...regularChanges].map(change => [change.key, change])).values()];
     if (changes.length === 0) return { synced: 0 };
+
+    const hasProfileChange = changes.some(change => change.key === profileKey);
+    let character = input.character;
+    let user = input.user;
+    if (hasProfileChange) {
+        const [latestCharacters, latestUser] = await Promise.all([
+            DB.getAllCharacters(),
+            DB.getUserProfile(),
+        ]);
+        const latestCharacter = latestCharacters.find(candidate => candidate.id === input.character.id);
+        if (!latestCharacter) throw new Error(`待同步角色不存在：${input.character.id}`);
+        character = latestCharacter;
+        if (latestUser) user = latestUser;
+    }
 
     const nodeUpserts = queuedPayloads<MemoryNode>(changes, 'memory_node');
     const nodeDeletes = changes
@@ -1034,17 +1145,20 @@ export async function flushBackendMemorySyncQueue(input: {
     const backendEventDeletes = changes
         .filter(change => change.entityType === 'backend_event' && change.operation === 'delete')
         .map(change => change.entityId);
-    if (nodeUpserts.length > 0 || nodeDeletes.length > 0 || messageDeletes.length > 0 || backendEventDeletes.length > 0) {
-        await syncBackendContext({
+    if (hasProfileChange || nodeUpserts.length > 0 || nodeDeletes.length > 0 || messageDeletes.length > 0 || backendEventDeletes.length > 0) {
+        const result = await syncBackendContext({
             config: input.config,
-            character: input.character,
-            user: input.user,
+            character,
+            user,
             messages: [],
             memories: nodeUpserts,
             deletedMessageIds: messageDeletes,
             deletedEventIds: backendEventDeletes,
             deletedMemoryIds: nodeDeletes,
         });
+        if (hasProfileChange && typeof result?.data?.profileApplied !== 'boolean') {
+            throw new Error('后端未确认角色资料快照版本，待同步标记已保留');
+        }
     }
 
     const eventBoxes = queuedPayloads<EventBox>(changes, 'event_box').map(box => ({

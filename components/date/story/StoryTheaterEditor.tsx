@@ -1,7 +1,9 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { ArrowLeft, DownloadSimple, LockSimple, UploadSimple, UserCircle } from '@phosphor-icons/react';
+import { ArrowLeft, DownloadSimple, LockSimple, Trash, UploadSimple, UserCircle } from '@phosphor-icons/react';
 import type { CharacterProfile, StoryTheaterEntry, StoryTheaterMask, StoryTheaterPreset, UserProfile } from '../../../types';
 import { dedupeTheaterWorldbooks, downloadStoryPreset, estimateStoryTokens, getPresetPromptStats, resolveStoryPresetDocument, resolveStoryTheaterMask } from '../../../utils/storyTheater';
+import { getStoryPresetExecutionPrompts } from '../../../utils/storyPresetCompat';
+import { downloadStoryWorldbook, parseStoryWorldbook, setStoryWorldbookEntryEnabled } from '../../../utils/storyWorldbookCompat';
 
 interface Props {
     initial: StoryTheaterEntry;
@@ -27,7 +29,9 @@ const Toggle: React.FC<{ value: boolean; onChange: (value: boolean) => void; lab
 const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks, maskLocked, presets, onCancel, onSave, onImportPreset, onEditPreset, onOpenMaskBox }) => {
     const [draft, setDraft] = useState<StoryTheaterEntry>({ ...initial });
     const [saving, setSaving] = useState(false);
+    const [worldbookImportError, setWorldbookImportError] = useState('');
     const fileInput = useRef<HTMLInputElement>(null);
+    const worldbookInput = useRef<HTMLInputElement>(null);
     const actors = useMemo(() => characters.filter(char => draft.characterIds.includes(char.id)), [characters, draft.characterIds]);
     const resolvedMask = useMemo(() => resolveStoryTheaterMask(draft.mask, user, characters, masks), [characters, draft.mask, masks, user]);
     const memoryParticipants = useMemo(() => {
@@ -57,8 +61,11 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
     });
     const tokenPreview = useMemo(() => {
         const actorText = [resolvedMask.name, resolvedMask.description, resolvedMask.coreInstruction, resolvedMask.worldview, ...actors.map(char => [char.name, char.systemPrompt, char.worldview, draft.carryCharacterMemory ? JSON.stringify(char.memories || []) : ''].join('\n'))].join('\n');
-        const bookText = books.filter(book => draft.selectedWorldbookIds.includes(book.id)).map(book => book.content).join('\n');
-        const presetText = effectivePreset ? effectivePreset.document.prompts.map(prompt => prompt.content).join('\n') : '';
+        const bookText = [
+            ...books.filter(book => draft.selectedWorldbookIds.includes(book.id)).map(book => book.content),
+            ...(draft.tavernWorldbooks || []).flatMap(document => document.entries.filter(entry => !entry.disabled).map(entry => entry.content)),
+        ].join('\n');
+        const presetText = effectivePreset ? getStoryPresetExecutionPrompts(effectivePreset.document).filter(item => item.enabled).map(item => item.prompt.content).join('\n') : '';
         const archiveText = draft.archives.map(archive => archive.summary || '').join('\n');
         return { actor: estimateStoryTokens(actorText), book: estimateStoryTokens(bookText), preset: estimateStoryTokens(presetText), archive: estimateStoryTokens(archiveText) };
     }, [actors, books, draft, effectivePreset, resolvedMask]);
@@ -67,8 +74,31 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
         setSaving(true);
         const archiveAfter = Math.max(2, Math.min(200, Number(draft.archiveAfter) || 40));
         const archiveKeepRecent = Math.max(1, Math.min(archiveAfter - 1, Number(draft.archiveKeepRecent) || 5));
-        try { await onSave({ ...draft, title: draft.title.trim(), premise: draft.premise.trim(), carryCharacterMemory: draft.writesToCharacterMemory || draft.carryCharacterMemory, archiveAfter, archiveKeepRecent, presetId: preset?.id || presets[0]?.id, updatedAt: Date.now() }); }
+        const targetCharacters = Math.max(0, Math.min(100000, Math.round(Number(draft.targetCharacters) || 0))) || undefined;
+        try { await onSave({ ...draft, title: draft.title.trim(), premise: draft.premise.trim(), carryCharacterMemory: draft.writesToCharacterMemory || draft.carryCharacterMemory, archiveAfter, archiveKeepRecent, targetCharacters, presetId: preset?.id || presets[0]?.id, updatedAt: Date.now() }); }
         finally { setSaving(false); }
+    };
+    const importWorldbook = async (file: File) => {
+        try {
+            const document = parseStoryWorldbook(await file.text(), file.name);
+            setDraft(current => ({
+                ...current,
+                tavernWorldbooks: [...(current.tavernWorldbooks || []), document],
+                tavernWorldbookState: undefined,
+                updatedAt: Date.now(),
+            }));
+            setWorldbookImportError('');
+        } catch (error: any) {
+            setWorldbookImportError(error?.message || '酒馆世界书导入失败');
+        }
+    };
+    const updateTavernWorldbook = (documentId: string, updateDocument: (document: NonNullable<StoryTheaterEntry['tavernWorldbooks']>[number]) => NonNullable<StoryTheaterEntry['tavernWorldbooks']>[number]) => {
+        setDraft(current => ({
+            ...current,
+            tavernWorldbooks: (current.tavernWorldbooks || []).map(document => document.id === documentId ? updateDocument(document) : document),
+            tavernWorldbookState: undefined,
+            updatedAt: Date.now(),
+        }));
     };
 
     return <div className='h-full w-full flex flex-col bg-stone-100 text-slate-800'>
@@ -119,14 +149,32 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                 </div>}
             </section>
             <section className='pt-6 border-t border-slate-200'>
-                <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>04 / Lore</div><h2 className='mt-1 text-lg font-semibold'>世界书沙盒</h2><p className='text-[10px] text-slate-500'>从角色挂载项同步并去重；勾选只属于本剧情。</p>
+                <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>04 / Lore</div><div className='mt-1 flex items-start gap-3'><div className='min-w-0 flex-1'><h2 className='text-lg font-semibold'>世界书沙盒</h2><p className='text-[10px] text-slate-500'>角色挂载的 SharkOS 世界书保持原链路；酒馆 JSON 只保存在这段剧情里。</p></div><button type='button' onClick={() => worldbookInput.current?.click()} className='shrink-0 h-9 px-3 rounded-xl bg-slate-900 text-white inline-flex items-center gap-1.5 text-[10px] font-bold'><UploadSimple size={14} />导入酒馆世界书</button></div>
+                <input ref={worldbookInput} type='file' accept='.json,application/json' className='hidden' onChange={async event => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) await importWorldbook(file); }} />
+                {worldbookImportError && <p className='mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] leading-5 text-rose-700'>{worldbookImportError}</p>}
+                <div className='mt-4 text-[10px] font-bold text-slate-500'>角色挂载世界书</div>
                 <div className='mt-3 divide-y divide-slate-100 border-y border-slate-200'>{books.length === 0 ? <div className='py-6 text-center text-xs text-slate-400'>所选角色没有挂载世界书</div> : books.map(book => { const selected = draft.selectedWorldbookIds.includes(book.id); return <button key={book.id} onClick={() => update('selectedWorldbookIds', selected ? draft.selectedWorldbookIds.filter(id => id !== book.id) : [...draft.selectedWorldbookIds, book.id])} className='w-full py-3 flex items-center gap-3 text-left'><span className={`w-4 h-4 rounded border text-[10px] text-center text-white ${selected ? 'bg-violet-600 border-violet-600' : 'border-slate-300'}`}>{selected ? '✓' : ''}</span><span className='min-w-0'><span className='block text-xs font-semibold truncate'>{book.title}</span><span className='block text-[9px] text-slate-400'>{book.category || '未分类'}</span></span></button>; })}</div>
+                <div className='mt-5 text-[10px] font-bold text-slate-500'>酒馆世界书</div>
+                {(draft.tavernWorldbooks || []).length === 0 ? <div className='mt-3 rounded-2xl border border-dashed border-slate-300 px-4 py-6 text-center text-[10px] leading-5 text-slate-400'>可导入 SillyTavern 内部 World Info、Character Card v2/v3 character_book 与标准 lorebook JSON。</div> : <div className='mt-3 space-y-3'>{(draft.tavernWorldbooks || []).map(document => {
+                    const enabled = document.entries.filter(entry => !entry.disabled).length;
+                    const levels = document.compatibility.reduce<Record<string, number>>((result, item) => ({ ...result, [item.level]: (result[item.level] || 0) + 1 }), {});
+                    const compatibilityIssues = document.compatibility.filter(item => item.level !== '完整支持');
+                    return <details key={document.id} className='group rounded-2xl border border-slate-200 bg-white overflow-hidden'>
+                        <summary className='list-none cursor-pointer px-4 py-3 flex items-center gap-3'><span className='min-w-0 flex-1'><strong className='block truncate text-xs text-slate-700'>{document.name}</strong><span className='block mt-1 text-[9px] text-slate-400'>{document.entries.length} 条 · 启用 {enabled} · {document.sourceKind === 'character-card-v2-v3' ? '角色卡世界书' : '酒馆 World Info'}</span></span><span className='text-[9px] font-bold text-violet-600'>兼容报告</span></summary>
+                        <div className='border-t border-slate-100 px-4 py-4'>
+                            <div className='grid grid-cols-4 gap-1.5'>{(['完整支持', '部分支持', '已保存但不执行', '输入无效'] as const).map(level => <div key={level} className='rounded-lg bg-slate-50 px-1 py-2 text-center'><div className='text-[8px] leading-3 text-slate-400'>{level}</div><strong className='mt-1 block text-xs text-slate-700'>{levels[level] || 0}</strong></div>)}</div>
+                            {compatibilityIssues.length > 0 ? <details className='mt-3 rounded-xl bg-amber-50 px-3 py-2'><summary className='cursor-pointer text-[9px] font-bold text-amber-700'>查看 {compatibilityIssues.length} 条兼容说明</summary><div className='mt-2 divide-y divide-amber-100'>{compatibilityIssues.map((item, index) => <div key={`${item.resourceId}-${item.fieldPath}-${index}`} className='py-2 text-[9px] leading-4 text-amber-800'><strong>{item.level} · {item.name}</strong><code className='mt-0.5 block break-all text-[8px] text-amber-600'>{item.fieldPath}</code><span className='mt-1 block'>{item.reason}</span></div>)}</div></details> : <p className='mt-3 text-[9px] text-emerald-600'>已识别字段均可执行；关闭条目仍完整保留。</p>}
+                            <div className='mt-4 max-h-64 overflow-y-auto divide-y divide-slate-100'>{document.entries.map(entry => <div key={entry.id} className='py-2.5 flex items-start gap-3'><button type='button' aria-label={`${entry.disabled ? '启用' : '关闭'}${entry.name}`} aria-pressed={!entry.disabled} onClick={() => updateTavernWorldbook(document.id, current => setStoryWorldbookEntryEnabled(current, entry.id, entry.disabled))} className={`mt-0.5 w-9 h-5 shrink-0 rounded-full p-0.5 transition-colors ${entry.disabled ? 'bg-slate-200' : 'bg-violet-600'}`}><span className={`block w-4 h-4 rounded-full bg-white transition-transform ${entry.disabled ? '' : 'translate-x-4'}`} /></button><span className='min-w-0 flex-1'><span className='block truncate text-[10px] font-semibold text-slate-700'>{entry.name}</span><span className='block mt-0.5 text-[8px] text-slate-400'>#{entry.uid} · position {entry.position} · order {entry.order}</span></span></div>)}</div>
+                            <div className='mt-4 flex justify-end gap-2'><button type='button' onClick={() => downloadStoryWorldbook(document)} className='h-8 px-3 rounded-lg border border-slate-200 inline-flex items-center gap-1.5 text-[9px] font-bold text-slate-600'><DownloadSimple size={13} />导出原格式</button><button type='button' onClick={() => setDraft(current => ({ ...current, tavernWorldbooks: (current.tavernWorldbooks || []).filter(item => item.id !== document.id), tavernWorldbookState: undefined, updatedAt: Date.now() }))} className='h-8 px-3 rounded-lg border border-rose-200 inline-flex items-center gap-1.5 text-[9px] font-bold text-rose-600'><Trash size={13} />移除</button></div>
+                        </div>
+                    </details>;
+                })}</div>}
             </section>
             <section className='pt-6 border-t border-slate-200'>
                 <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>05 / Preset</div><h2 className='mt-1 text-lg font-semibold'>装载见面预设</h2><p className='text-[10px] text-slate-500'>支持 SharkOS 原生预设与 SillyTavern Chat Completion 预设；内置预设复制后可编辑。</p>
                 <div className='mt-3 flex gap-2'><select value={preset?.id || ''} onChange={event => setDraft(current => ({ ...current, presetId: event.target.value, presetOverride: undefined, updatedAt: Date.now() }))} className='min-w-0 flex-1 px-3 py-3 rounded-xl bg-white border border-slate-200 text-xs'>{presets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button onClick={() => fileInput.current?.click()} className='w-11 rounded-xl bg-white border border-slate-200 grid place-items-center'><UploadSimple size={18} /></button><button disabled={!preset} onClick={() => preset && downloadStoryPreset(preset)} className='w-11 rounded-xl bg-white border border-slate-200 grid place-items-center disabled:opacity-30'><DownloadSimple size={18} /></button></div>
                 <input ref={fileInput} type='file' accept='.json,application/json' className='hidden' onChange={async event => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (!file) return; const imported = await onImportPreset(file); if (imported) setDraft(current => ({ ...current, presetId: imported.id, presetOverride: undefined, updatedAt: Date.now() })); }} />
-                {preset && <div className='mt-3 flex items-center justify-between'><span className='text-[10px] text-slate-500'>启用 {presetStats.enabled}/{presetStats.total} 条 · 按当前顺序与插入位置发送</span><button onClick={() => onEditPreset(preset, draft)} className='text-[10px] font-bold text-violet-600'>打开制作器</button></div>}
+                {preset && <div className='mt-3 flex items-center justify-between'><span className='text-[10px] text-slate-500'>启用 {presetStats.enabled}/{presetStats.total} 条{presetStats.scripts > 0 ? ` · Regex ${presetStats.scripts}` : ''} · 按原顺序与插入位置发送</span><button onClick={() => onEditPreset(preset, draft)} className='text-[10px] font-bold text-violet-600'>打开制作器</button></div>}
                 <div className='mt-5 pt-4 border-t border-slate-200'>
                     <div className='flex items-start justify-between gap-5'>
                         <div><div className='text-sm font-semibold'>400 兼容模式</div><p className='mt-1 text-[10px] leading-5 text-slate-500'>仅当接口提示“最后一条消息必须是 user”时开启。</p></div>
@@ -137,6 +185,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
             </section>
             <section className='pt-6 border-t border-slate-200'>
                 <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>06 / Budget</div>
+                <label className='mb-5 block'><span className='text-[10px] font-bold text-slate-500'>本场目标字数 · 可选</span><input type='number' min={0} max={100000} step={500} value={draft.targetCharacters || 0} onChange={event => update('targetCharacters', Number(event.target.value) || undefined)} className='mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm' /><span className='mt-1 block text-[9px] leading-4 text-slate-400'>例如 15000。只显示进度并提示你手动续写，不会一次性强塞给模型，也不会自动产生计费请求；填 0 关闭。</span></label>
                 <div className='mt-2 flex items-end justify-between gap-4'><div><h2 className='text-lg font-semibold'>静态配置预算</h2><p className='mt-1 text-[10px] leading-5 text-slate-500'>这里只比较角色、世界书、预设与归档；剧场内会按续写实际使用的完整上下文统计历史、召回和本轮输入。</p></div><strong className='text-2xl font-serif'>{Object.values(tokenPreview).reduce((sum, value) => sum + value, 0).toLocaleString()}</strong></div>
                 <div className='mt-4 grid grid-cols-4 gap-2'>{Object.entries({ '角色': tokenPreview.actor, '世界书': tokenPreview.book, '预设': tokenPreview.preset, '归档': tokenPreview.archive }).map(([label, value]) => <div key={label} className='py-3 rounded-xl bg-white border border-slate-200 text-center'><div className='text-[9px] text-slate-400'>{label}</div><div className='mt-1 text-xs font-bold'>{value.toLocaleString()}</div></div>)}</div>
             </section>

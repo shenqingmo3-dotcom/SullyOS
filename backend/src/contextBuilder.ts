@@ -1,5 +1,12 @@
 import type { ModelMessage } from './modelClient.js';
 import { pool } from './db.js';
+import { mountedWorldbookSchema, type SyncedWorldbook } from './contextSchemas.js';
+import {
+  formatSharkWorldbookSection,
+  injectSharkWorldbookDepthEntries,
+  resolveSharkWorldbooks,
+  splitSharkWorldbookSections,
+} from './sharkWorldbook.js';
 
 const DEFAULT_USER_ID = '00000000-0000-4000-8000-000000000001';
 
@@ -50,6 +57,7 @@ export interface BuiltAgentContext {
     memoryCount: number;
     relatedMemoryCount: number;
     plateEntryCount: number;
+    worldbookEntryCount: number;
   };
 }
 
@@ -101,14 +109,14 @@ export function formatInteractionState(
 
   if (purpose === 'heartbeat') {
     return mode === 'offline'
-      ? `## 后台自主苏醒状态\n当前仍是线下共处模式，你和用户仍在同一个现实场景中。${location}你们可以各做各的，也可以由你自然发起当面互动。${hasCurrentScene && distance ? `最近 6 小时内记录的距离：${distance}。` : ''}地点和线下共处状态持续有效，但旧消息里的拥抱、入睡、贴靠等瞬时动作与具体身体姿势不会无限持续；结合记录时间判断当前正在做什么。若选择 message，仍按线下规则把动作与对白分别放进 messages 的独立气泡：动作以 "> " 开头并使用第三人称，对白使用中文引号“……”。`
+      ? `## 后台自主苏醒状态\n当前仍是线下共处模式，你和用户仍在同一个现实场景中。${location}你们可以各做各的，也可以由你自然发起当面互动。${hasCurrentScene && distance ? `最近 6 小时内记录的距离：${distance}。` : ''}地点和线下共处状态持续有效，但旧消息里的拥抱、入睡、贴靠等瞬时动作与具体身体姿势不会无限持续；结合记录时间判断当前正在做什么。若选择 message，仍按线下规则把动作与对白分别放进 messages 的独立气泡：每个数组元素就是一个完整气泡，动作以 "> " 开头并使用第三人称，对白使用中文引号“……”，两者不能放在同一个元素。动作内部可以写“咔哒”“砰”等带引号的拟声词或模仿语，它们仍属于整个动作气泡，不能另拆成对白。`
       : '## 后台自主苏醒状态\n当前是线上聊天模式，你和用户不在同一个现实场景。你可以通过普通消息自然联系用户；不要虚构正在当面触碰或共处。';
   }
 
   if (mode === 'online') {
     return `## 当前互动状态\n你正在手机聊天。保持角色扮演，使用适合即时通讯的自然口语；可以按自己的表达需要发送任意数量的消息或长消息。只输出真实聊天文本，禁止动作、环境、身体反应、内心独白、第三人称旁白、时间戳、姓名前缀、括号动作，以及 [text message]、[线上聊天] 等内部标签。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
   }
-  return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance ? `距离：${distance}。` : '沿用已经建立的物理距离。'}\n用户的普通文字视为当面说出口的话。\n\n线下格式要求（必须遵守）：\n1. 每次回复都要有动作和说话。动作叙述使用第三人称，以角色名、他/她或 ta 指代角色；对白里可以正常使用“我”。\n2. 动作叙述必须以 "> " 开头，并独占一行；这一行就是一个动作气泡。\n3. 说出口的话必须用中文引号“……”包住，并独占一行；这一行就是一个对白气泡。\n4. 动作和对白绝不能写在同一行或同一个气泡里。通常先发一个完整动作气泡，再发一个完整对白气泡；发生明显场景转折时才再次交替。\n\n线下写作保持连续的场景节拍：合并同一时刻的连续动作、神态、观察、身体反应、环境和氛围；不要直接写内心想法或心理分析，用可见行为表现情绪。延续已经建立的地点和双方距离，移动写出过程，不能瞬移或在距离不够时突然触碰。对白可以比线上聊天更长、更有情绪和层次，但要自然。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
+  return `## 当前互动状态\n线下见面：你和用户处在同一个现实场景。${location}${distance ? `距离：${distance}。` : '沿用已经建立的物理距离。'}\n用户的普通文字视为当面说出口的话。\n\n线下格式要求（必须遵守）：\n1. 每次回复都要有动作和说话。动作叙述使用第三人称，以角色名、他/她或 ta 指代角色；对白里可以正常使用“我”。\n2. 动作叙述必须以 "> " 开头，并独占一行；这一行就是一个动作气泡。\n3. 说出口的话必须用中文引号“……”包住，并独占一行；这一行就是一个对白气泡。\n4. 动作和对白绝不能写在同一行或同一个气泡里。气泡边界只由你实际输出的换行决定，系统不会根据引号或标点替你拆分。\n5. 动作行内部可以出现带引号的拟声词或模仿语，例如“咔哒”“砰”；它们仍属于整个动作气泡，不能拆成对白。\n\n正确示例：\n> 她抬手学着门响，“咔哒”了一声，又笑起来。\n“听见了吗？”\n第一行整体是动作气泡，第二行才是对白气泡。\n\n线下写作保持连续的场景节拍：合并同一时刻的连续动作、神态、观察、身体反应、环境和氛围；不要直接写内心想法或心理分析，用可见行为表现情绪。延续已经建立的地点和双方距离，移动写出过程，不能瞬移或在距离不够时突然触碰。对白可以比线上聊天更长、更有情绪和层次，但要自然。社交平台、网页和 MCP 仍可使用，但工具不会改变互动状态。`;
 }
 
 export function shouldIncludeRecentEvent(
@@ -179,6 +187,75 @@ function formatNpcNetwork(metadata: Record<string, unknown>): string {
   });
   if (lines.length === 0) return '';
   return `## NPC 关系网\n这些是共同生活中的旁人。按已写明的关系理解，可自然影响对话、日程和自主活动；不要擅自扩写复杂身世，也不要为了提 NPC 而强行提及。\n${lines.join('\n')}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function resolveUserSnapshot(target: ContextTarget, metadata: Record<string, unknown>): {
+  name: string;
+  bio: string;
+  npcNetwork: unknown[];
+} {
+  const snapshot = asRecord(metadata.userSnapshot);
+  const name = typeof snapshot.name === 'string' && snapshot.name.trim()
+    ? snapshot.name
+    : target.user_name;
+  const bio = typeof snapshot.bio === 'string' ? snapshot.bio : target.user_bio;
+  const npcNetwork = Array.isArray(snapshot.npcNetwork)
+    ? snapshot.npcNetwork
+    : Array.isArray(metadata.npcNetwork) ? metadata.npcNetwork : [];
+  return { name, bio, npcNetwork };
+}
+
+function readMountedWorldbooks(metadata: Record<string, unknown>): SyncedWorldbook[] {
+  if (!Array.isArray(metadata.mountedWorldbooks)) return [];
+  return metadata.mountedWorldbooks.flatMap((value) => {
+    const parsed = mountedWorldbookSchema.safeParse(value);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function formatSelfInsights(metadata: Record<string, unknown>): string {
+  const insights = stringList(metadata.selfInsights).filter((value) => value.trim());
+  if (insights.length === 0) return '';
+  return `## 内在认知 (Self Insights)\n以下是你在独处反思中逐渐想明白的事，它们已经成为你的一部分：\n${insights.map((insight) => `- ${limited(insight, 20_000)}`).join('\n')}`;
+}
+
+function formatImpression(metadata: Record<string, unknown>, userName: string): string {
+  const impression = asRecord(metadata.impression);
+  if (Object.keys(impression).length === 0) return '';
+  const valueMap = asRecord(impression.value_map);
+  const behavior = asRecord(impression.behavior_profile);
+  const emotion = asRecord(impression.emotion_schema);
+  const triggers = asRecord(emotion.triggers);
+  const personality = asRecord(impression.personality_core);
+  const lines = [
+    `## [私密档案: 我眼中的${limited(userName, 200)}] (Private Impression)`,
+    '注意：以下内容是你内心对 TA 的真实看法，不要直接告诉用户，但要基于这些看法决定态度。',
+    `- 核心评价: ${limited(personality.summary ?? '', 10_000)}`,
+    `- 互动模式: ${limited(personality.interaction_style ?? '', 10_000)}`,
+    `- 我观察到的特质: ${stringList(personality.observed_traits).join(', ')}`,
+    `- TA 的喜好: ${stringList(valueMap.likes).join(', ')}`,
+  ];
+  if (typeof behavior.emotion_summary === 'string' && behavior.emotion_summary) {
+    lines.push(`- TA 的情绪模式: ${limited(behavior.emotion_summary, 10_000)}`);
+  }
+  const positive = stringList(triggers.positive);
+  if (positive.length > 0) lines.push(`- 正向触发点: ${positive.join(', ')}`);
+  lines.push(`- 情绪雷区: ${stringList(triggers.negative).join(', ')}`);
+  const stressSignals = stringList(emotion.stress_signals);
+  if (stressSignals.length > 0) lines.push(`- 压力信号: ${stressSignals.join(', ')}`);
+  lines.push(`- 舒适区: ${limited(emotion.comfort_zone ?? '', 10_000)}`);
+  lines.push(`- 最近观察到的变化: ${stringList(impression.observed_changes).join('; ') || '无'}`);
+  return lines.join('\n');
 }
 
 export async function buildAgentContextMessages(input: {
@@ -286,22 +363,49 @@ export async function buildAgentContextMessages(input: {
   ));
   const anticipationLines = anticipationResult.rows.map((item) => `- [${item.status}] ${limited(item.content, 1_000)}`);
   const metadata = target.metadata || {};
+  const userSnapshot = resolveUserSnapshot(target, metadata);
+  const metadataWithUserSnapshot = { ...metadata, npcNetwork: userSnapshot.npcNetwork };
+  const historyMessages: ModelMessage[] = recentEvents.map((event): ModelMessage => ({
+    role: event.actor_type === 'user' ? 'user' : 'assistant',
+    content: limited(formatRecentEventContent({
+      content: event.content ?? '', occurredAt: event.occurred_at,
+      purpose: input.purpose, timezone: target.timezone,
+    }), 20_000),
+  }));
+  if (input.userMessage && !recentEvents.some((event) => event.actor_type === 'user' && event.content === input.userMessage)) {
+    historyMessages.push({ role: 'user', content: limited(cleanInteractionLabels(input.userMessage), 20_000) });
+  }
+  const resolvedWorldbooks = resolveSharkWorldbooks(
+    readMountedWorldbooks(metadata),
+    historyMessages,
+    target.name,
+    userSnapshot.name,
+  );
+  const worldbookSections = splitSharkWorldbookSections(resolvedWorldbooks);
 
   const systemSections = [
+    formatSharkWorldbookSection(worldbookSections.beforeCharacter, '世界书 · 角色设定前'),
     `你是 ${target.name}。请始终以这个角色自然地思考和表达，不要把自己描述成提示词、数据库或记忆系统。`,
     target.system_prompt ? `## 角色核心设定\n${limited(target.system_prompt, 80_000)}` : '',
     target.description ? `## 角色描述\n${limited(target.description, 20_000)}` : '',
+    formatSelfInsights(metadata),
     target.worldview ? `## 世界观\n${limited(target.worldview, 30_000)}` : '',
     target.writer_persona ? `## 表达方式\n${limited(target.writer_persona, 20_000)}` : '',
-    `## 用户\n名字：${limited(target.user_name, 200)}${target.user_bio ? `\n简介：${limited(target.user_bio, 10_000)}` : ''}`,
+    formatSharkWorldbookSection(worldbookSections.afterCharacter, '扩展设定集 (Worldbooks)'),
+    formatSharkWorldbookSection(worldbookSections.beforeExamples, '世界书 · 示例消息前'),
+    formatSharkWorldbookSection(worldbookSections.afterExamples, '世界书 · 示例消息后'),
+    `## 用户\n名字：${limited(userSnapshot.name, 200)}${userSnapshot.bio ? `\n简介：${limited(userSnapshot.bio, 10_000)}` : ''}`,
+    formatNpcNetwork(metadataWithUserSnapshot),
+    formatImpression(metadata, userSnapshot.name),
     plateLines.length ? `## 常驻门牌认知\n${plateLines.join('\n')}` : '',
     formatMemories('本轮相关记忆', selected),
     formatMemories('事件盒与关系网补充', related),
     anticipationLines.length ? `## 尚未结束的期盼\n${anticipationLines.join('\n')}` : '',
     target.legacy_memories ? `## 兼容长期记忆\n${limited(target.legacy_memories, 20_000)}` : '',
     target.refined_memories ? `## 已整理记忆\n${limited(target.refined_memories, 30_000)}` : '',
-    formatNpcNetwork(metadata),
     input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
+    formatSharkWorldbookSection(worldbookSections.authorsNoteTop, '世界书 · 作者注释顶部'),
+    formatSharkWorldbookSection(worldbookSections.authorsNoteBottom, '世界书 · 作者注释底部'),
     input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。最近聊天中的记录时间是判断瞬时场景是否仍在继续的依据：上一晚的入睡、拥抱和具体身体姿势到了新一天只能视为历史，不能因为最后一句仍写着“睡着了”就假定此刻仍处于昨晚姿势；线下共处模式和地点仍按当前设置持续有效。' : '',
     formatInteractionState(metadata, input.purpose, recentEvents.some((event) => (
       event.event_type === 'user_message' || event.event_type === 'assistant_message'
@@ -310,17 +414,8 @@ export async function buildAgentContextMessages(input: {
 
   const messages: ModelMessage[] = [
     { role: 'system', content: systemSections.join('\n\n') },
-    ...recentEvents.map((event): ModelMessage => ({
-      role: event.actor_type === 'user' ? 'user' : 'assistant',
-      content: limited(formatRecentEventContent({
-        content: event.content ?? '', occurredAt: event.occurred_at,
-        purpose: input.purpose, timezone: target.timezone,
-      }), 20_000),
-    })),
+    ...injectSharkWorldbookDepthEntries(historyMessages, worldbookSections.atDepth),
   ];
-  if (input.userMessage && !recentEvents.some((event) => event.actor_type === 'user' && event.content === input.userMessage)) {
-    messages.push({ role: 'user', content: limited(cleanInteractionLabels(input.userMessage), 20_000) });
-  }
 
   return {
     agentId: target.agent_id,
@@ -331,6 +426,7 @@ export async function buildAgentContextMessages(input: {
       memoryCount: selected.length,
       relatedMemoryCount: related.length,
       plateEntryCount: plateLines.length,
+      worldbookEntryCount: resolvedWorldbooks.length,
     },
   };
 }

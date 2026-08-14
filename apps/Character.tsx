@@ -29,6 +29,7 @@ import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
 import { loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { queueBackendCharacterProfile, reviseBackendCharacterProfile } from '../utils/backendProfileSync';
 import {
     EXTERNAL_MEMORY_MAX_CHARS,
     extractExternalMemoryText,
@@ -1183,16 +1184,17 @@ ${isInitialGeneration ? `
                   importedWbCount++;
               }
 
-              const newChar: CharacterProfile = {
+              const newChar = reviseBackendCharacterProfile(undefined, {
                   ...safeData,
                   id: `char-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                   memories: [],
                   refinedMemories: {},
                   activeMemoryMonths: [],
                   mountedWorldbooks: incomingMounted,
-              } as CharacterProfile;
+              } as CharacterProfile);
 
               await DB.saveCharacter(newChar);
+              await queueBackendCharacterProfile(newChar);
               trackEvent('导入角色卡');
               // 不要调用 addCharacter()——它不是"刷新"，而是真的新建一个空白
               // "New Character" 并写进 DB，reload 后就会多出一张空白卡。

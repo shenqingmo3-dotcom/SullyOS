@@ -2178,8 +2178,91 @@ export interface StoryTheaterEntry {
     presetOverride?: StoryTheaterPresetDocument;
     /** 仅供拒绝 assistant prefill、要求最后一条消息必须为 user 的接口使用；默认关闭以保留原生预设效果。 */
     forceUserLastMessage?: boolean;
+    /** SillyTavern local variables 只属于当前剧情会话。 */
+    presetVariables?: Record<string, string>;
+    /** 只属于本剧情的 SillyTavern 世界书；不写入 SharkOS 普通世界书 App。 */
+    tavernWorldbooks?: StoryWorldbookDocument[];
+    /** 酒馆世界书的 delay/sticky/cooldown 只按本剧情请求轮次推进。 */
+    tavernWorldbookState?: StoryWorldbookRuntimeState;
+    /** 只用于进度提示与是否建议人工续写；不直接换算成 max_tokens。0/缺省表示不设目标。 */
+    targetCharacters?: number;
     createdAt: number;
     updatedAt: number;
+}
+
+export type StoryWorldbookSourceKind = 'sillytavern-world-info' | 'character-card-v2-v3';
+
+export interface StoryWorldbookEntry {
+    id: string;
+    uid: string | number;
+    name: string;
+    content: string;
+    keys: string[];
+    secondaryKeys: string[];
+    constant: boolean;
+    selective: boolean;
+    selectiveLogic: WorldbookSelectiveLogic;
+    order: number;
+    position: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+    disabled: boolean;
+    probability: number;
+    useProbability: boolean;
+    depth: number;
+    role: WorldbookDepthRole;
+    scanDepth: number | null;
+    caseSensitive: boolean | null;
+    matchWholeWords: boolean | null;
+    excludeRecursion: boolean;
+    preventRecursion: boolean;
+    delayUntilRecursion: boolean | number;
+    group: string;
+    groupOverride: boolean;
+    groupWeight: number;
+    useGroupScoring: boolean | null;
+    sticky: number;
+    cooldown: number;
+    delay: number;
+    ignoreBudget: boolean;
+    triggers: string[];
+    matchPersonaDescription: boolean;
+    matchCharacterDescription: boolean;
+    matchCharacterPersonality: boolean;
+    matchCharacterDepthPrompt: boolean;
+    matchScenario: boolean;
+    matchCreatorNotes: boolean;
+    sourceIndex: number;
+    sourceKey: string;
+}
+
+export interface StoryWorldbookDocument {
+    id: string;
+    name: string;
+    sourceFileName?: string;
+    baseline: '1.18.0/51ad27f';
+    sourceKind: StoryWorldbookSourceKind;
+    sourcePath: 'entries' | 'character_book' | 'data.character_book';
+    settings: {
+        scanDepth: number;
+        recursive: boolean;
+        maxRecursionSteps: number;
+        tokenBudget?: number;
+        budgetPercent: number;
+        caseSensitive: boolean;
+        matchWholeWords: boolean;
+        useGroupScoring: boolean;
+    };
+    entries: StoryWorldbookEntry[];
+    compatibility: StoryCompatibilityItem[];
+    /** 原 JSON 只用于无损导出和字段定位，不参与运行。 */
+    raw: Record<string, unknown>;
+    createdAt: number;
+    updatedAt: number;
+}
+
+export interface StoryWorldbookRuntimeState {
+    turn: number;
+    stickyUntil: Record<string, number>;
+    cooldownUntil: Record<string, number>;
 }
 
 export interface StoryTheaterPresetPrompt {
@@ -2190,6 +2273,60 @@ export interface StoryTheaterPresetPrompt {
     content: string;
     /** marker 由发送器替换为角色/世界书/用户/场景/历史，不把占位条目当普通正文。 */
     marker?: 'characters' | 'world_before' | 'user' | 'world_after' | 'scenario' | 'examples' | 'history';
+    /** SillyTavern Prompt Manager：0=Relative，1=In-Chat。原生预设省略时按 Relative。 */
+    injectionPosition?: 0 | 1;
+    injectionDepth?: number;
+    injectionOrder?: number;
+    injectionTriggers?: string[];
+}
+
+export type StoryCompatibilityLevel = '完整支持' | '部分支持' | '已保存但不执行' | '输入无效';
+
+export interface StoryCompatibilityItem {
+    resourceId: string;
+    name: string;
+    fieldPath: string;
+    level: StoryCompatibilityLevel;
+    reason: string;
+    enabled: boolean;
+    executes: boolean;
+}
+
+export interface StoryTheaterPresetOrderItem {
+    identifier: string;
+    enabled: boolean;
+    sourceIndex: number;
+}
+
+/** SillyTavern Regex 的可执行、可回写规范形态；原字段仍保留在 source.raw 供无损导出。 */
+export interface StoryRegexScript {
+    id: string;
+    name: string;
+    findRegex: string;
+    replaceString: string;
+    trimStrings: string[];
+    placement: number[];
+    disabled: boolean;
+    markdownOnly: boolean;
+    promptOnly: boolean;
+    runOnEdit: boolean;
+    substituteRegex: 0 | 1 | 2;
+    minDepth?: number;
+    maxDepth?: number;
+    sourceIndex: number;
+}
+
+export interface StoryTheaterPresetSource {
+    kind: 'sillytavern-chat-completion';
+    baseline: '1.18.0/51ad27f';
+    orderCharacterId?: string | number;
+    order: StoryTheaterPresetOrderItem[];
+    unreferencedPromptIds: string[];
+    /** 原 JSON 只用于无损导出和兼容定位，不参与运行时选择。 */
+    raw: Record<string, unknown>;
+    continueNudge?: string;
+    continuePrefill?: string;
+    continuePostfix?: string;
 }
 
 export interface StoryTheaterPresetDocument {
@@ -2205,10 +2342,13 @@ export interface StoryTheaterPresetDocument {
         maxTokens: number;
     };
     prompts: StoryTheaterPresetPrompt[];
+    regexScripts?: StoryRegexScript[];
     assistantPrefill?: string;
+    source?: StoryTheaterPresetSource;
+    compatibility?: StoryCompatibilityItem[];
 }
 
-/** 糯米机专属剧情预设。导入器只接受 sullyos.story-preset，不兼容其它应用格式。 */
+/** SharkOS 原生或规范化后的 SillyTavern Chat Completion 剧情预设。 */
 export interface StoryTheaterPreset {
     id: string;
     name: string;
@@ -2498,6 +2638,8 @@ export interface CharacterProfile {
   avatar: string;
   description: string;
   systemPrompt: string;
+  /** Local-only revision for the Shark backend profile projection. */
+  backendContextUpdatedAt?: number;
   worldview?: string;
   /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
   groupId?: string;
@@ -2906,6 +3048,8 @@ export interface UserProfile {
     name: string;
     avatar: string;
     bio: string;
+    /** Local-only revision for the Shark backend profile projection. */
+    backendContextUpdatedAt?: number;
     weeklySchedule?: UserScheduleEntry[];
     npcNetwork?: NpcNetworkEntry[];
     /** 分角色聊天头像（档案 App 设置）：charId → 头像（http(s) URL 或 data:image）。

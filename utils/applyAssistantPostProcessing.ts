@@ -15,7 +15,7 @@
  *  7. [[INNER_STATE:...]] 兜底剥
  *  8. 双语 <翻译><原文>...<译文>... 拆为单独 bubble
  *  9. ChatParser.splitResponse — 拆 [[SEND_EMOJI:]]
- * 10. --- 分块 + ChatParser.chunkText (换行 / CJK 空格)
+ * 10. --- 分块 + ChatParser.chunkText（线下仅换行；其他模式保留既有 CJK 空格兜底）
  * 11. per-chunk 引用解析 ([[QUOTE:]]/[QUOTE:]/[回复 "..."]) → replyTo
  * 12. hasDisplayContent + per-chunk sanitize
  * 13. 拟人打字延迟 (setTimeout)
@@ -50,7 +50,6 @@ import {
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { extractInteractionModeDirective } from './interactionMode';
-import { normalizeOfflineBubbleFormatting } from './offlineBubbleFormat';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -633,17 +632,16 @@ export async function applyAssistantPostProcessing(
             // 角色永远最后才发表情包」。
             // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
             const renderPlainSegment = async (segment: string): Promise<void> => {
-                const bubbleSafeSegment = char.interactionMode === 'offline'
-                    ? normalizeOfflineBubbleFormatting(segment)
-                    : segment;
-                for (const part of ChatParser.splitResponse(bubbleSafeSegment)) {
+                for (const part of ChatParser.splitResponse(segment)) {
                     if (part.type === 'emoji') {
                         await sendEmojiBubble(part.content);
                         continue;
                     }
                     const cleaned = ChatParser.sanitize(part.content);
                     if (!cleaned || !ChatParser.hasDisplayContent(cleaned)) continue;
-                    const chunks = ChatParser.chunkText(cleaned);
+                    const chunks = ChatParser.chunkText(cleaned, {
+                        splitCjkSpaces: char.interactionMode !== 'offline',
+                    });
                     for (const chunk of chunks) {
                         if (!chunk) continue;
                         const replyData = globalMsgIndex === 0 ? aiReplyTarget : undefined;
@@ -687,10 +685,7 @@ export async function applyAssistantPostProcessing(
             if (textAfter) await renderPlainSegment(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
         } else {
             // ─── normal path (splitResponse → chunkText → per-chunk save) ───
-            const bubbleSafeContent = char.interactionMode === 'offline'
-                ? normalizeOfflineBubbleFormatting(content)
-                : content;
-            const parts = ChatParser.splitResponse(bubbleSafeContent);
+            const parts = ChatParser.splitResponse(content);
             // 模型常把 [[QUOTE:]] 单独写一行 (后面紧跟换行或 [[SEND_EMOJI:]]), chunkText/splitResponse
             // 会把它拆成一个"只有标签没有正文"的 chunk — 剥标签后 hasDisplayContent 为 false 不落库,
             // 解析出的引用目标若不暂存就会随之丢失。挂到下一条真正落库的文字气泡上。
@@ -704,7 +699,9 @@ export async function applyAssistantPostProcessing(
                     const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
                     const allChunks: string[] = [];
                     for (const block of rawBlocks) {
-                        allChunks.push(...ChatParser.chunkText(block.trim()));
+                        allChunks.push(...ChatParser.chunkText(block.trim(), {
+                            splitCjkSpaces: char.interactionMode !== 'offline',
+                        }));
                     }
                     if (allChunks.length === 0 && part.content.trim()) allChunks.push(part.content.trim());
 

@@ -10,6 +10,7 @@ import type {
     StoryTheaterPresetPrompt,
     UserProfile,
 } from '../types';
+import { normalizeStoryRegexScripts } from './storyRegex';
 import nightScreeningV627 from '../assets/presets/night-screening-v6.14.sully.json';
 import {
     formatWorldbookSection,
@@ -17,6 +18,16 @@ import {
     splitWorldbookSections,
     type WorldbookScanMessage,
 } from './worldbook';
+import {
+    compileStoryPresetDocument,
+    getStoryPresetExecutionPrompts,
+    isStoryPresetPromptEnabled,
+    normalizeSillyTavernPresetDocument,
+    replaceStoryParticipantMacros,
+    serializeStoryPreset,
+    setStoryPresetPromptEnabled,
+    type StoryPresetTrigger,
+} from './storyPresetCompat';
 
 export type StoryApiRole = 'system' | 'user' | 'assistant';
 export interface StoryApiMessage { role: StoryApiRole; content: string; }
@@ -57,12 +68,13 @@ export interface ResolvedStoryTheaterMask {
     characterId?: string;
 }
 
-export type StoryDisplayBlockKind = 'story' | 'scene' | 'backstage' | 'worldline' | 'debts' | 'theater' | 'choices' | 'affinity' | 'other';
+export type StoryDisplayBlockKind = 'story' | 'scene' | 'slate' | 'backstage' | 'worldline' | 'debts' | 'theater' | 'drama' | 'think' | 'choices' | 'affinity' | 'other';
 export interface StoryDisplayBlock {
     kind: StoryDisplayBlockKind;
     title?: string;
     text: string;
     theater?: StoryMiniTheaterDisplay;
+    html?: string;
 }
 
 export interface StoryMiniTheaterDisplayMessage {
@@ -131,7 +143,9 @@ export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterE
     archiveStrategy: 'summary',
     archives: [],
     selectedWorldbookIds: [],
+    tavernWorldbooks: [],
     forceUserLastMessage: false,
+    targetCharacters: 15000,
     createdAt: now,
     updatedAt: now,
 });
@@ -160,9 +174,19 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         archiveStrategy: entry.archiveStrategy === 'vector' ? 'vector' : 'summary',
         archives: Array.isArray(entry.archives) ? entry.archives : [],
         selectedWorldbookIds: Array.isArray(entry.selectedWorldbookIds) ? entry.selectedWorldbookIds.filter(Boolean) : [],
+        tavernWorldbooks: Array.isArray(entry.tavernWorldbooks)
+            ? entry.tavernWorldbooks.filter(document => document && Array.isArray(document.entries) && document.raw && typeof document.raw === 'object')
+            : [],
+        tavernWorldbookState: entry.tavernWorldbookState && typeof entry.tavernWorldbookState === 'object' ? {
+            turn: Math.max(0, Math.floor(Number(entry.tavernWorldbookState.turn) || 0)),
+            stickyUntil: { ...(entry.tavernWorldbookState.stickyUntil || {}) },
+            cooldownUntil: { ...(entry.tavernWorldbookState.cooldownUntil || {}) },
+        } : undefined,
         presetId: /^builtin-night-screening-v\d/i.test(String(entry.presetId || '')) ? 'builtin-night-screening' : entry.presetId,
         presetOverride: entry.presetOverride?.schema === 'sullyos.story-preset' && Array.isArray(entry.presetOverride.prompts) ? entry.presetOverride : undefined,
         forceUserLastMessage: entry.forceUserLastMessage === true,
+        presetVariables: entry.presetVariables && typeof entry.presetVariables === 'object' ? { ...entry.presetVariables } : undefined,
+        targetCharacters: Math.max(0, Math.min(100000, Math.round(Number(entry.targetCharacters) || 0))) || undefined,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Number(entry.createdAt) || Date.now(),
     };
@@ -255,6 +279,7 @@ const normalizeDocument = (value: any, fallbackName: string): StoryTheaterPreset
             maxTokens: Math.round(clampNumber(value.generation?.maxTokens, 256, 32000, 8000)),
         },
         prompts,
+        regexScripts: normalizeStoryRegexScripts(value.regexScripts),
         assistantPrefill: String(value.assistantPrefill || ''),
     };
 };
@@ -476,59 +501,6 @@ export const resolveStoryPresetDocument = (
     };
 };
 
-const SILLYTAVERN_MARKERS: Record<string, NonNullable<StoryTheaterPresetPrompt['marker']>> = {
-    worldInfoBefore: 'world_before',
-    charDescription: 'characters',
-    charPersonality: 'characters',
-    scenario: 'scenario',
-    personaDescription: 'user',
-    worldInfoAfter: 'world_after',
-    dialogueExamples: 'examples',
-    chatHistory: 'history',
-};
-
-const normalizeSillyTavernDocument = (value: any, fallbackName: string): StoryTheaterPresetDocument => {
-    if (!value || !Array.isArray(value.prompts)) throw new Error('不是受支持的酒馆 Chat Completion 预设');
-    const promptById = new Map<string, any>();
-    value.prompts.forEach((prompt: any, index: number) => promptById.set(String(prompt?.identifier || prompt?.id || `prompt_${index + 1}`), prompt));
-    const orderBlock = Array.isArray(value.prompt_order)
-        ? value.prompt_order.find((block: any) => Array.isArray(block?.order)) || value.prompt_order[0]
-        : undefined;
-    const orderedRefs = Array.isArray(orderBlock?.order) ? orderBlock.order : [];
-    const orderedIds = orderedRefs.map((item: any) => String(item?.identifier || item?.id || '')).filter(Boolean);
-    const ids = [...orderedIds, ...[...promptById.keys()].filter(id => !orderedIds.includes(id))];
-    const enabledById = new Map(orderedRefs.map((item: any) => [String(item?.identifier || item?.id || ''), item?.enabled !== false]));
-    const prompts = ids.map((id, index): StoryTheaterPresetPrompt | null => {
-        const source = promptById.get(id);
-        if (!source) return null;
-        const marker = SILLYTAVERN_MARKERS[id];
-        return {
-            id: `st_${id || index + 1}`,
-            name: String(source.name || id || `提示词 ${index + 1}`),
-            enabled: enabledById.has(id) ? enabledById.get(id) === true : source.enabled !== false,
-            role: normalizeRole(source.role),
-            content: String(source.content || ''),
-            ...(marker ? { marker } : {}),
-        };
-    }).filter((prompt): prompt is StoryTheaterPresetPrompt => Boolean(prompt));
-    if (prompts.length === 0) throw new Error('酒馆预设中没有可用提示词');
-    return {
-        schema: 'sullyos.story-preset',
-        version: 1,
-        name: String(value.name || value.preset_name || fallbackName || '酒馆预设'),
-        description: String(value.description || '由 SillyTavern Chat Completion 预设适配'),
-        generation: {
-            temperature: clampNumber(value.temperature, 0, 2, 0.9),
-            topP: clampNumber(value.top_p, 0, 1, 1),
-            frequencyPenalty: clampNumber(value.frequency_penalty, -2, 2, 0),
-            presencePenalty: clampNumber(value.presence_penalty, -2, 2, 0),
-            maxTokens: Math.round(clampNumber(value.openai_max_tokens ?? value.max_tokens, 256, 32000, 8000)),
-        },
-        prompts,
-        assistantPrefill: String(value.assistant_prefill || value.assistantPrefill || ''),
-    };
-};
-
 export const parseStoryTheaterPreset = (rawText: string, sourceFileName: string, now: number = Date.now()): StoryTheaterPreset => {
     if (rawText.length > 5 * 1024 * 1024) throw new Error('预设超过 5 MB，请先移除内嵌素材或脚本数据');
     let data: Record<string, any>;
@@ -537,7 +509,7 @@ export const parseStoryTheaterPreset = (rawText: string, sourceFileName: string,
     const native = data.schema === 'sullyos.story-preset';
     const sillyTavern = !native && Array.isArray(data.prompts) && Array.isArray(data.prompt_order);
     if (!native && !sillyTavern) throw new Error('只接受 SharkOS 见面预设或 SillyTavern Chat Completion 预设');
-    const document = native ? normalizeDocument(data, fileBase) : normalizeSillyTavernDocument(data, fileBase);
+    const document = native ? normalizeDocument(data, fileBase) : normalizeSillyTavernPresetDocument(data, fileBase);
     return { id: makeStoryTheaterId(), name: document.name, sourceFileName, format: native ? 'sullyos-story-preset' : 'sillytavern-chat-completion', document, createdAt: now, updatedAt: now };
 };
 
@@ -564,7 +536,8 @@ export const duplicateStoryPreset = (preset: StoryTheaterPreset, now = Date.now(
 
 export const getPresetPromptStats = (preset?: StoryTheaterPreset | null): { total: number; enabled: number; scripts: number } => {
     if (!preset) return { total: 0, enabled: 0, scripts: 0 };
-    return { total: preset.document.prompts.length, enabled: preset.document.prompts.filter(prompt => prompt.enabled).length, scripts: 0 };
+    const scripts = preset.document.compatibility?.filter(item => item.fieldPath.startsWith('extensions.regex_scripts[')).length || 0;
+    return { total: preset.document.prompts.length, enabled: getStoryPresetExecutionPrompts(preset.document).filter(item => item.enabled).length, scripts };
 };
 
 export interface StoryPresetPromptGroup {
@@ -640,15 +613,12 @@ export const applyStoryPresetChoice = (
     document: StoryTheaterPresetDocument,
     optionIds: readonly string[],
     selectedId?: string,
-): StoryTheaterPresetDocument => ({
-    ...document,
-    prompts: document.prompts.map(prompt => optionIds.includes(prompt.id) ? { ...prompt, enabled: prompt.id === selectedId } : prompt),
-});
+): StoryTheaterPresetDocument => optionIds.reduce(
+    (next, id) => setStoryPresetPromptEnabled(next, id, id === selectedId),
+    document,
+);
 
-const macroReplace = (text: string, userName: string, characterNames: string[]): string => text
-    .replace(/\{\{user\}\}/gi, userName || '你')
-    .replace(/\{\{char\}\}/gi, characterNames.join('、') || '角色')
-    .replace(/\{\{group\}\}/gi, characterNames.join('、') || '角色');
+const macroReplace = replaceStoryParticipantMacros;
 
 export const STORY_MINI_THEATER_PROMPT_IDS = [
     'nmj-v3-theater-ai',
@@ -664,7 +634,7 @@ export const STORY_MINI_THEATER_PROMPT_IDS = [
 
 export const getActiveStoryMiniTheaterPrompt = (document: StoryTheaterPresetDocument): StoryTheaterPresetPrompt | undefined => {
     const ids = new Set<string>(STORY_MINI_THEATER_PROMPT_IDS);
-    return document.prompts.find(prompt => prompt.enabled && ids.has(prompt.id));
+    return document.prompts.find(prompt => isStoryPresetPromptEnabled(document, prompt.id) && ids.has(prompt.id));
 };
 
 /** 将当前沙盒启用的小剧场规则重复放到本轮输入前，避免被较后的输出协议忽略。 */
@@ -805,9 +775,9 @@ export const buildStoryAffinityAwarenessReminder = (input: StoryAffinityInput | 
 export type StoryNarrationMode = 'second' | 'third' | 'custom';
 
 export const resolveStoryNarrationMode = (document: StoryTheaterPresetDocument): StoryNarrationMode => {
-    const third = document.prompts.some(prompt => prompt.id === 'nmj-v3-pov-third' && prompt.enabled);
+    const third = document.prompts.some(prompt => prompt.id === 'nmj-v3-pov-third' && isStoryPresetPromptEnabled(document, prompt.id));
     if (third) return 'third';
-    const second = document.prompts.some(prompt => prompt.id === 'nmj-v3-pov-second' && prompt.enabled);
+    const second = document.prompts.some(prompt => prompt.id === 'nmj-v3-pov-second' && isStoryPresetPromptEnabled(document, prompt.id));
     return second ? 'second' : 'custom';
 };
 
@@ -835,83 +805,32 @@ export const buildStoryIdentityGuard = (
     ].join('\n');
 };
 
-const slotForMarker = (marker: StoryTheaterPresetPrompt['marker'], slots: StoryPromptSlots): string => {
-    switch (marker) {
-        case 'characters': return slots.actors;
-        case 'world_before': return slots.worldBefore;
-        case 'user': return slots.persona;
-        case 'world_after': return slots.worldAfter;
-        case 'scenario': return slots.scenario;
-        case 'examples': return slots.examples || '';
-        case 'history': return slots.history || '';
-        default: return '';
-    }
-};
-
-const pushPromptMessage = (messages: StoryApiMessage[], role: StoryApiRole, content: string) => {
-    const clean = content.trim();
-    if (!clean) return;
-    messages.push({ role, content: clean });
-};
-
 export const compileStoryPreset = (input: {
     preset?: StoryTheaterPreset | null;
     slots: StoryPromptSlots;
     userName: string;
     characterNames: string[];
-}): { messages: StoryApiMessage[]; settings: StoryGenerationSettings; assistantPrefill?: StoryApiMessage } => {
+    history?: StoryApiMessage[];
+    trigger?: StoryPresetTrigger;
+    variables?: Record<string, string>;
+    seed?: string;
+    now?: Date;
+    lastUserMessage?: string;
+    charDescription?: string;
+    charPersonality?: string;
+    charDepthPrompt?: string;
+    continueContent?: string;
+}): { messages: StoryApiMessage[]; settings: StoryGenerationSettings; assistantPrefill?: StoryApiMessage; variables: Record<string, string>; seed: string; report: import('../types').StoryCompatibilityItem[] } => {
     const { preset, slots, userName, characterNames } = input;
     const document = (preset || BUILTIN_NIGHT_SCREENING_PRESET).document;
-    const messages: StoryApiMessage[] = [];
-
-    const worldBeforePrompts = document.prompts.filter(prompt => prompt.marker === 'world_before');
-    const enabledWorldBeforePrompt = worldBeforePrompts.find(prompt => prompt.enabled);
-    const firstEnabledCharacterIndex = document.prompts.findIndex(prompt => prompt.enabled && prompt.marker === 'characters');
-    const shouldBackfillWorldBefore = worldBeforePrompts.length === 0 && Boolean(slots.worldBefore.trim());
-    const shouldMoveWorldBeforeAheadOfCharacters = Boolean(
-        enabledWorldBeforePrompt
-        && firstEnabledCharacterIndex >= 0
-        && document.prompts.indexOf(enabledWorldBeforePrompt) > firstEnabledCharacterIndex
-        && slots.worldBefore.trim(),
-    );
-
-    // 糯米机原生 Prompt Manager 按数组顺序送出；同一个 marker 只注入一次，
-    // 角色资料始终使用一份完整的沙盒上下文。
-    const injectedMarkers = new Set<string>();
-    for (let index = 0; index < document.prompts.length; index += 1) {
-        const prompt = document.prompts[index];
-        if (
-            index === firstEnabledCharacterIndex
-            && (shouldBackfillWorldBefore || shouldMoveWorldBeforeAheadOfCharacters)
-        ) {
-            pushPromptMessage(
-                messages,
-                enabledWorldBeforePrompt?.role || 'system',
-                macroReplace(slots.worldBefore, userName, characterNames),
-            );
-            injectedMarkers.add('world_before');
-        }
-        if (!prompt.enabled) continue;
-        let raw = prompt.content;
-        if (prompt.marker) {
-            if (injectedMarkers.has(prompt.marker)) continue;
-            injectedMarkers.add(prompt.marker);
-            raw = slotForMarker(prompt.marker, slots);
-        }
-        if (!raw.trim()) continue;
-        pushPromptMessage(messages, prompt.role, macroReplace(raw, userName, characterNames));
-    }
-
-    // 兼容没有任何原生槽位的旧自定义预设，确保角色设定前世界书不会静默丢失。
-    if (shouldBackfillWorldBefore && firstEnabledCharacterIndex < 0 && !injectedMarkers.has('world_before')) {
-        messages.unshift({ role: 'system', content: macroReplace(slots.worldBefore, userName, characterNames).trim() });
-    }
-
-    const prefill = String(document.assistantPrefill || '').trim();
-    const assistantPrefill = prefill ? { role: 'assistant' as const, content: macroReplace(prefill, userName, characterNames) } : undefined;
+    const compiled = compileStoryPresetDocument({
+        ...input,
+        document,
+        history: input.history || (slots.history?.trim() ? [{ role: 'system', content: slots.history.trim() }] : []),
+    });
 
     return {
-        messages,
+        ...compiled,
         settings: {
             temperature: document.generation.temperature,
             top_p: document.generation.topP,
@@ -919,7 +838,6 @@ export const compileStoryPreset = (input: {
             presence_penalty: document.generation.presencePenalty,
             max_tokens: document.generation.maxTokens,
         },
-        assistantPrefill,
     };
 };
 
@@ -1092,6 +1010,11 @@ const DISPLAY_BLOCK_META: Record<string, { kind: StoryDisplayBlockKind; title?: 
     mini_theater: { kind: 'theater', title: '幕间剧场' },
     reply_choices: { kind: 'choices', title: '可以这样推进' },
     affinity_panel: { kind: 'affinity', title: '关系变化' },
+    slate: { kind: 'slate', title: '本章潮汐' },
+    drama: { kind: 'drama', title: '预设小剧场' },
+    snow: { kind: 'drama', title: '预设小剧场' },
+    think: { kind: 'think', title: '思维链' },
+    branches: { kind: 'choices', title: '剧情分支' },
 };
 
 const DISPLAY_TAG_LABELS: Record<string, string> = {
@@ -1106,6 +1029,7 @@ const DISPLAY_TAG_LABELS: Record<string, string> = {
     c_to_u_score: '角色对你的温度', c_to_u_delta: '角色本轮变化', c_to_u_note: '角色变化依据',
     u_to_c_score: '你对角色的温度', u_to_c_delta: '你本轮的变化', u_to_c_note: '你的变化原因', awareness_state: '察觉状态',
     trust: '信任', security: '安全感', possessive_pull: '占有拉力', emotional_pressure: '情绪压强', repair_will: '修复意愿', state_note: '关系合力',
+    scene_title: '章节', scene_no: '章节', location: '地点', ti: '时间', quote: '题记', mind: '心声',
 };
 
 const HIDDEN_STORY_DISPLAY_TAGS = new Set(['u_score', 'u_delta', 'u_note']);
@@ -1209,7 +1133,7 @@ const formatTaggedStoryFragment = (fragment: string): string => {
 export const parseStoryDisplayBlocks = (content: string): StoryDisplayBlock[] => {
     const source = String(content || '');
     const blocks: StoryDisplayBlock[] = [];
-    const topLevel = /<(scene_header|story_text|backstage|mind_weather|worldline|world_line|shot_debts|mini_theater|reply_choices|affinity_panel)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+    const topLevel = /<(scene_header|story_text|backstage|mind_weather|worldline|world_line|shot_debts|mini_theater|reply_choices|affinity_panel|slate|drama|snow|think|branches)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
     let cursor = 0;
     let match: RegExpExecArray | null;
     const push = (kind: StoryDisplayBlockKind, text: string, title?: string) => {
@@ -1228,11 +1152,30 @@ export const parseStoryDisplayBlocks = (content: string): StoryDisplayBlock[] =>
         ].filter(Boolean).join('\n');
         if (text) blocks.push({ kind: 'theater', ...(title ? { title } : {}), text, theater });
     };
+    const pushDrama = (fragment: string, fallbackTitle?: string) => {
+        const title = cleanStoryMarkupText(/<summary\b[^>]*>([\s\S]*?)<\/summary\s*>/i.exec(fragment)?.[1] || '') || fallbackTitle || '预设小剧场';
+        const fenced = /```html\s*([\s\S]*?)```/i.exec(fragment)?.[1]?.trim();
+        const body = fragment.replace(/<\/?details\b[^>]*>/gi, '').replace(/<summary\b[^>]*>[\s\S]*?<\/summary\s*>/gi, '').trim();
+        const html = fenced || (/<(?:style|div|p|section|article|html|body)\b/i.test(body) ? body : undefined);
+        const text = cleanStoryMarkupText(body.replace(/```html/gi, '').replace(/```/g, '')) || title;
+        blocks.push({ kind: 'drama', title, text, ...(html ? { html } : {}) });
+    };
+    const pushChoices = (fragment: string, fallbackTitle?: string) => {
+        const title = cleanStoryMarkupText(/<summary\b[^>]*>([\s\S]*?)<\/summary\s*>/i.exec(fragment)?.[1] || '') || fallbackTitle || '剧情分支';
+        const plain = cleanStoryMarkupText(fragment);
+        const options = plain.split(/\n+/).map(line => line.trim()).map(line => /^[A-Z\d一二三四五六七八九十]+[.、)]\s*(.+)$/i.exec(line)?.[1] || '').filter(Boolean);
+        const fallback = options.length > 0 ? options : plain.split(/\n{2,}/).map(line => line.trim()).filter(line => line && line !== title);
+        blocks.push({ kind: 'choices', title, text: fallback.map(option => `推进：${option}`).join('\n') || plain });
+    };
     while ((match = topLevel.exec(source)) !== null) {
         if (match.index > cursor) push('story', source.slice(cursor, match.index));
         const meta = DISPLAY_BLOCK_META[match[1].toLowerCase()] || { kind: 'other' as const };
         if (meta.kind === 'theater') {
             pushTheater(match[2], meta.title);
+        } else if (meta.kind === 'drama') {
+            pushDrama(match[2], meta.title);
+        } else if (meta.kind === 'choices') {
+            pushChoices(match[2], meta.title);
         } else {
             push(meta.kind, match[2], meta.title);
         }
@@ -1298,7 +1241,7 @@ export const memoryTimestampForCharacter = (entry: StoryTheaterEntry, charId: st
 };
 
 export const downloadStoryPreset = (preset: StoryTheaterPreset): void => {
-    const blob = new Blob([JSON.stringify(preset.document, null, 2)], { type: 'application/json;charset=utf-8' });
+    const blob = new Blob([serializeStoryPreset(preset)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;

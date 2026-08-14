@@ -466,6 +466,20 @@ describe('剧情沙盒辅助逻辑', () => {
 });
 
 describe('剧场输出展示解析', () => {
+    it('识别酒馆 Slate、Drama、Think 与 branches，并保留原顺序', () => {
+        const blocks = parseStoryDisplayBlocks([
+            '<Slate><Scene_Title>章节一 · 潮声</Scene_Title><Location>海边</Location></Slate>',
+            '<Think>先确认人物动机。</Think>',
+            '<Drama><details><summary>贝壳电台</summary><p style="color:#246">今夜仍有回声。</p></details></Drama>',
+            '<branches><details><summary>剧情分支</summary>A. 去码头\nB. 留在灯塔\nC. 追随潮声</details></branches>',
+        ].join('\n'));
+        expect(blocks.map(block => block.kind)).toEqual(['slate', 'think', 'drama', 'choices']);
+        expect(blocks[2]).toMatchObject({ title: '贝壳电台' });
+        expect(blocks[2].html).toContain('<p');
+        expect(blocks[3].text).toContain('推进：去码头');
+        expect(blocks[3].text).toContain('推进：追随潮声');
+    });
+
     it('隐藏协议标签并拆成可读区块', () => {
         const blocks = parseStoryDisplayBlocks([
             '<scene_header><time>深夜</time><place>客厅</place></scene_header>',

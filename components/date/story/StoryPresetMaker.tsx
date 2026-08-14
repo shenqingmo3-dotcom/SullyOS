@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowUp, Copy, DownloadSimple, FloppyDisk, LockSimple, Plus, Trash } from '@phosphor-icons/react';
+import { ArrowDown, ArrowLeft, ArrowUp, Copy, DownloadSimple, FloppyDisk, LockSimple, Plus, Trash, UploadSimple } from '@phosphor-icons/react';
 import type { StoryTheaterPreset, StoryTheaterPresetDocument, StoryTheaterPresetPrompt } from '../../../types';
 import {
     applyStoryPresetChoice,
@@ -10,6 +10,8 @@ import {
     isStoryPresetSectionMarker,
     makeStoryTheaterId,
 } from '../../../utils/storyTheater';
+import { isStoryPresetPromptEnabled, setStoryPresetPromptEnabled } from '../../../utils/storyPresetCompat';
+import { parseStoryRegexFile } from '../../../utils/storyRegex';
 
 interface Props {
     preset: StoryTheaterPreset;
@@ -85,6 +87,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
     const [selectedId, setSelectedId] = useState('');
     const [saving, setSaving] = useState(false);
     const readOnly = preset.builtIn === true;
+    const tavernSource = draft.document.source;
     const groups = useMemo(() => getStoryPresetPromptGroups(draft.document), [draft.document]);
     const activeGroup = groups.find(group => group.key === activeGroupKey) || null;
     const activePrompts = useMemo(() => {
@@ -96,11 +99,13 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
 
     const replaceDocument = (document: StoryTheaterPresetDocument) => setDraft(current => ({ ...current, name: document.name, document, updatedAt: Date.now() }));
     const patchDocument = (patch: Partial<StoryTheaterPresetDocument>) => replaceDocument({ ...draft.document, ...patch });
-    const patchPrompt = (id: string, patch: Partial<StoryTheaterPresetPrompt>) => patchDocument({
-        prompts: draft.document.prompts.map(prompt => prompt.id === id ? { ...prompt, ...patch } : prompt),
-    });
+    const patchPrompt = (id: string, patch: Partial<StoryTheaterPresetPrompt>) => {
+        const { enabled, ...fields } = patch;
+        const next = enabled === undefined ? draft.document : setStoryPresetPromptEnabled(draft.document, id, enabled);
+        replaceDocument({ ...next, prompts: next.prompts.map(prompt => prompt.id === id ? { ...prompt, ...fields } : prompt) });
+    };
     const selectSimpleChoice = (choice: StoryPresetSimpleChoice, id?: string) => {
-        if (readOnly) return;
+        if (readOnly || tavernSource) return;
         replaceDocument(applyStoryPresetChoice(draft.document, choice.ids, id));
     };
     const moveGroup = (key: string, direction: -1 | 1) => {
@@ -116,7 +121,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
     const movePrompt = (id: string, direction: -1 | 1) => {
         const index = activePrompts.findIndex(prompt => prompt.id === id);
         const target = index + direction;
-        if (readOnly || index < 0 || target < 0 || target >= activePrompts.length) return;
+        if (readOnly || tavernSource || index < 0 || target < 0 || target >= activePrompts.length) return;
         const prompts = [...draft.document.prompts];
         const fromIndex = prompts.findIndex(prompt => prompt.id === id);
         const toIndex = prompts.findIndex(prompt => prompt.id === activePrompts[target].id);
@@ -124,7 +129,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
         patchDocument({ prompts });
     };
     const addPrompt = () => {
-        if (!activeGroup || activeGroup.protected || readOnly) return;
+        if (!activeGroup || activeGroup.protected || readOnly || tavernSource) return;
         const next: StoryTheaterPresetPrompt = { id: makeStoryTheaterId(), name: '新提示词', enabled: true, role: 'system', content: '' };
         const prompts = [...draft.document.prompts];
         const last = prompts[activeGroup.endIndex];
@@ -135,7 +140,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
     };
     const removePrompt = (id: string) => {
         const prompt = draft.document.prompts.find(item => item.id === id);
-        if (!prompt || readOnly || isProtectedStoryPrompt(prompt)) return;
+        if (!prompt || readOnly || tavernSource || isProtectedStoryPrompt(prompt)) return;
         patchDocument({ prompts: draft.document.prompts.filter(item => item.id !== id) });
         if (selectedId === id) setSelectedId('');
     };
@@ -144,6 +149,33 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
         setSaving(true);
         try { await onSave({ ...draft, name: draft.document.name.trim() || '未命名剧情预设', updatedAt: Date.now() }); }
         finally { setSaving(false); }
+    };
+    const importRegex = async (file?: File) => {
+        if (!file || readOnly) return;
+        const scripts = parseStoryRegexFile(await file.text());
+        patchDocument({ regexScripts: scripts.map((script, sourceIndex) => ({ ...script, sourceIndex })) });
+    };
+    const renderRegex = () => {
+        const scripts = draft.document.regexScripts || [];
+        if (scripts.length === 0) return null;
+        return <details className='mb-6 rounded-2xl border border-cyan-200 bg-cyan-50/60 p-4'>
+            <summary className='cursor-pointer list-none flex items-center justify-between gap-3'><span><span className='text-[9px] uppercase tracking-[.2em] font-bold text-cyan-700'>Regex worker</span><strong className='block mt-1 text-sm'>Regex 脚本</strong></span><span className='text-[9px] text-cyan-700'>{scripts.filter(script => !script.disabled).length}/{scripts.length} 启用</span></summary>
+            <p className='mt-3 text-[10px] leading-5 text-slate-500'>按原顺序在独立 Worker 执行；每条都可单独开关，超时脚本只跳过自身。</p>
+            <div className='mt-3 max-h-72 overflow-y-auto divide-y divide-cyan-100'>{scripts.map(script => <div key={script.id} className='py-2.5 flex items-center gap-3'><span className='min-w-0 flex-1 truncate text-[10px] font-semibold'>{script.name}</span><button disabled={readOnly} onClick={() => patchDocument({ regexScripts: scripts.map(item => item.id === script.id ? { ...item, disabled: !item.disabled } : item) })} className={`text-[9px] font-bold ${script.disabled ? 'text-slate-400' : 'text-emerald-600'}`}>{script.disabled ? 'OFF' : 'ON'}</button></div>)}</div>
+        </details>;
+    };
+
+    const renderCompatibility = () => {
+        const items = draft.document.compatibility || [];
+        if (!tavernSource || items.length === 0) return null;
+        const levels = ['完整支持', '部分支持', '已保存但不执行', '输入无效'] as const;
+        const colors = { '完整支持': 'text-emerald-700 bg-emerald-50', '部分支持': 'text-amber-700 bg-amber-50', '已保存但不执行': 'text-slate-600 bg-slate-100', '输入无效': 'text-rose-700 bg-rose-50' } as const;
+        return <section className='mb-6 rounded-2xl border border-sky-200 bg-sky-50/60 p-4'>
+            <div className='flex items-start justify-between gap-3'><div><div className='text-[9px] uppercase tracking-[.2em] font-bold text-sky-700'>Compatibility report</div><h2 className='mt-1 text-sm font-bold'>SillyTavern {tavernSource.baseline}</h2></div><span className='text-[9px] text-sky-700'>{tavernSource.order.length} 个顺序项</span></div>
+            <p className='mt-2 text-[10px] leading-5 text-slate-500'>执行只认导入文件的 prompt order；{tavernSource.unreferencedPromptIds.length} 个未引用 prompt 会保存，但不会被补到队尾。</p>
+            <div className='mt-3 flex flex-wrap gap-1.5'>{levels.map(level => <span key={level} className={`rounded-full px-2 py-1 text-[9px] font-bold ${colors[level]}`}>{level} {items.filter(item => item.level === level).length}</span>)}</div>
+            <details className='mt-3'><summary className='cursor-pointer text-[10px] font-bold text-sky-800'>查看全部 {items.length} 项</summary><div className='mt-3 max-h-72 overflow-y-auto divide-y divide-sky-100'>{items.map((item, index) => <div key={`${item.fieldPath}:${item.resourceId}:${index}`} className='py-2.5'><div className='flex items-center gap-2'><span className={`rounded px-1.5 py-0.5 text-[8px] font-bold ${colors[item.level]}`}>{item.level}</span><strong className='min-w-0 flex-1 truncate text-[10px]'>{item.name}</strong><span className='text-[8px] text-slate-400'>{item.enabled ? item.executes ? '本轮执行' : '已启用' : '已关闭'}</span></div><div className='mt-1 break-all font-mono text-[8px] text-slate-400'>{item.fieldPath}</div><p className='mt-1 text-[9px] leading-4 text-slate-500'>{item.reason}</p></div>)}</div></details>
+        </section>;
     };
 
     const renderGeneration = () => <section>
@@ -170,12 +202,12 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
             {activeGroup.protected && <div className='mt-5 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] leading-6 text-amber-800'>这里是糯米机连接角色、你的身份、世界书与历史的骨架。可以上下调整发送顺序，但不能修改内容、开关、消息位置或类型，也不能删除。</div>}
             <div className='mt-5 border-y border-slate-200 divide-y divide-slate-200'>
                 {activePrompts.map((prompt, index) => { const locked = activeGroup.protected || isProtectedStoryPrompt(prompt); return <div key={prompt.id} className={`flex items-center gap-2 py-3 ${selectedId === prompt.id ? 'text-violet-700' : ''}`}>
-                    <button disabled={readOnly || locked} onClick={() => patchPrompt(prompt.id, { enabled: !prompt.enabled })} className={`w-9 shrink-0 text-[9px] font-bold disabled:opacity-50 ${prompt.enabled ? 'text-emerald-600' : 'text-slate-300'}`}>{prompt.enabled ? 'ON' : 'OFF'}</button>
+                    <button disabled={readOnly || locked} onClick={() => patchPrompt(prompt.id, { enabled: !isStoryPresetPromptEnabled(draft.document, prompt.id) })} className={`w-9 shrink-0 text-[9px] font-bold disabled:opacity-50 ${isStoryPresetPromptEnabled(draft.document, prompt.id) ? 'text-emerald-600' : 'text-slate-300'}`}>{isStoryPresetPromptEnabled(draft.document, prompt.id) ? 'ON' : 'OFF'}</button>
                     <button onClick={() => setSelectedId(prompt.id)} className='min-w-0 flex-1 text-left'><span className='block text-xs font-semibold truncate'>{index + 1}. {prompt.name}</span><span className='block mt-1 text-[9px] text-slate-400'>{locked ? '系统连接位 · 内容锁定' : STORY_ROLE_LABELS[prompt.role]}</span></button>
-                    {!readOnly && <span className='flex shrink-0'><button disabled={index === 0} onClick={() => movePrompt(prompt.id, -1)} className='p-1.5 text-slate-400 disabled:opacity-20'><ArrowUp size={14} /></button><button disabled={index === activePrompts.length - 1} onClick={() => movePrompt(prompt.id, 1)} className='p-1.5 text-slate-400 disabled:opacity-20'><ArrowDown size={14} /></button>{!locked && <button onClick={() => removePrompt(prompt.id)} className='p-1.5 text-rose-400'><Trash size={14} /></button>}</span>}
+                    {!readOnly && !tavernSource && <span className='flex shrink-0'><button disabled={index === 0} onClick={() => movePrompt(prompt.id, -1)} className='p-1.5 text-slate-400 disabled:opacity-20'><ArrowUp size={14} /></button><button disabled={index === activePrompts.length - 1} onClick={() => movePrompt(prompt.id, 1)} className='p-1.5 text-slate-400 disabled:opacity-20'><ArrowDown size={14} /></button>{!locked && <button onClick={() => removePrompt(prompt.id)} className='p-1.5 text-rose-400'><Trash size={14} /></button>}</span>}
                 </div>; })}
             </div>
-            {!activeGroup.protected && !readOnly && <button onClick={addPrompt} className='mt-4 h-10 px-4 rounded-xl bg-white border border-slate-200 text-xs font-bold flex items-center gap-1'><Plus size={14} />在本区新增提示词</button>}
+            {!activeGroup.protected && !readOnly && !tavernSource && <button onClick={addPrompt} className='mt-4 h-10 px-4 rounded-xl bg-white border border-slate-200 text-xs font-bold flex items-center gap-1'><Plus size={14} />在本区新增提示词</button>}
             {selected && <div className='mt-7 pt-6 border-t border-slate-200'>
                 {activeGroup.protected || isProtectedStoryPrompt(selected) ? <div className='py-8 text-center'><LockSimple size={28} className='mx-auto text-amber-400' /><div className='mt-2 text-xs font-bold'>系统连接内容已锁定</div><p className='mt-1 text-[10px] text-slate-400'>你仍可以在上方调整它与其他连接位的顺序。</p></div> : <>
                     <div className='grid grid-cols-2 gap-3'><label><span className='text-[10px] text-slate-500'>名称</span><input disabled={readOnly} value={selected.name} onChange={event => patchPrompt(selected.id, { name: event.target.value })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-xs' /></label><label><span className='text-[10px] text-slate-500'>消息位置</span><select disabled={readOnly} value={selected.role} onChange={event => patchPrompt(selected.id, { role: event.target.value as StoryTheaterPresetPrompt['role'] })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-xs'><option value='system'>规则</option><option value='user'>你</option><option value='assistant'>正文</option></select></label></div>
@@ -192,6 +224,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
                 <div className='min-w-0 flex-1'><div className='text-[9px] uppercase tracking-[.24em] font-bold text-violet-500'>Preset maker</div><div className='font-semibold truncate'>预设制作器</div></div>
                 {readOnly && <span className='hidden sm:inline-flex text-[9px] px-2 py-1 rounded-full bg-amber-100 text-amber-700 font-bold'>内置只读</span>}
                 <button onClick={() => downloadStoryPreset(draft)} className='w-9 h-9 shrink-0 rounded-full bg-white border border-slate-200 grid place-items-center' title='导出糯米机原生预设'><DownloadSimple size={16} /></button>
+                {!readOnly && <label className='w-9 h-9 shrink-0 rounded-full bg-white border border-slate-200 grid place-items-center cursor-pointer' title='导入 Regex JSON'><UploadSimple size={16} /><input type='file' accept='.json,application/json' className='hidden' onChange={event => { void importRegex(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}
                 <button onClick={save} className='h-9 px-3 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center gap-1.5'>{readOnly ? <Copy size={14} /> : <FloppyDisk size={14} />}{readOnly ? '复制调整' : saving ? '保存中' : '保存'}</button>
             </div>
             <div className='mx-5 mb-4 grid grid-cols-2 p-1 rounded-xl bg-slate-200'>
@@ -202,10 +235,12 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
 
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-6 pb-24'>
             <div className='max-w-2xl mx-auto'>
+                {renderCompatibility()}
+                {renderRegex()}
                 {mode === 'simple' ? <>
                     <section className='pb-5 border-b border-slate-200'><div className='text-[9px] uppercase tracking-[.22em] font-bold text-violet-500'>Easy controls</div><h1 className='mt-1 text-3xl font-serif font-semibold'>只调看得懂的部分</h1><p className='mt-3 text-[11px] leading-6 text-slate-500'>角色、世界书、历史注入和底层发送结构由糯米机照管。这里的选择不会修改角色档案。</p>{readOnly && <p className='mt-3 text-[10px] text-amber-700'>这是内置原版。点右上角“复制调整”后即可保存你的选择。</p>}</section>
                     <div className='divide-y divide-slate-200'>{STORY_PRESET_SIMPLE_CHOICES.filter(choice => choice.ids.some(id => draft.document.prompts.some(prompt => prompt.id === id))).map(choice => {
-                        const active = choice.ids.find(id => draft.document.prompts.find(prompt => prompt.id === id)?.enabled);
+                        const active = choice.ids.find(id => isStoryPresetPromptEnabled(draft.document, id));
                         return <section key={choice.label} className='py-6'><h2 className='text-sm font-bold'>{choice.label}</h2><p className='mt-1 text-[10px] text-slate-400'>{choice.hint}</p><div className='mt-3 flex flex-wrap gap-2'>{choice.options.map(option => { const selectedOption = option.id ? active === option.id : !active; return <button key={option.id || 'default'} disabled={readOnly} onClick={() => selectSimpleChoice(choice, option.id)} className={`px-3 py-2 rounded-full border text-[11px] font-semibold disabled:opacity-60 ${selectedOption ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-600'}`}>{option.label}</button>; })}</div></section>;
                     })}</div>
                     {!readOnly && <section className='pt-5 border-t border-slate-200'><label><span className='text-[10px] font-bold text-slate-500'>预设名称</span><input value={draft.document.name} onChange={event => patchDocument({ name: event.target.value })} className='mt-2 w-full px-3 py-3 rounded-xl bg-white border border-slate-200 text-sm' /></label></section>}
@@ -213,8 +248,8 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
                     <section className='pb-5 border-b border-slate-200'><div className='text-[9px] uppercase tracking-[.22em] font-bold text-violet-500'>Professional</div><h1 className='mt-1 text-3xl font-serif font-semibold'>先选大区，再看细节</h1><p className='mt-3 text-[11px] leading-6 text-slate-500'>手机上一次只展开一个区。上下箭头移动整区；进入大区后才会显示内部条目。</p></section>
                     <div className='divide-y divide-slate-200'>{groups.map((group, index) => {
                         const groupPrompts = draft.document.prompts.filter(prompt => group.promptIds.includes(prompt.id) && !isStoryPresetSectionMarker(prompt));
-                        const enabled = groupPrompts.filter(prompt => prompt.enabled).length;
-                        return <div key={group.key} className='py-4 flex items-center gap-3'><button onClick={() => { setActiveGroupKey(group.key); setSelectedId(''); }} className='min-w-0 flex-1 text-left'><span className='flex items-center gap-2'><strong className='text-sm'>{group.label}</strong>{group.protected && <LockSimple size={13} className='text-amber-500' />}</span><span className='block mt-1 text-[10px] text-slate-400 truncate'>{group.description}</span><span className='block mt-1 text-[9px] text-violet-500'>{enabled}/{groupPrompts.length} 条启用</span></button>{!readOnly && <span className='flex shrink-0'><button disabled={index === 0} onClick={() => moveGroup(group.key, -1)} className='p-2 text-slate-400 disabled:opacity-20'><ArrowUp size={15} /></button><button disabled={index === groups.length - 1} onClick={() => moveGroup(group.key, 1)} className='p-2 text-slate-400 disabled:opacity-20'><ArrowDown size={15} /></button></span>}</div>;
+                        const enabled = groupPrompts.filter(prompt => isStoryPresetPromptEnabled(draft.document, prompt.id)).length;
+                        return <div key={group.key} className='py-4 flex items-center gap-3'><button onClick={() => { setActiveGroupKey(group.key); setSelectedId(''); }} className='min-w-0 flex-1 text-left'><span className='flex items-center gap-2'><strong className='text-sm'>{group.label}</strong>{group.protected && <LockSimple size={13} className='text-amber-500' />}</span><span className='block mt-1 text-[10px] text-slate-400 truncate'>{group.description}</span><span className='block mt-1 text-[9px] text-violet-500'>{enabled}/{groupPrompts.length} 条启用</span></button>{!readOnly && !tavernSource && <span className='flex shrink-0'><button disabled={index === 0} onClick={() => moveGroup(group.key, -1)} className='p-2 text-slate-400 disabled:opacity-20'><ArrowUp size={15} /></button><button disabled={index === groups.length - 1} onClick={() => moveGroup(group.key, 1)} className='p-2 text-slate-400 disabled:opacity-20'><ArrowDown size={15} /></button></span>}</div>;
                     })}<button onClick={() => setActiveGroupKey('__generation__')} className='w-full py-5 text-left'><strong className='text-sm'>续写参数</strong><span className='block mt-1 text-[10px] text-slate-400'>Temperature、Top P、惩罚项与最大输出</span></button></div>
                     {!readOnly && <section className='pt-6 border-t border-slate-200 grid gap-3 sm:grid-cols-2'><label><span className='text-[10px] font-bold text-slate-500'>预设名称</span><input value={draft.document.name} onChange={event => patchDocument({ name: event.target.value })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm' /></label><label><span className='text-[10px] font-bold text-slate-500'>说明</span><input value={draft.document.description || ''} onChange={event => patchDocument({ description: event.target.value })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm' /></label></section>}
                     {!readOnly && onDelete && <button onClick={() => onDelete(draft)} className='mt-8 w-full py-3 text-xs font-bold text-rose-500'>删除这个预设</button>}

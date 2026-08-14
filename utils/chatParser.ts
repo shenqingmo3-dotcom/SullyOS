@@ -529,11 +529,9 @@ export const ChatParser = {
         return parts;
     },
 
-    // Chunking text for typing effect - splits into separate chat bubbles
-    // Primary: split on line breaks (AI decides where to break)
-    // Fallback: if no line breaks and text is long, split on spaces between CJK characters
-    //   (Chinese text normally has no spaces, so "汉字 汉字" means the AI intended a line break)
-    chunkText: (text: string): string[] => {
+    // Chunking text for typing effect - splits into separate chat bubbles.
+    // Offline mode disables the legacy CJK-space fallback and trusts explicit line breaks only.
+    chunkText: (text: string, options?: { splitCjkSpaces?: boolean }): string[] => {
         // CJK character + punctuation ranges (Chinese text normally has no spaces between these)
         const CJK = '\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef\\u2000-\\u206f\\u2e80-\\u2eff\\u3001-\\u3003\\u2018-\\u201f\\u300a-\\u300f\\uff01-\\uff0f\\uff1a-\\uff20';
         // 在两个 CJK 之间的空格处断行. 不用后行断言 (?<=…): iOS Safari <16.4 的 JSC 不支持,
@@ -572,6 +570,12 @@ export const ChatParser = {
         const ATOM_SOLO = new RegExp(`^${ATOM}(\\d+)${ATOM}$`);
         const ATOM_GLOBAL = new RegExp(`${ATOM}(\\d+)${ATOM}`, 'g');
         const restoreVoice = (s: string) => s.replace(ATOM_GLOBAL, (_m, n) => voiceBlocks[Number(n)] ?? '');
+        if (options?.splitCjkSpaces === false) {
+            return lineChunks.map(chunk => {
+                const solo = chunk.match(ATOM_SOLO);
+                return solo ? voiceBlocks[Number(solo[1])] : restoreVoice(chunk);
+            });
+        }
         const result: string[] = [];
         for (const chunk of lineChunks) {
             // 独占一行的语音占位符 → 直接还原成完整语音块，不参与 CJK 空格切分

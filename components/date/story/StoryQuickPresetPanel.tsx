@@ -3,6 +3,7 @@ import { CaretLeft, CaretRight, Check, SlidersHorizontal, X } from '@phosphor-ic
 import type { StoryTheaterPresetDocument } from '../../../types';
 import { applyStoryPresetChoice, estimateStoryTokens } from '../../../utils/storyTheater';
 import { STORY_PRESET_SIMPLE_CHOICES } from './StoryPresetMaker';
+import { isStoryPresetPromptEnabled } from '../../../utils/storyPresetCompat';
 
 interface Props {
     document: StoryTheaterPresetDocument;
@@ -18,7 +19,7 @@ const StoryQuickPresetPanel: React.FC<Props> = ({ document, hasOverride, onApply
     const [saving, setSaving] = useState(false);
     const pages = useMemo(() => STORY_PRESET_SIMPLE_CHOICES.filter(choice => choice.ids.some(id => draft.prompts.some(prompt => prompt.id === id))), [draft.prompts]);
     const current = pages[Math.min(page, Math.max(0, pages.length - 1))];
-    const tokenEstimate = useMemo(() => estimateStoryTokens(draft.prompts.filter(prompt => prompt.enabled).map(prompt => prompt.content).join('\n') + (draft.assistantPrefill || '')), [draft]);
+    const tokenEstimate = useMemo(() => estimateStoryTokens(draft.prompts.filter(prompt => isStoryPresetPromptEnabled(draft, prompt.id)).map(prompt => prompt.content).join('\n') + (draft.assistantPrefill || '')), [draft]);
 
     const choose = (id?: string) => {
         if (!current) return;
@@ -44,7 +45,7 @@ const StoryQuickPresetPanel: React.FC<Props> = ({ document, hasOverride, onApply
                     <h3 className='mt-1 text-3xl font-serif font-semibold'>{current.label}</h3>
                     <p className='mt-2 text-[11px] leading-5 text-slate-500'>{current.hint}</p>
                     <div className='mt-6 border-y border-slate-200 divide-y divide-slate-200'>{current.options.map(option => {
-                        const activeId = current.ids.find(id => draft.prompts.find(prompt => prompt.id === id)?.enabled);
+                        const activeId = current.ids.find(id => isStoryPresetPromptEnabled(draft, id));
                         const selected = option.id ? activeId === option.id : !activeId;
                         return <button key={option.id || 'default'} onClick={() => choose(option.id)} className='w-full py-3.5 flex items-center gap-3 text-left'><span className={`w-5 h-5 rounded-full border grid place-items-center ${selected ? 'bg-violet-600 border-violet-600 text-white' : 'border-slate-300 text-transparent'}`}><Check size={12} weight='bold' /></span><span className='text-xs font-semibold'>{option.label}</span></button>;
                     })}</div>

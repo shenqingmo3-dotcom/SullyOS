@@ -49,7 +49,7 @@ const quotedUserMsg = {
 describe('线下动作与对白分泡', () => {
     const mixedOfflineReply = '> 她走到你身边。“今天累不累？” > 她低头看着你。';
 
-    it('线下模式把同一行的动作、对白、动作保存成三个独立气泡', async () => {
+    it('线下模式不再猜测同一行中的动作与对白边界', async () => {
         const charId = `c-offline-bubbles-${Date.now()}`;
         const ctx = makeCtx(charId, []);
         ctx.char.interactionMode = 'offline';
@@ -59,10 +59,22 @@ describe('线下动作与对白分泡', () => {
 
         const msgs = await DB.getRecentMessagesByCharId(charId, 50);
         const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual([mixedOfflineReply]);
+    });
+
+    it('线下模式只按模型输出的真实换行拆动作与对白', async () => {
+        const charId = `c-offline-newlines-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'offline';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('> 她走到你身边。\n“今天累不累？”', ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
         expect(texts.map(m => m.content)).toEqual([
             '> 她走到你身边。',
             '“今天累不累？”',
-            '> 她低头看着你。',
         ]);
     });
 
@@ -79,20 +91,47 @@ describe('线下动作与对白分泡', () => {
         expect(texts.map(m => m.content)).toEqual([mixedOfflineReply]);
     });
 
-    it('线下模式把错用右引号开头的对白从动作气泡拆出', async () => {
-        const charId = `c-offline-closing-quote-${Date.now()}`;
+    it('动作描写里的拟声词引号保持在同一个动作气泡', async () => {
+        const charId = `c-offline-onomatopoeia-${Date.now()}`;
         const ctx = makeCtx(charId, []);
         ctx.char.interactionMode = 'offline';
         ctx.instantRender = true;
 
-        await applyAssistantPostProcessing('> 他原地跳了一下。  ”看看我。', ctx);
+        const action = '> 她用指节敲桌，嘴里配了声“咚”，又看向你。';
+        await applyAssistantPostProcessing(action, ctx);
 
         const msgs = await DB.getRecentMessagesByCharId(charId, 50);
         const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
-        expect(texts.map(m => m.content)).toEqual([
-            '> 他原地跳了一下。',
-            '”看看我。',
-        ]);
+        expect(texts.map(m => m.content)).toEqual([action]);
+    });
+
+    it.each([
+        ['ASCII 引号', '> 她抬起头，学着他说了句 "Look at me."，然后笑了。'],
+        ['未闭合引号', '> 她模仿着门响，“咔——然后忽然停住。'],
+    ])('线下模式不解析%s来猜测气泡边界', async (_caseName, action) => {
+        const charId = `c-offline-quotes-${Date.now()}-${Math.random()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'offline';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing(action, ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual([action]);
+    });
+
+    it('线下模式不按中文字符之间的空格单独分词', async () => {
+        const charId = `c-offline-spaces-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.char.interactionMode = 'offline';
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('他说 “别急” 然后坐下。', ctx);
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual(['他说 “别急” 然后坐下。']);
     });
 });
 

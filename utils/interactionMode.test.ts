@@ -28,9 +28,12 @@ describe('interactionMode', () => {
         expect(prompt).toContain('动作叙述必须以 "> " 开头');
         expect(prompt).toContain('说出口的话必须用中文引号“……”包住');
         expect(prompt).toContain('动作和对白绝不能写在同一行或同一个气泡里');
+        expect(prompt).toContain('气泡边界只由你实际输出的换行决定');
+        expect(prompt).toContain('带引号的拟声词或模仿语');
+        expect(prompt).toContain('第一行整体是动作气泡，第二行才是对白气泡');
         expect(prompt).toContain('同一时刻的内容合并成一个连贯段落');
         expect(prompt).toContain('延续已经建立的地点和双方距离');
-        expect(prompt).toContain('动作气泡与对白气泡始终分开');
+        expect(prompt).toContain('动作气泡与对白气泡始终通过真实换行分开');
     });
 
     it('聊天主提示词不再用本体规则强制回到线上', () => {

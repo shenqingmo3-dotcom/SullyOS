@@ -46,4 +46,9 @@ describe('chunkText: <语音> 原子块保护', () => {
     expect(ChatParser.chunkText('第一句\n第二句')).toEqual(['第一句', '第二句']);
     expect(ChatParser.chunkText('你好 世界')).toEqual(['你好', '世界']);
   });
+
+  it('线下模式只按真实换行分泡，不按中文字符之间的空格分词', () => {
+    expect(ChatParser.chunkText('你好 世界', { splitCjkSpaces: false })).toEqual(['你好 世界']);
+    expect(ChatParser.chunkText('第一句\n第二句', { splitCjkSpaces: false })).toEqual(['第一句', '第二句']);
+  });
 });

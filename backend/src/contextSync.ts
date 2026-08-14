@@ -11,10 +11,34 @@ interface SyncedContextResult {
   agentId: string;
   conversationId: string;
   contextVersion: string;
+  profileApplied: boolean;
   syncedMessages: number;
   syncedMemories: number;
   deletedMessages: number;
   deletedMemories: number;
+}
+
+const hasOwn = (value: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, key);
+
+export function buildProfileMetadataPatch(input: ContextSyncInput): Record<string, unknown> {
+  const { character, user } = input;
+  const metadata = { ...character.metadata };
+  delete metadata.mountedWorldbooks;
+  delete metadata.selfInsights;
+  delete metadata.impression;
+  delete metadata.userSnapshot;
+
+  if (hasOwn(character, 'mountedWorldbooks')) metadata.mountedWorldbooks = character.mountedWorldbooks;
+  if (hasOwn(character, 'selfInsights')) metadata.selfInsights = character.selfInsights;
+  if (hasOwn(character, 'impression')) metadata.impression = character.impression;
+  if (character.updatedAt !== undefined) {
+    metadata.userSnapshot = {
+      name: user.name,
+      bio: user.bio,
+      npcNetwork: Array.isArray(character.metadata.npcNetwork) ? character.metadata.npcNetwork : [],
+    };
+  }
+  return metadata;
 }
 
 async function upsertMessage(
@@ -190,7 +214,8 @@ export async function syncContext(input: ContextSyncInput): Promise<SyncedContex
     );
 
     const character = input.character;
-    const agentResult = await client.query<{ id: string }>(
+    const profileMetadataPatch = buildProfileMetadataPatch(input);
+    const agentResult = await client.query<{ id: string; client_updated_at: Date | null }>(
       `INSERT INTO characters (
          owner_user_id,
          external_id,
@@ -212,20 +237,44 @@ export async function syncContext(input: ContextSyncInput): Promise<SyncedContex
          COALESCE($11, false), COALESCE($12, 5), COALESCE($13, 'UTC'), $14
        )
        ON CONFLICT (owner_user_id, external_id) DO UPDATE SET
-         name = EXCLUDED.name,
-         description = EXCLUDED.description,
-         system_prompt = EXCLUDED.system_prompt,
-         worldview = EXCLUDED.worldview,
-         writer_persona = EXCLUDED.writer_persona,
-         legacy_memories = EXCLUDED.legacy_memories,
-         refined_memories = EXCLUDED.refined_memories,
-         profile_metadata = EXCLUDED.profile_metadata,
-         heartbeat_enabled = COALESCE($11, characters.heartbeat_enabled),
-         heartbeat_interval_minutes = COALESCE($12, characters.heartbeat_interval_minutes),
-         timezone = COALESCE($13, characters.timezone),
-         client_updated_at = EXCLUDED.client_updated_at,
+         name = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.name ELSE characters.name END,
+         description = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.description ELSE characters.description END,
+         system_prompt = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.system_prompt ELSE characters.system_prompt END,
+         worldview = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.worldview ELSE characters.worldview END,
+         writer_persona = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.writer_persona ELSE characters.writer_persona END,
+         legacy_memories = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.legacy_memories ELSE characters.legacy_memories END,
+         refined_memories = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN EXCLUDED.refined_memories ELSE characters.refined_memories END,
+         profile_metadata = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN characters.profile_metadata || EXCLUDED.profile_metadata ELSE characters.profile_metadata END,
+         heartbeat_enabled = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN COALESCE($11, characters.heartbeat_enabled) ELSE characters.heartbeat_enabled END,
+         heartbeat_interval_minutes = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN COALESCE($12, characters.heartbeat_interval_minutes) ELSE characters.heartbeat_interval_minutes END,
+         timezone = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN COALESCE($13, characters.timezone) ELSE characters.timezone END,
+         client_updated_at = CASE WHEN characters.client_updated_at IS NULL OR (
+           EXCLUDED.client_updated_at IS NOT NULL AND EXCLUDED.client_updated_at >= characters.client_updated_at
+         ) THEN COALESCE(EXCLUDED.client_updated_at, characters.client_updated_at) ELSE characters.client_updated_at END,
          updated_at = now()
-       RETURNING id`,
+       RETURNING id, client_updated_at`,
       [
         DEFAULT_USER_ID,
         character.id,
@@ -236,7 +285,7 @@ export async function syncContext(input: ContextSyncInput): Promise<SyncedContex
         character.writerPersona ?? null,
         JSON.stringify(character.legacyMemories),
         JSON.stringify(character.refinedMemories),
-        JSON.stringify(character.metadata),
+        JSON.stringify(profileMetadataPatch),
         character.heartbeatEnabled ?? null,
         character.heartbeatIntervalMinutes ?? null,
         character.timezone ?? null,
@@ -245,6 +294,10 @@ export async function syncContext(input: ContextSyncInput): Promise<SyncedContex
     );
     const agentId = agentResult.rows[0]?.id;
     if (!agentId) throw new Error('Failed to create or update agent context.');
+    const storedProfileUpdatedAt = agentResult.rows[0]?.client_updated_at?.getTime() ?? null;
+    const profileApplied = character.updatedAt === undefined
+      ? storedProfileUpdatedAt === null
+      : storedProfileUpdatedAt === null || storedProfileUpdatedAt <= character.updatedAt;
 
     const conversationResult = await client.query<{ id: string }>(
       `INSERT INTO conversations (owner_user_id, agent_id, external_id, title)
@@ -355,6 +408,7 @@ export async function syncContext(input: ContextSyncInput): Promise<SyncedContex
       agentId,
       conversationId,
       contextVersion,
+      profileApplied,
       syncedMessages: input.messages.length,
       syncedMemories: input.memories.length,
       deletedMessages,

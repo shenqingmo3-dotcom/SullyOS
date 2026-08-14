@@ -3,6 +3,7 @@ import { openDB } from './db';
 const STORE = 'backend_sync_queue';
 
 export type BackendMemoryEntityType =
+    | 'character_profile'
     | 'chat_message'
     | 'backend_event'
     | 'memory_node'
@@ -27,6 +28,48 @@ export interface BackendMemoryChange {
 
 function changeKey(charId: string, entityType: BackendMemoryEntityType, entityId: string): string {
     return `${charId}:${entityType}:${entityId}`;
+}
+
+export const backendCharacterProfileChangeKey = (charId: string): string => (
+    changeKey(charId, 'character_profile', 'profile')
+);
+
+export async function enqueueBackendCharacterProfileChanges(
+    profiles: Array<{ charId: string; updatedAt: number }>,
+): Promise<void> {
+    if (profiles.length === 0) return;
+    const db = await openDB();
+    if (!db.objectStoreNames.contains(STORE)) return;
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        const store = tx.objectStore(STORE);
+        for (const profile of profiles) {
+            const key = backendCharacterProfileChangeKey(profile.charId);
+            const request = store.get(key);
+            request.onsuccess = () => {
+                const current = request.result as BackendMemoryChange | undefined;
+                if (current && current.updatedAt > profile.updatedAt) return;
+                store.put({
+                    key,
+                    charId: profile.charId,
+                    entityType: 'character_profile',
+                    entityId: 'profile',
+                    operation: 'upsert',
+                    updatedAt: profile.updatedAt,
+                } satisfies BackendMemoryChange);
+            };
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
+
+export function enqueueBackendCharacterProfileChange(
+    charId: string,
+    updatedAt: number,
+): Promise<void> {
+    return enqueueBackendCharacterProfileChanges([{ charId, updatedAt }]);
 }
 
 export async function enqueueBackendMemoryChanges(

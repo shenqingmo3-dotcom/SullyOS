@@ -2,6 +2,73 @@ import { z } from 'zod';
 
 const metadataSchema = z.record(z.string(), z.unknown());
 const timestampSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const WORLDBOOK_MAX_COUNT = 500;
+const WORLDBOOK_MAX_CONTENT = 200_000;
+const WORLDBOOK_MAX_TOTAL_CONTENT = 200_000;
+
+const optionalBooleanSchema = z.preprocess((value) => {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+}, z.boolean().optional());
+
+const optionalClampedNumber = (min: number, max: number) => z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.min(max, Math.max(min, parsed));
+}, z.number().optional());
+
+const optionalStringListSchema = z.preprocess((value) => (
+  Array.isArray(value) ? value.map((item) => String(item)) : undefined
+), z.array(z.string().max(500)).max(200).optional());
+
+export const mountedWorldbookSchema = z.object({
+  id: z.string().min(1).max(200),
+  title: z.string().max(500).default('未命名世界书'),
+  content: z.string().max(WORLDBOOK_MAX_CONTENT),
+  category: z.string().max(500).optional(),
+  key: optionalStringListSchema,
+  keysecondary: optionalStringListSchema,
+  constant: optionalBooleanSchema,
+  selective: optionalBooleanSchema,
+  selectiveLogic: optionalClampedNumber(0, 3).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )),
+  order: optionalClampedNumber(-1_000_000, 1_000_000),
+  position: optionalClampedNumber(0, 6).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )),
+  disable: optionalBooleanSchema,
+  probability: optionalClampedNumber(0, 100),
+  useProbability: optionalBooleanSchema,
+  depth: optionalClampedNumber(0, 1_000).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )),
+  role: optionalClampedNumber(0, 2).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )).nullable().optional(),
+  scanDepth: optionalClampedNumber(0, 1_000).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )).nullable().optional(),
+  caseSensitive: optionalBooleanSchema.nullable().optional(),
+  matchWholeWords: optionalBooleanSchema.nullable().optional(),
+  sourceUid: optionalClampedNumber(0, Number.MAX_SAFE_INTEGER).transform((value) => (
+    value === undefined ? undefined : Math.trunc(value)
+  )),
+});
+
+const mountedWorldbooksSchema = z.array(mountedWorldbookSchema)
+  .max(WORLDBOOK_MAX_COUNT)
+  .superRefine((books, context) => {
+    const total = books.reduce((sum, book) => sum + book.content.length, 0);
+    if (total > WORLDBOOK_MAX_TOTAL_CONTENT) {
+      context.addIssue({
+        code: 'custom',
+        message: `挂载世界书正文合计不能超过 ${WORLDBOOK_MAX_TOTAL_CONTENT} 字符`,
+      });
+    }
+  });
 
 export const characterContextSchema = z.object({
   id: z.string().min(1).max(200),
@@ -10,6 +77,9 @@ export const characterContextSchema = z.object({
   systemPrompt: z.string().max(200_000).default(''),
   worldview: z.string().max(100_000).nullable().optional(),
   writerPersona: z.string().max(100_000).nullable().optional(),
+  mountedWorldbooks: mountedWorldbooksSchema.optional(),
+  selfInsights: z.array(z.string().max(20_000)).max(2_000).optional(),
+  impression: metadataSchema.nullable().optional(),
   legacyMemories: z
     .array(z.object({
       id: z.string().max(200),
@@ -96,3 +166,4 @@ export const contextSyncSchema = z.object({
 export type ContextSyncInput = z.infer<typeof contextSyncSchema>;
 export type SyncedMessage = z.infer<typeof syncedMessageSchema>;
 export type SyncedMemory = z.infer<typeof syncedMemorySchema>;
+export type SyncedWorldbook = z.infer<typeof mountedWorldbookSchema>;

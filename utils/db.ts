@@ -1569,8 +1569,13 @@ export const DB = {
 
   saveUserProfile: async (profile: UserProfile): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_USER, 'readwrite');
-      transaction.objectStore(STORE_USER).put({ ...profile, id: 'me' });
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_USER, 'readwrite');
+          transaction.objectStore(STORE_USER).put({ ...profile, id: 'me' });
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveUserProfile aborted'));
+      });
   },
 
   getUserProfile: async (): Promise<UserProfile | null> => {
