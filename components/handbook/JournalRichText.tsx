@@ -29,6 +29,7 @@ export interface RichTextOpts {
 const HEADING_RE = /^(#{1,3})\s+(.+)$/;
 const QUOTE_RE = /^>\s+(.+)$/;
 const LIST_RE = /^[-·◦]\s+(.+)$/;
+const RULE_RE = /^(?:-{3,}|_{3,}|\*{3,})$/;
 
 /** 把一行内联 markdown 拆成 React 节点 */
 function renderInline(line: string, opts: RichTextOpts, key: string): React.ReactNode[] {
@@ -174,6 +175,12 @@ const JournalRichText: React.FC<{
         if (!trimmed) {
             flushList(`${i}`);
             blocks.push(<div key={`sp-${i}`} style={{ height: 6 }} />);
+            return;
+        }
+
+        if (RULE_RE.test(trimmed)) {
+            flushList(`${i}`);
+            blocks.push(<div key={`r-${i}`} role='separator' style={{ margin: '12px 0', borderTop: `1px solid ${opts.muted || 'rgba(122,90,114,0.24)'}` }} />);
             return;
         }
 
