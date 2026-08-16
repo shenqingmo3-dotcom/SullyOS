@@ -82,13 +82,35 @@ const asText = (input: unknown, fallback = ''): string => typeof input === 'stri
 const asTextList = (input: unknown): string[] => asList(input).map(item => asText(item)).filter(Boolean);
 const uniqueText = (input: unknown): string[] => Array.from(new Set(asTextList(input)));
 
-const normalizeRequirementValue = (value: unknown): CoCCharacterRequirement['value'] => {
+const structuredRequirementText = (value: Record<string, unknown>, separator: string): string =>
+    Object.entries(value)
+        .map(([key, item]) => `${key}${separator}${typeof item === 'object' && item !== null ? JSON.stringify(item) : String(item ?? '')}`)
+        .join('；');
+
+const normalizeRequirementValue = (value: unknown, kind = ''): CoCCharacterRequirement['value'] => {
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
     if (Array.isArray(value)) {
         if (value.every(item => typeof item === 'number')) return value;
-        return value.map(item => String(item));
+        return value.map(item => typeof item === 'object' && item !== null
+            ? structuredRequirementText(item as Record<string, unknown>, kind === 'attribute_formula' ? '=' : '：')
+            : String(item));
     }
-    return String(value ?? '');
+    if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (kind === 'attribute_formula') {
+            const attribute = record.attribute ?? record.stat ?? record.key ?? record.name;
+            const formula = record.formula ?? record.expression ?? record.value;
+            if (attribute != null && formula != null && typeof formula !== 'object') return `${attribute}=${formula}`;
+            return structuredRequirementText(record, '=');
+        }
+        return structuredRequirementText(record, '：');
+    }
+    return '';
+};
+
+export const formatCoCRequirementValue = (value: unknown, kind = ''): string => {
+    const normalized = normalizeRequirementValue(value, kind);
+    return Array.isArray(normalized) ? normalized.join('～') : String(normalized);
 };
 
 const assertUniqueIds = (label: string, items: Array<{ id: string }>) => {
@@ -123,15 +145,22 @@ export function normalizeCoCModuleAnalysis(value: any, fallbackTitle: string, st
         failure: asText(item?.failure),
         clueIds: uniqueText(item?.clueIds || item?.clue_ids),
     }));
-    const characterRequirements = asList(value?.characterRequirements || value?.character_requirements).map((item: any, index) => ({
+    const normalizedRequirements = asList(value?.characterRequirements || value?.character_requirements).map((item: any, index) => ({
         id: asText(item?.id, `requirement-${index + 1}`),
         target: (['kpc', 'both'].includes(item?.target) ? item.target : 'pc') as 'pc' | 'kpc' | 'both',
         level: item?.level === 'recommended' ? 'recommended' as const : 'required' as const,
         kind: asText(item?.kind, 'background'),
-        value: normalizeRequirementValue(item?.value),
+        value: normalizeRequirementValue(item?.value, asText(item?.kind, 'background')),
         sourceLabel: asText(item?.sourceLabel || item?.source_label, '模组说明'),
         manual: item?.manual === true,
     }));
+    const seenRequirements = new Set<string>();
+    const characterRequirements = normalizedRequirements.filter(item => {
+        const signature = JSON.stringify([item.target, item.level, item.kind, item.value, item.sourceLabel, item.manual]);
+        if (seenRequirements.has(signature)) return false;
+        seenRequirements.add(signature);
+        return true;
+    });
     const nodes = asList(value?.nodes).map((item: any, index) => ({
         id: asText(item?.id, `node-${index + 1}`),
         name: asText(item?.name, `调查节点 ${index + 1}`),
@@ -314,5 +343,5 @@ export function buildKeeperModulePacket(
 }
 
 export function moduleAnalysisPrompt(sourceText: string, editionLabel: string, partLabel = '完整模组', partIndex = 1): string {
-    return `你是守秘人备团助手。请分析下面的 ${partLabel}，使用 ${editionLabel} 规则理解检定，但不要改写作者剧情，也不要向玩家泄露秘密。角色要求必须区分 required/recommended；无法转成数字、NdM、四则运算、括号、age或属性引用的车卡公式标记 manual=true。粉红/茶番只是风格建议，不能代替人数结构。\n\n${sourceText}\n\n只输出 JSON：{"partIndex":${partIndex},"title":"","keeperSummary":"完整因果与真相","openingHook":"不剧透开场钩子","recommendedPlayMode":"solo|pc_kpc|duo_pc|party","recommendedStoryTones":["pink|tea"],"characterRequirements":[{"id":"req-1","target":"pc|kpc|both","level":"required|recommended","kind":"new_card|age_range|era|occupation|relationship|play_mode|attribute_formula|background","value":"或数组","sourceLabel":"原文位置","manual":false}],"acts":[{"name":"","purpose":"","scenes":[""]}],"clues":[{"id":"clue-1","name":"","location":"","revelation":"","required":true,"fallback":"检定失败时仍能如何给出关键线索"}],"checks":[{"id":"check-1","scene":"","skill":"侦查","difficulty":"regular|hard|extreme","purpose":"为什么投骰","success":"成功结果","failure":"失败代价","clueIds":["clue-1"]}],"nodes":[{"id":"node-1","name":"","summary":"","entrances":[""],"clueIds":["clue-1"],"revelationIds":["rev-1"],"nextNodeIds":[]}],"revelations":[{"id":"rev-1","statement":"玩家可明确建立的结论","required":true,"clueIds":["clue-1"],"nodeIds":["node-1"]}],"threats":[{"id":"threat-1","name":"","trigger":"","stages":["初始","推进后"],"nodeIds":["node-1"]}],"improvBoundaries":{"fixedFacts":["不可改写的真相/NPC动机/结局条件"],"flexibleDetails":["可合理衍生的场景/NPC反应"]},"npcs":[{"name":"","role":"","motive":"","secret":""}],"endings":[""],"safetyNotes":["可能需要开团前确认的敏感内容"]}`;
+    return `你是守秘人备团助手。请分析下面的 ${partLabel}，使用 ${editionLabel} 规则理解检定，但不要改写作者剧情，也不要向玩家泄露秘密。角色要求必须区分 required/recommended；attribute_formula 的 value 必须写成单条字符串（例如 "STR=3D6*5"），每个属性一条，禁止使用对象；无法转成数字、NdM、四则运算、括号、age或属性引用的车卡公式标记 manual=true。粉红/茶番只是风格建议，不能代替人数结构。\n\n${sourceText}\n\n只输出 JSON：{"partIndex":${partIndex},"title":"","keeperSummary":"完整因果与真相","openingHook":"不剧透开场钩子","recommendedPlayMode":"solo|pc_kpc|duo_pc|party","recommendedStoryTones":["pink|tea"],"characterRequirements":[{"id":"req-1","target":"pc|kpc|both","level":"required|recommended","kind":"new_card|age_range|era|occupation|relationship|play_mode|attribute_formula|background","value":"字符串或数组；attribute_formula 示例 STR=3D6*5","sourceLabel":"原文位置","manual":false}],"acts":[{"name":"","purpose":"","scenes":[""]}],"clues":[{"id":"clue-1","name":"","location":"","revelation":"","required":true,"fallback":"检定失败时仍能如何给出关键线索"}],"checks":[{"id":"check-1","scene":"","skill":"侦查","difficulty":"regular|hard|extreme","purpose":"为什么投骰","success":"成功结果","failure":"失败代价","clueIds":["clue-1"]}],"nodes":[{"id":"node-1","name":"","summary":"","entrances":[""],"clueIds":["clue-1"],"revelationIds":["rev-1"],"nextNodeIds":[]}],"revelations":[{"id":"rev-1","statement":"玩家可明确建立的结论","required":true,"clueIds":["clue-1"],"nodeIds":["node-1"]}],"threats":[{"id":"threat-1","name":"","trigger":"","stages":["初始","推进后"],"nodeIds":["node-1"]}],"improvBoundaries":{"fixedFacts":["不可改写的真相/NPC动机/结局条件"],"flexibleDetails":["可合理衍生的场景/NPC反应"]},"npcs":[{"name":"","role":"","motive":"","secret":""}],"endings":[""],"safetyNotes":["可能需要开团前确认的敏感内容"]}`;
 }

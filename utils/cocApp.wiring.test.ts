@@ -15,6 +15,9 @@ describe('CoC simulator UI wiring', () => {
         expect(source).toContain('用户是 PC · 角色按人数模式分配');
         expect(source).toContain("['pc_kpc', 'PC + KPC'");
         expect(source).toContain('requestIndependentPcActions');
+        expect(source).toContain('普通调查');
+        expect(source).toContain('buildStoryToneInstruction(activeGame.storyTones || [])');
+        expect(source).toContain('formatCoCRequirementValue(requirement.value, requirement.kind)');
     });
 
     it('uses keeper-requested D100 checks instead of automatic D20 rolls', () => {

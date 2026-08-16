@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildKeeperModulePacket, docxXmlToText, normalizeCoCModuleAnalysis, updateCoCModuleProgress, validateCoCModuleChunk } from './cocModule';
+import { buildKeeperModulePacket, docxXmlToText, formatCoCRequirementValue, normalizeCoCModuleAnalysis, updateCoCModuleProgress, validateCoCModuleChunk } from './cocModule';
 
 describe('CoC module analysis normalization', () => {
     it('keeps clue and check links while filling safe fallbacks', () => {
@@ -22,6 +22,19 @@ describe('CoC module analysis normalization', () => {
             checks: [{ id: 'check-1', clueIds: ['missing'] }],
         }, '坏模组')).toThrow('不存在的 ID');
         expect(() => validateCoCModuleChunk({ partIndex: 2, clues: [], checks: [], npcs: [], endings: [] }, 1)).toThrow('序号');
+    });
+
+    it('normalizes object-shaped formulas and removes exact duplicate requirements', () => {
+        const result = normalizeCoCModuleAnalysis({
+            characterRequirements: [
+                { id: 'str-a', target: 'pc', kind: 'attribute_formula', value: { attribute: 'STR', formula: '3D6*5' }, sourceLabel: '车卡规则' },
+                { id: 'str-b', target: 'pc', kind: 'attribute_formula', value: { attribute: 'STR', formula: '3D6*5' }, sourceLabel: '车卡规则' },
+                { id: 'edu', target: 'pc', kind: 'attribute_formula', value: { EDU: 'age' }, sourceLabel: '车卡规则' },
+            ],
+        }, '测试模组');
+
+        expect(result.characterRequirements.map(item => item.value)).toEqual(['STR=3D6*5', 'EDU=age']);
+        expect(formatCoCRequirementValue({ attribute: 'POW', formula: '2D6+6' }, 'attribute_formula')).toBe('POW=2D6+6');
     });
 
     it('extracts DOCX paragraphs and table cells in document order', () => {

@@ -50,8 +50,8 @@ let pdfjsPromise: Promise<PdfJsLike> | null = null;
 const loadPdfJs = async (): Promise<PdfJsLike> => {
     if (!pdfjsPromise) {
         pdfjsPromise = Promise.all([
-            import('pdfjs-dist'),
-            import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+            import('pdfjs-dist/legacy/build/pdf.mjs'),
+            import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'),
         ])
             .then(([module, worker]) => {
                 const pdfjs = module as unknown as PdfJsLike;

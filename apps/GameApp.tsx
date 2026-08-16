@@ -11,7 +11,7 @@ import Modal from '../components/os/Modal';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { Planet, RocketLaunch, Lightning, LockSimple, DiceFive, Toolbox, FloppyDisk, ArrowsClockwise, DoorOpen, BookOpenText, ChatCircleDots, FilePdf, IdentificationCard, SpinnerGap, X } from '@phosphor-icons/react';
 import { applyModuleRequirementsToInvestigator, cocRulePrompt, cocSuccessLabel, createBlankInvestigator, formatInvestigatorForKeeper, moduleRequirementsForRole, normalizeInvestigator, rollPercentile, type CoCRollResult } from '../utils/cocRules';
-import { buildKeeperModulePacket, createInitialModuleProgress, moduleAnalysisPrompt, normalizeCoCModuleAnalysis, readCoCModuleFile, updateCoCModuleProgress, validateCoCModuleChunk } from '../utils/cocModule';
+import { buildKeeperModulePacket, createInitialModuleProgress, formatCoCRequirementValue, moduleAnalysisPrompt, normalizeCoCModuleAnalysis, readCoCModuleFile, updateCoCModuleProgress, validateCoCModuleChunk } from '../utils/cocModule';
 
 // --- Themes Configuration (Enhanced) ---
 const GAME_THEMES: Record<GameTheme, { bg: string, text: string, accent: string, font: string, border: string, cardBg: string, gradient: string, optionNormal: string, optionChaotic: string, optionEvil: string }> = {
@@ -71,6 +71,16 @@ const AUTO_SUMMARY_THRESHOLD = 20;
 const KEEP_RECENT_AFTER_SUMMARY = 4;
 // AI 世界观生成的可选风格
 const WORLD_STYLES = ['高奇幻', '赛博朋克', '克苏鲁恐怖', '武侠江湖', '末世废土', '校园日常', '悬疑推理', '蒸汽朋克', '西部拓荒', '宫廷权谋'];
+
+const buildStoryToneInstruction = (tones: CoCStoryTone[]): string => {
+    const rules = [
+        '始终保留完整的标准调查主持：按模组因果推进线索、NPC 动机、威胁与结局，允许在 flexibleDetails 内即兴，但不能改写 fixedFacts。',
+    ];
+    if (tones.length === 0) rules.push('本局为普通调查，不强塞恋爱或搞笑桥段；跟随模组原有的恐怖、悬疑与严肃程度。');
+    if (tones.includes('pink')) rules.push('粉红风格只强化本局 PC/KPC 的关系与情感互动，不能取代调查主线或让 KPC 自动讨好玩家。');
+    if (tones.includes('tea')) rules.push('茶番风格允许轻松即兴与荒诞插曲，但线索、骰点后果、危险和模组真相仍然有效。');
+    return rules.join('\n');
+};
 
 // 鲁棒解析 AI 世界观生成结果。
 // 兼容三种情况：① 期望的「标题：xxx === 正文」分隔格式；② 模型不听话仍吐 JSON
@@ -692,8 +702,11 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
 **规则**: ${cocRulePrompt(newEdition)}
 **玩家**: ${userProfile.name}
 **人数模式**: ${newPlayMode}
-**故事风格**: ${newStoryTones.join('、') || '普通调查'}
+**故事风格**: ${newStoryTones.length ? newStoryTones.map(tone => tone === 'pink' ? '粉红' : '茶番').join('、') : '普通调查'}
 **参与角色**: ${players.map(p => p.name).join(', ') || '无'}
+
+### 主持基调
+${buildStoryToneInstruction(newStoryTones)}
 
 ### 调查员卡
 ${normalizedInvestigators.map(formatInvestigatorForKeeper).join('\n')}
@@ -918,6 +931,7 @@ ${playerContext}
             const players = characters.filter(c => activeGame.playerCharIds.includes(c.id));
             const playMode = activeGame.playMode || 'party';
             const playerContext = buildActorContext(players, activeGame.investigators || [], playMode);
+            const storyToneInstruction = buildStoryToneInstruction(activeGame.storyTones || []);
 
             // 3. Build Status Warning
             let statusWarning = "";
@@ -978,6 +992,7 @@ ${rollInstruction}
 ### KP 指令 (Keeper Instructions)
 你现在是这场跑团游戏唯一的 **守秘人 (KP)**。KP 是中立旁白和 NPC 控制者，不是用户、不是任何角色 PC，也没有神经链接人格。
 **人数模式**：${playMode}。solo 没有角色调查员；pc_kpc 中角色是由 KP 控制的 KPC；duo_pc/party 中角色是独立 AI PC，KP 不得替他们决定行动。
+**主持基调**：${storyToneInstruction}
 
 **请遵循以下法则**：
 1. **全员「入戏」 (Roleplay First)**:
@@ -1876,7 +1891,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                 {moduleSource.analysis.characterRequirements.length ? moduleSource.analysis.characterRequirements.map(requirement => (
                                     <div key={requirement.id} className="text-[9px] leading-relaxed text-white/55">
                                         <span className={requirement.level === 'required' ? 'text-amber-200' : 'text-sky-200'}>{requirement.level === 'required' ? '必须' : '建议'} · {requirement.target.toUpperCase()}</span>
-                                        {' '}{requirement.kind}：{Array.isArray(requirement.value) ? requirement.value.join('～') : String(requirement.value)}
+                                        {' '}{requirement.kind}：{formatCoCRequirementValue(requirement.value, requirement.kind)}
                                         <span className="text-white/25">（{requirement.sourceLabel}）</span>
                                     </div>
                                 )) : <p className="text-[9px] text-white/35">模组未声明额外人物限制</p>}
@@ -1910,6 +1925,10 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     <div>
                         <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2">故事风格（可自由组合）</label>
                         <div className="grid grid-cols-2 gap-2">
+                            <button onClick={() => setNewStoryTones([])} className={`col-span-2 rounded-xl border p-3 text-left ${newStoryTones.length === 0 ? 'border-sky-300 bg-sky-500/15' : 'border-white/10 bg-white/5'}`}>
+                                <span className="block text-xs font-bold">普通调查</span>
+                                <span className="block text-[9px] text-white/40 mt-1">完整 KP 主持，跟随模组原有恐怖、悬疑与严肃程度</span>
+                            </button>
                             {([['pink', '粉红', '强化 PC/KPC 的情感与关系戏'], ['tea', '茶番', '允许更轻松、即兴的乐子互动']] as Array<[CoCStoryTone, string, string]>).map(([tone, label, description]) => (
                                 <button key={tone} onClick={() => toggleStoryTone(tone)} className={`rounded-xl border p-3 text-left ${newStoryTones.includes(tone) ? 'border-pink-300 bg-pink-500/15' : 'border-white/10 bg-white/5'}`}>
                                     <span className="block text-xs font-bold">{label}</span>

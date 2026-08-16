@@ -56,6 +56,7 @@ import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool } from '../utils/amsg2ToolBridge';
 import { shouldSendThinkingParams } from '../utils/thinkingGate';
+import { buildClaudeProxyCompatibilityBody, shouldRetryClaudeProxyCompatibility } from '../utils/claudeProxyCompat';
 import { routeMiniAppToolCall } from '../utils/miniAppToolRoute';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
 import { announceChatGen, CHAT_GEN_EVENTS } from '../utils/chatGenEvents';
@@ -1487,12 +1488,33 @@ export const useChatAI = ({
                     body: JSON.stringify({ ...baseReqBody, messages: withAmsg2TaskContext(baseReqBody.messages) })
                 }, 2, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天回复' }, streamHooks);
             } catch (e) {
+                let requestError: unknown = e;
+                const attemptedBody = {
+                    ...baseReqBody,
+                    messages: withAmsg2TaskContext(baseReqBody.messages),
+                };
+                if (shouldRetryClaudeProxyCompatibility(requestError, attemptedBody)) {
+                    console.warn('🧩 [Claude compat] 中转拒绝 thinking + tools 组合，使用兼容请求体重试一次');
+                    try {
+                        data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+                            method: 'POST', headers,
+                            body: JSON.stringify(buildClaudeProxyCompatibilityBody(attemptedBody)),
+                        }, 0, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: 'Claude 中转兼容重试' }, streamHooks);
+                        requestError = null;
+                    } catch (compatError) {
+                        requestError = compatError;
+                    }
+                }
+
+                if (!requestError) {
+                    // 兼容重试成功，继续统一的工具循环与消息后处理。
+                } else {
                 // 仅通用 MCP、且没有和其他工具模式混用时降级。部分 OpenAI 兼容中转
                 // 会对携带 tools 的请求直接回 4xx，而不是忽略参数；去掉 tools 后让
                 // 现有正文假调用容错接手。真实鉴权失败会在这次重试中再次抛出原样错误。
                 const mcpOnly = payload.flags.mcpChatActive
                     && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive;
-                if (!mcpOnly || !baseReqBody.tools?.length || !shouldRetryMcpWithoutTools(e)) throw e;
+                if (!mcpOnly || !baseReqBody.tools?.length || !shouldRetryMcpWithoutTools(requestError)) throw requestError;
                 console.warn('🔌 [MCP] 当前中转拒绝 tools 请求，降级为正文工具调用兼容模式');
                 // 这条路把 tools 全删了，角色排不了新任务；排程现状照样要带——它得知道
                 // 自己名下已经有哪些承诺，否则又会在正文里许一遍。
@@ -1504,6 +1526,7 @@ export const useChatAI = ({
                     method: 'POST', headers,
                     body: JSON.stringify(fallbackBody)
                 }, 0, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: 'MCP tools 兼容重试' });
+                }
             }
             console.log(`⏱ [API call] ${Math.round(performance.now() - apiT0)}ms`);
             updateTokenUsage(data, historyMsgCount, 'initial');
