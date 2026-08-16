@@ -42,6 +42,26 @@ describe('backend character profile mapping', () => {
         expect(payload.impression).toMatchObject({ personality_core: { summary: '很坦率' } });
     });
 
+    it('maps shared calendar facts into optional backend metadata without empty placeholders', () => {
+        const payload = buildBackendCharacterContextPayload({
+            character: character(),
+            user,
+            sharedCalendar: {
+                date: '2026-08-20',
+                userSchedule: [{ id: 'task-1', title: '复诊', startTime: '10:00' }],
+                relationshipAnniversaries: [{
+                    id: 'anni-1', title: '相遇日', date: '2026-08-22', dayDifference: 2, direction: 'countdown',
+                }],
+            },
+        });
+        expect(payload.metadata).toMatchObject({
+            currentUserSchedule: { date: '2026-08-20', entries: [{ title: '复诊', startTime: '10:00' }] },
+            relationshipAnniversaries: [{ title: '相遇日', dayDifference: 2 }],
+        });
+        expect(buildBackendCharacterContextPayload({ character: character(), user }).metadata)
+            .toMatchObject({ currentDailySchedule: null, currentUserSchedule: null, relationshipAnniversaries: null });
+    });
+
     it('does not silently truncate an oversized worldbook', () => {
         expect(() => buildBackendCharacterContextPayload({
             character: character('x'.repeat(200_001)), user,

@@ -10,8 +10,11 @@ import { loadCharacterContextRange } from './chatContextRange';
 import { ChatPrompts } from './chatPrompts';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
+import { formatUserScheduleForDate } from './sharedCalendarContext';
+import { queueBackendCalendarContexts } from './backendProfileSync';
 
 export { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
+export { formatUserScheduleForDate } from './sharedCalendarContext';
 
 export interface ScheduleApiConfig {
     baseUrl: string;
@@ -73,38 +76,6 @@ export function formatChatHistoryForSchedule(
         return `${sender}: ${content}`;
     });
     return `\n## 最近的聊天记录（与「${user.name}」）\n${lines.join('\n')}\n`;
-}
-
-export function formatUserScheduleForDate(
-    user: UserProfile,
-    tasks: Task[],
-    dateKey: string,
-    dayOfWeek: number,
-): string {
-    const activeTasks = tasks.filter(task => {
-        if (task.isCompleted || task.excludedDates?.includes(dateKey)) return false;
-        if (task.repeatWeekly) return (task.repeatDays || []).includes(dayOfWeek);
-        return (task.scheduleDate || task.deadline?.slice(0, 10)) === dateKey;
-    }).map(task => ({
-        title: task.title,
-        startTime: task.startTime || task.deadline?.slice(11, 16) || '时间未定',
-        endTime: task.endTime,
-        location: task.location,
-        note: task.note,
-    }));
-    const legacyEntries = (user.weeklySchedule || [])
-        .filter(entry => entry.daysOfWeek.includes(dayOfWeek));
-    const entries = [...activeTasks, ...legacyEntries]
-        .filter((entry, index, all) => all.findIndex(candidate => (
-            candidate.title === entry.title
-            && candidate.startTime === entry.startTime
-            && candidate.endTime === entry.endTime
-        )) === index)
-        .sort((left, right) => left.startTime.localeCompare(right.startTime));
-    if (entries.length === 0) return '';
-    return `\n## 用户今天的日程（共同生活的现实约束）\n${entries.map(entry => (
-        `- ${entry.startTime}${entry.endTime ? `-${entry.endTime}` : ''} ${entry.title}${entry.location ? `，地点：${entry.location}` : ''}${entry.note ? `（${entry.note}）` : ''}`
-    )).join('\n')}\n角色不必围着用户行动，但约见、陪伴、等下课等共同安排必须尊重这些时间；最近对话明确改变计划时，只调整受影响时段及之后必要的安排。\n`;
 }
 
 function buildLifestylePrompt(
@@ -412,6 +383,7 @@ export async function generateDailyScheduleForChar(
         };
 
         await DB.saveDailySchedule(schedule);
+        void queueBackendCalendarContexts([char.id]).catch(error => console.warn('[CalendarSync] 角色日程排队失败', error));
         return schedule;
     } catch (e) {
         console.error('[Schedule] Generation failed:', e);

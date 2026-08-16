@@ -1014,6 +1014,8 @@ const DISPLAY_BLOCK_META: Record<string, { kind: StoryDisplayBlockKind; title?: 
     drama: { kind: 'drama', title: '预设小剧场' },
     snow: { kind: 'drama', title: '预设小剧场' },
     think: { kind: 'think', title: '思维链' },
+    thinking: { kind: 'think', title: '思维链' },
+    thought: { kind: 'think', title: '思维链' },
     branches: { kind: 'choices', title: '剧情分支' },
 };
 
@@ -1133,7 +1135,7 @@ const formatTaggedStoryFragment = (fragment: string): string => {
 export const parseStoryDisplayBlocks = (content: string): StoryDisplayBlock[] => {
     const source = String(content || '');
     const blocks: StoryDisplayBlock[] = [];
-    const topLevel = /<(scene_header|story_text|backstage|mind_weather|worldline|world_line|shot_debts|mini_theater|reply_choices|affinity_panel|slate|drama|snow|think|branches)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+    const topLevel = /<(scene_header|story_text|backstage|mind_weather|worldline|world_line|shot_debts|mini_theater|reply_choices|affinity_panel|slate|drama|snow|think|thinking|thought|branches)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
     let cursor = 0;
     let match: RegExpExecArray | null;
     const push = (kind: StoryDisplayBlockKind, text: string, title?: string) => {
@@ -1184,7 +1186,11 @@ export const parseStoryDisplayBlocks = (content: string): StoryDisplayBlock[] =>
     if (cursor < source.length) {
         const tail = source.slice(cursor);
         const unclosedTheater = /<mini_theater\b[^>]*>([\s\S]*)$/i.exec(tail);
-        if (unclosedTheater) {
+        const unclosedThink = /<(think|thinking|thought)\b[^>]*>([\s\S]*)$/i.exec(tail);
+        if (unclosedThink && (!unclosedTheater || unclosedThink.index < unclosedTheater.index)) {
+            if (unclosedThink.index > 0) push('story', tail.slice(0, unclosedThink.index));
+            push('think', unclosedThink[2], '思维链');
+        } else if (unclosedTheater) {
             if (unclosedTheater.index > 0) push('story', tail.slice(0, unclosedTheater.index));
             pushTheater(unclosedTheater[1], DISPLAY_BLOCK_META.mini_theater.title);
         } else {

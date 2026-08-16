@@ -1,5 +1,6 @@
 
 import { DB } from './db';
+import { queueBackendCalendarContexts } from './backendProfileSync';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { CharacterProfile, CharPlaylistSong } from '../types';
 import { sanitizeForBubble } from './sanitize';
@@ -410,6 +411,7 @@ export const ChatParser = {
             if (title && date) {
                 const anni: any = { id: `anni-${Date.now()}`, title, date, charId, createdBy: 'character', ...(eventNote ? { note: eventNote } : {}) };
                 await DB.saveAnniversary(anni);
+                void queueBackendCalendarContexts([charId]).catch(error => console.warn('[CalendarSync] 纪念日排队失败', error));
                 addToast(`${charName} 添加了新日程: ${title}`, 'success');
                 await persist({ charId, role: 'system', type: 'text', content: `[系统: ${charName} 新增了日程 "${title}" (${date})]` });
             }

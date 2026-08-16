@@ -18,6 +18,7 @@ import type {
 } from './memoryPalace/types';
 import {
     acknowledgeBackendMemoryChanges,
+    backendCalendarContextChangeKey,
     backendCharacterProfileChangeKey,
     getBackendMemoryChanges,
     getBackendMemoryChangesByKeys,
@@ -33,6 +34,8 @@ import { DB } from './db';
 import { relevantNpcNetwork } from './npcNetwork';
 import { resolveCharTimeZone } from './timezone';
 import { getDailyScheduleForChar } from './dailySchedule';
+import { buildSharedCalendarContext, type SharedCalendarContext } from './sharedCalendarContext';
+import { isScheduleFeatureOn } from './scheduleFeature';
 
 const CONFIG_KEY = 'sullyos_backend_chat_v1';
 const CLIENT_ID_KEY = 'sullyos_backend_client_id_v1';
@@ -711,8 +714,9 @@ export function buildBackendCharacterContextPayload(input: {
     character: CharacterProfile;
     user: UserProfile;
     currentDailySchedule?: unknown;
+    sharedCalendar?: SharedCalendarContext;
 }) {
-    const { character, user, currentDailySchedule } = input;
+    const { character, user, currentDailySchedule, sharedCalendar } = input;
     const profileUpdatedAt = Math.max(
         Number(character.backendContextUpdatedAt) || 0,
         Number(user.backendContextUpdatedAt) || 0,
@@ -741,7 +745,13 @@ export function buildBackendCharacterContextPayload(input: {
         metadata: {
             interactionMode: character.interactionMode === 'offline' ? 'offline' : 'online',
             ...(character.interactionScene ? { interactionScene: character.interactionScene } : {}),
-            ...(currentDailySchedule ? { currentDailySchedule } : {}),
+            currentDailySchedule: currentDailySchedule ?? null,
+            currentUserSchedule: sharedCalendar?.userSchedule.length
+                ? { date: sharedCalendar.date, entries: sharedCalendar.userSchedule }
+                : null,
+            relationshipAnniversaries: sharedCalendar?.relationshipAnniversaries.length
+                ? sharedCalendar.relationshipAnniversaries
+                : null,
             npcNetwork: relevantNpcNetwork(user.npcNetwork, character.id),
         },
         timezone: resolveCharTimeZone(character)
@@ -828,7 +838,12 @@ export async function syncBackendContext(input: {
     deletedMemoryIds?: string[];
 }): Promise<any> {
     const { character, user } = input;
-    const currentDailySchedule = await getDailyScheduleForChar(character).catch(() => null);
+    const [currentDailySchedule, tasks, anniversaries] = await Promise.all([
+        isScheduleFeatureOn(character) ? getDailyScheduleForChar(character).catch(() => null) : Promise.resolve(null),
+        DB.getAllTasks().catch(() => []),
+        DB.getAllAnniversaries().catch(() => []),
+    ]);
+    const sharedCalendar = buildSharedCalendarContext(user, tasks, anniversaries, character.id);
     return backendFetch(input.config, '/v1/context/sync', {
         method: 'POST',
         body: JSON.stringify({
@@ -839,7 +854,7 @@ export async function syncBackendContext(input: {
                 name: boundedText(user.name, 200, '用户') || '用户',
                 bio: boundedText(user.bio || '', 100_000),
             },
-            character: buildBackendCharacterContextPayload({ character, user, currentDailySchedule }),
+            character: buildBackendCharacterContextPayload({ character, user, currentDailySchedule, sharedCalendar }),
             // 后端生成的 assistant 消息已经在 conversation_events 中；前端只保留其
             // 展示副本，下一轮同步时跳过，避免同一回复被写两遍。
             messages: input.messages
@@ -1108,8 +1123,10 @@ export async function flushBackendMemorySyncQueue(input: {
     priorityDeletedEventIds?: string[];
 }): Promise<{ synced: number }> {
     const profileKey = backendCharacterProfileChangeKey(input.character.id);
+    const calendarKey = backendCalendarContextChangeKey(input.character.id);
     const priorityKeys = [
         profileKey,
+        calendarKey,
         ...(input.priorityDeletedMessageIds || []).map(id => `${input.character.id}:chat_message:${id}`),
         ...(input.priorityDeletedEventIds || []).map(id => `${input.character.id}:backend_event:${id}`),
     ];
@@ -1121,9 +1138,10 @@ export async function flushBackendMemorySyncQueue(input: {
     if (changes.length === 0) return { synced: 0 };
 
     const hasProfileChange = changes.some(change => change.key === profileKey);
+    const hasCalendarChange = changes.some(change => change.key === calendarKey);
     let character = input.character;
     let user = input.user;
-    if (hasProfileChange) {
+    if (hasProfileChange || hasCalendarChange) {
         const [latestCharacters, latestUser] = await Promise.all([
             DB.getAllCharacters(),
             DB.getUserProfile(),
@@ -1145,7 +1163,7 @@ export async function flushBackendMemorySyncQueue(input: {
     const backendEventDeletes = changes
         .filter(change => change.entityType === 'backend_event' && change.operation === 'delete')
         .map(change => change.entityId);
-    if (hasProfileChange || nodeUpserts.length > 0 || nodeDeletes.length > 0 || messageDeletes.length > 0 || backendEventDeletes.length > 0) {
+    if (hasProfileChange || hasCalendarChange || nodeUpserts.length > 0 || nodeDeletes.length > 0 || messageDeletes.length > 0 || backendEventDeletes.length > 0) {
         const result = await syncBackendContext({
             config: input.config,
             character,

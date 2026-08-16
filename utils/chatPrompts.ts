@@ -23,6 +23,7 @@ import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
 import { buildOfflineSceneRules } from './interactionMode';
 import { normalizeWebpageMediaUrls } from './webpageExtractor';
+import { buildSharedCalendarContext, formatSharedCalendarContext } from './sharedCalendarContext';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -338,6 +339,23 @@ export const ChatPrompts = {
             })
             : Promise.resolve(null);
 
+        const sharedCalendarPromise: Promise<string> = (async () => {
+            if (forFirePack || timelyByWorker) return '';
+            try {
+                const [tasks, anniversaries] = await Promise.all([
+                    DB.getAllTasks(),
+                    DB.getAllAnniversaries(),
+                ]);
+                return formatSharedCalendarContext(
+                    buildSharedCalendarContext(userProfile, tasks, anniversaries, char.id, new Date()),
+                    userProfile.name,
+                );
+            } catch (error) {
+                console.error('Failed to load shared calendar context:', error);
+                return '';
+            }
+        })();
+
         // 3. 群聊上下文：并发拉取所有成员群的消息
         // 关键：每个群单独取最后 N 条，避免某个活跃群把其他群完全挤掉
         // （之前是把所有群消息混合后切前 200 条，活跃群会吃光配额，安静群完全不出现）
@@ -448,10 +466,11 @@ ${groupLogStr}\n`;
                 return '';
             });
 
-        const [realtimeText, schedule, groupContextText, notionDiaryText, feishuDiaryText, notionNotesText, lifeRecordText] =
+        const [realtimeText, schedule, sharedCalendarText, groupContextText, notionDiaryText, feishuDiaryText, notionNotesText, lifeRecordText] =
             await Promise.all([
                 timed('realtime', realtimePromise),
                 timed('schedule', schedulePromise),
+                timed('sharedCalendar', sharedCalendarPromise),
                 timed('groupCtx', groupContextPromise),
                 timed('notionDiary', notionDiaryPromise),
                 timed('feishuDiary', feishuDiaryPromise),
@@ -466,12 +485,19 @@ ${groupLogStr}\n`;
         //     fire_pack 不烤：改由 worker 到点用 AMSG_SLOT_SCENE 现挑时段（见 amsgFireScene）。
         if (schedule && !forFirePack) {
             try {
-                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative, charNow);
+                const scheduleContext = ContextBuilder.buildScheduleInjection(
+                    schedule,
+                    evolvedNarrative,
+                    charNow,
+                    { includeFullDay: true, includeChangeInstruction: true },
+                );
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
                 console.error('Failed to inject schedule context:', e);
             }
         }
+
+        if (sharedCalendarText) volatileState += `\n${sharedCalendarText}\n`;
 
         // 2b. 音乐氛围（复用同一份 schedule）
         //     - 同步：从 schedule 里算 char 当前"正在听"哪首歌

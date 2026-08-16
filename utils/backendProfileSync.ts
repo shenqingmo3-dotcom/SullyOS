@@ -2,6 +2,7 @@ import type { CharacterProfile, UserProfile } from '../types';
 import { openDB } from './db';
 import {
     backendCharacterProfileChangeKey,
+    enqueueBackendCalendarContextChanges,
     enqueueBackendCharacterProfileChanges,
     type BackendMemoryChange,
 } from './backendSyncQueue';
@@ -89,6 +90,13 @@ export async function queueBackendCharacterProfiles(
 ): Promise<void> {
     await enqueueBackendCharacterProfileChanges(profiles);
     notifyBackendProfileSync(profiles.map((profile) => profile.charId));
+}
+
+/** 日程/纪念日不属于角色人设；单独排队，但复用同一个后台同步泵。 */
+export async function queueBackendCalendarContexts(charIds: string[]): Promise<void> {
+    const uniqueCharIds = [...new Set(charIds.filter(Boolean))];
+    await enqueueBackendCalendarContextChanges(uniqueCharIds);
+    notifyBackendProfileSync(uniqueCharIds);
 }
 
 export function queueBackendCharacterProfile(character: CharacterProfile): Promise<void> {

@@ -189,6 +189,46 @@ function formatNpcNetwork(metadata: Record<string, unknown>): string {
   return `## NPC 关系网\n这些是共同生活中的旁人。按已写明的关系理解，可自然影响对话、日程和自主活动；不要擅自扩写复杂身世，也不要为了提 NPC 而强行提及。\n${lines.join('\n')}`;
 }
 
+function formatUserSchedule(metadata: Record<string, unknown>, userName: string): string {
+  const schedule = metadata.currentUserSchedule;
+  if (!schedule || typeof schedule !== 'object') return '';
+  const record = schedule as Record<string, unknown>;
+  const entries = Array.isArray(record.entries) ? record.entries : [];
+  const lines = entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const item = entry as Record<string, unknown>;
+    const title = typeof item.title === 'string' ? item.title : '';
+    const startTime = typeof item.startTime === 'string' ? item.startTime : '';
+    if (!title || !startTime) return [];
+    const endTime = typeof item.endTime === 'string' && item.endTime ? `-${item.endTime}` : '';
+    const location = typeof item.location === 'string' && item.location ? `（${item.location}）` : '';
+    const note = typeof item.note === 'string' && item.note ? `：${item.note}` : '';
+    return [`- ${startTime}${endTime} ${limited(title, 1_000)}${limited(location, 1_000)}${limited(note, 2_000)}`];
+  });
+  if (lines.length === 0) return '';
+  return `## ${limited(userName, 200)}今天的日程\n${lines.join('\n')}\n这些是真实时间约束；自然关心即可，不要把聊天变成机械报时。`;
+}
+
+function formatRelationshipAnniversaries(metadata: Record<string, unknown>, userName: string): string {
+  const entries = Array.isArray(metadata.relationshipAnniversaries) ? metadata.relationshipAnniversaries : [];
+  const lines = entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const item = entry as Record<string, unknown>;
+    const title = typeof item.title === 'string' ? item.title : '';
+    const date = typeof item.date === 'string' ? item.date : '';
+    if (!title || !date) return [];
+    const difference = Number(item.dayDifference);
+    const distance = Number.isFinite(difference) ? Math.abs(Math.round(difference)) : null;
+    const status = distance == null ? ''
+      : difference === 0 ? '，就是今天'
+        : item.direction === 'countdown' ? `，${distance} 天后` : `，已经 ${distance} 天`;
+    const note = typeof item.note === 'string' && item.note ? `：${limited(item.note, 2_000)}` : '';
+    return [`- ${limited(title, 1_000)}（${limited(date, 100)}${status}）${note}`];
+  });
+  if (lines.length === 0) return '';
+  return `## 你与${limited(userName, 200)}的纪念日\n${lines.join('\n')}\n只把这些当作你们共同经历与期待的一部分，不要每轮强行提起。`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -403,7 +443,9 @@ export async function buildAgentContextMessages(input: {
     anticipationLines.length ? `## 尚未结束的期盼\n${anticipationLines.join('\n')}` : '',
     target.legacy_memories ? `## 兼容长期记忆\n${limited(target.legacy_memories, 20_000)}` : '',
     target.refined_memories ? `## 已整理记忆\n${limited(target.refined_memories, 30_000)}` : '',
-    input.purpose === 'heartbeat' ? formatDailySchedule(metadata) : '',
+    formatDailySchedule(metadata),
+    formatUserSchedule(metadata, userSnapshot.name),
+    formatRelationshipAnniversaries(metadata, userSnapshot.name),
     formatSharkWorldbookSection(worldbookSections.authorsNoteTop, '世界书 · 作者注释顶部'),
     formatSharkWorldbookSection(worldbookSections.authorsNoteBottom, '世界书 · 作者注释底部'),
     input.purpose === 'heartbeat' ? '## 自主联系补充\n普通 message 是开放的生活交流出口：你可以自然分享自己的近况、日程中的正在做什么、突然想到的小事、想念用户或随口闲聊。不要等待用户先提问，也不要把每次联系固定成同一种主题；是否联系仍由本轮真实心情、上下文和门控共同决定。最近聊天中的记录时间是判断瞬时场景是否仍在继续的依据：上一晚的入睡、拥抱和具体身体姿势到了新一天只能视为历史，不能因为最后一句仍写着“睡着了”就假定此刻仍处于昨晚姿势；线下共处模式和地点仍按当前设置持续有效。' : '',

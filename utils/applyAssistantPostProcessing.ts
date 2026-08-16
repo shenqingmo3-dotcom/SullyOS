@@ -50,6 +50,8 @@ import {
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { extractInteractionModeDirective } from './interactionMode';
+import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
+import { queueBackendCalendarContexts } from './backendProfileSync';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -509,9 +511,25 @@ export async function applyAssistantPostProcessing(
     // 局部 data 副本 — 后续 2nd-pass 会覆盖, 模仿旧版的 let data 行为
     let data: any = initialData;
 
+    let scheduleFailureNotified = false;
+    const consumeScheduleChanges = async (content: string): Promise<string> => {
+        const result = await applyAssistantScheduleChanges(content, char);
+        if (result.changes.length > 0 && result.schedule) {
+            announceScheduleChanges(char.id, result.schedule, result.changes);
+            void queueBackendCalendarContexts([char.id]).catch(error => {
+                console.warn('[CalendarSync] 角色修改日程后的后端同步排队失败', error);
+            });
+        } else if (!scheduleFailureNotified && (result.malformedCount > 0 || result.rejectedCount > 0)) {
+            scheduleFailureNotified = true;
+            addToast('日程修改没有匹配到未来时段，已安全跳过', 'info');
+        }
+        return result.cleanedText;
+    };
+
     // ─── Step 1: 初次粗洗 ───
     let aiContent = replayedTagPrefix ? `${replayedTagPrefix}${rawAiContent}` : rawAiContent;
     aiContent = normalizeAiContent(aiContent);
+    aiContent = await consumeScheduleChanges(aiContent);
     // 在任何 lead-in/二轮渲染之前先剥掉仿卡片文本，防止它被 chunkText 拆成灰色普通气泡。
     const mimickedXhsShares = extractMimickedXhsShares(aiContent);
     aiContent = mimickedXhsShares.cleanedContent;
@@ -1948,6 +1966,9 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('');
     }
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
+
+    // 二轮工具调用可能新生成日程标签；在统一动作解析前再消费一次。
+    aiContent = await consumeScheduleChanges(aiContent);
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
     // mcdInheritMeta 一起传下去：戳一戳 / 转账卡 / 音乐卡 / 新闻卡 / 日程系统提示 / 生活记录卡

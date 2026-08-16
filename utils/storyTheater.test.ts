@@ -480,6 +480,16 @@ describe('剧场输出展示解析', () => {
         expect(blocks[3].text).toContain('推进：追随潮声');
     });
 
+    it('把预设常用 thinking/thought 标签及流式未闭合内容放进可折叠思维链', () => {
+        const closed = parseStoryDisplayBlocks('<thinking>Phase: 先检查人物动机。</thinking><story_text>潮声靠近。</story_text>');
+        expect(closed.map(block => block.kind)).toEqual(['think', 'story']);
+        expect(closed[0].text).toContain('Phase: 先检查人物动机。');
+
+        const streaming = parseStoryDisplayBlocks('开场。<thinking>正在整理预设约束');
+        expect(streaming.map(block => block.kind)).toEqual(['story', 'think']);
+        expect(streaming[1]).toMatchObject({ title: '思维链', text: '正在整理预设约束' });
+    });
+
     it('隐藏协议标签并拆成可读区块', () => {
         const blocks = parseStoryDisplayBlocks([
             '<scene_header><time>深夜</time><place>客厅</place></scene_header>',

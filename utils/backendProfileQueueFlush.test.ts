@@ -6,7 +6,9 @@ import {
     type BackendChatConfig,
 } from './backendClient';
 import { DB } from './db';
+import { calendarDateKey } from './sharedCalendarContext';
 import {
+    enqueueBackendCalendarContextChanges,
     enqueueBackendCharacterProfileChange,
     getBackendMemoryChanges,
 } from './backendSyncQueue';
@@ -57,6 +59,31 @@ describe('backend character profile queue flush', () => {
 
         expect(requestBody.character.description).toBe('最新人设');
         expect(requestBody.user.name).toBe('最新用户');
+        expect(await getBackendMemoryChanges(latestCharacter.id)).toEqual([]);
+    });
+
+    it('calendar-only marker syncs current user schedule and only this character anniversaries', async () => {
+        const latestCharacter = character('人设', 200);
+        await DB.saveCharacter(latestCharacter);
+        await DB.saveUserProfile(user('用户', 200));
+        await DB.saveTask({
+            id: 'task-1', title: '复诊', supervisorId: latestCharacter.id, tone: 'gentle', isCompleted: false,
+            createdAt: 1, scheduleDate: calendarDateKey(new Date()), startTime: '10:00',
+        });
+        await DB.saveAnniversary({ id: 'a', title: '我们的纪念日', date: '2030-01-01', charId: latestCharacter.id });
+        await DB.saveAnniversary({ id: 'b', title: '别人的纪念日', date: '2030-01-01', charId: 'char-2' });
+        await enqueueBackendCalendarContextChanges([latestCharacter.id]);
+        let requestBody: any;
+        vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+            requestBody = JSON.parse(String(init?.body));
+            return new Response(JSON.stringify({ data: {} }), { status: 200 });
+        }));
+
+        await flushBackendMemorySyncQueue({ config, character: latestCharacter, user: user('用户', 200) });
+
+        expect(requestBody.character.metadata.currentUserSchedule.entries[0].title).toBe('复诊');
+        expect(requestBody.character.metadata.relationshipAnniversaries.map((item: any) => item.title))
+            .toEqual(['我们的纪念日']);
         expect(await getBackendMemoryChanges(latestCharacter.id)).toEqual([]);
     });
 

@@ -58,4 +58,14 @@ describe('凌晨 0-5 点算前一夜的延续', () => {
         expect(getFlowNarrativeKey(13)).toBe('afternoon');
         expect(getFlowNarrativeKey(21)).toBe('evening');
     });
+
+    it('主聊天可以读取完整日程并获得唯一修改指令', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(14), {
+            includeFullDay: true,
+            includeChangeInstruction: true,
+        });
+        expect(out).toContain('你今天的完整日程：');
+        expect(out).toContain('- 07:00 晨跑');
+        expect(out).toContain('[[ACTION:CHANGE_SCHEDULE | 22:00 | 去超市]]');
+    });
 });

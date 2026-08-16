@@ -4,6 +4,7 @@ const STORE = 'backend_sync_queue';
 
 export type BackendMemoryEntityType =
     | 'character_profile'
+    | 'calendar_context'
     | 'chat_message'
     | 'backend_event'
     | 'memory_node'
@@ -33,6 +34,35 @@ function changeKey(charId: string, entityType: BackendMemoryEntityType, entityId
 export const backendCharacterProfileChangeKey = (charId: string): string => (
     changeKey(charId, 'character_profile', 'profile')
 );
+
+export const backendCalendarContextChangeKey = (charId: string): string => (
+    changeKey(charId, 'calendar_context', 'calendar')
+);
+
+export async function enqueueBackendCalendarContextChanges(charIds: string[]): Promise<void> {
+    const uniqueCharIds = [...new Set(charIds.filter(Boolean))];
+    if (uniqueCharIds.length === 0) return;
+    const db = await openDB();
+    if (!db.objectStoreNames.contains(STORE)) return;
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        const store = tx.objectStore(STORE);
+        const updatedAt = Date.now();
+        for (const charId of uniqueCharIds) {
+            store.put({
+                key: backendCalendarContextChangeKey(charId),
+                charId,
+                entityType: 'calendar_context',
+                entityId: 'calendar',
+                operation: 'upsert',
+                updatedAt,
+            } satisfies BackendMemoryChange);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
 
 export async function enqueueBackendCharacterProfileChanges(
     profiles: Array<{ charId: string; updatedAt: number }>,

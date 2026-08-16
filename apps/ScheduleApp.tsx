@@ -14,6 +14,8 @@ import {
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { getCharacterAnniversaries } from '../utils/scheduleRelationshipScope';
+import { getUserScheduleForDate } from '../utils/sharedCalendarContext';
+import { queueBackendCalendarContexts } from '../utils/backendProfileSync';
 import { Anniversary, DailySchedule, Task } from '../types';
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -83,6 +85,11 @@ const ScheduleApp: React.FC = () => {
     const [anniversaryDate, setAnniversaryDate] = useState(selectedDate);
 
     const selectedCharacter = characters.find(character => character.id === selectedCharId) || characters[0];
+    const queueCalendarSync = (charIds: string[]) => {
+        void queueBackendCalendarContexts(charIds).catch(error => {
+            console.warn('[CalendarSync] 后端日历同步排队失败', error);
+        });
+    };
 
     const loadData = async () => {
         const [storedTasks, storedAnniversaries, storedSchedules] = await Promise.all([
@@ -119,39 +126,21 @@ const ScheduleApp: React.FC = () => {
     const userEventsForDate = (dateKey: string): CalendarEvent[] => {
         const date = fromDateKey(dateKey);
         const dayIndex = date.getDay();
-        const stored = tasks.filter(task => {
-            if (task.isCompleted || task.excludedDates?.includes(dateKey)) return false;
-            if (task.repeatWeekly) return (task.repeatDays || []).includes(dayIndex);
-            const taskDate = task.scheduleDate || task.deadline?.slice(0, 10);
-            return taskDate === dateKey;
-        }).map(task => ({
-            id: task.id,
-            owner: 'user' as const,
-            title: task.title,
-            startTime: task.startTime || '09:00',
-            endTime: task.endTime,
-            location: task.location,
-            note: task.note,
-            repeat: task.repeatWeekly,
-            avatar: userProfile.avatar,
-            task,
-        }));
-
-        const legacy = (userProfile.weeklySchedule || [])
-            .filter(entry => entry.daysOfWeek.includes(dayIndex))
-            .map(entry => ({
-                id: `legacy-${entry.id}`,
+        return getUserScheduleForDate(userProfile, tasks, dateKey, dayIndex).map(entry => {
+            const task = tasks.find(candidate => candidate.id === entry.id);
+            return {
+                id: entry.id,
                 owner: 'user' as const,
                 title: entry.title,
                 startTime: entry.startTime,
                 endTime: entry.endTime,
                 location: entry.location,
                 note: entry.note,
-                repeat: true,
+                repeat: task?.repeatWeekly ?? entry.id.startsWith('legacy-'),
                 avatar: userProfile.avatar,
-            }));
-
-        return [...stored, ...legacy];
+                task,
+            };
+        });
     };
 
     const characterScheduleForDate = (dateKey: string) => dailySchedules.find(schedule => (
@@ -227,6 +216,7 @@ const ScheduleApp: React.FC = () => {
             note: note.trim() || undefined,
         };
         await DB.saveTask(task);
+        queueCalendarSync(characters.map(character => character.id));
         setTasks(current => [...current, task]);
         addToast(repeatWeekly ? '已加入每周日程' : '已加入今日日程', 'success');
         resetComposer();
@@ -244,6 +234,7 @@ const ScheduleApp: React.FC = () => {
             countMode: 'auto',
         };
         await DB.saveAnniversary(anniversary);
+        queueCalendarSync([anniversary.charId]);
         setAnniversaries(current => [...current, anniversary]);
         addToast('纪念日已经收好', 'success');
         resetComposer();
@@ -251,6 +242,7 @@ const ScheduleApp: React.FC = () => {
 
     const deleteAnniversary = async (anniversary: Anniversary) => {
         await DB.deleteAnniversary(anniversary.id);
+        queueCalendarSync([anniversary.charId]);
         setAnniversaries(current => current.filter(item => item.id !== anniversary.id));
         addToast('纪念日已删除', 'success');
     };
@@ -262,6 +254,7 @@ const ScheduleApp: React.FC = () => {
         const next = { ...schedule, slots: schedule.slots.filter((_, index) => index !== event.slotIndex) };
         if (next.slots.length === 0) await DB.deleteDailySchedule(schedule.charId, schedule.date);
         else await DB.saveDailySchedule(next);
+        queueCalendarSync([schedule.charId]);
         setDailySchedules(current => next.slots.length === 0 ? current.filter(item => item.id !== schedule.id) : current.map(item => item.id === schedule.id ? next : item));
         addToast('这段角色日程已删除', 'success');
     };
@@ -281,11 +274,13 @@ const ScheduleApp: React.FC = () => {
         if (event.task.repeatWeekly) {
             const next = { ...event.task, excludedDates: [...(event.task.excludedDates || []), selectedDate] };
             await DB.saveTask(next);
+            queueCalendarSync(characters.map(character => character.id));
             setTasks(current => current.map(task => task.id === next.id ? next : task));
             addToast('只取消了这一天，之后仍会每周重复', 'success');
             return;
         }
         await DB.deleteTask(event.task.id);
+        queueCalendarSync(characters.map(character => character.id));
         setTasks(current => current.filter(task => task.id !== event.task?.id));
     };
 

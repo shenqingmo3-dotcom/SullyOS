@@ -40,6 +40,7 @@ import MemoryRepairPortal from '../components/chat/MemoryRepairPortal';
 import ChatModals from '../components/chat/ChatModals';
 import Modal from '../components/os/Modal';
 import ThinkingChainSettingsModal from '../components/chat/ThinkingChainSettingsModal';
+import ScheduleChangeNotice from '../components/chat/ScheduleChangeNotice';
 import { useChatAI } from '../hooks/useChatAI';
 import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { collectVoiceBatchSubtitle, isPoisonedVoiceSubtitle } from '../utils/voiceSubtitle';
@@ -68,6 +69,8 @@ import {
     type ContextRangeMode,
 } from '../utils/chatContextRange';
 import { flushBackendMemorySyncQueue, getBackendXStatus, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
+import { SCHEDULE_CHANGE_EVENT, type ScheduleChangeEventDetail } from '../utils/scheduleChange';
+import { queueBackendCalendarContexts } from '../utils/backendProfileSync';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
 /** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
@@ -149,6 +152,8 @@ const Chat: React.FC = () => {
     // 切换角色时收掉装扮气泡：定制是 per-character 的，避免误改到下一个角色
     useEffect(() => { setFineTuneOpen(false); setFineTunePanelOpen(false); }, [activeCharacterId]);
     const [scheduleData, setScheduleData] = useState<DailySchedule | null>(null);
+    const [scheduleChangeNotice, setScheduleChangeNotice] = useState<ScheduleChangeEventDetail | null>(null);
+    const dismissScheduleChangeNotice = useCallback(() => setScheduleChangeNotice(null), []);
     // 小剧场（窥视演出）：正在播放的时段索引（null = 未打开），以及生成中标志
     const [theaterSlotIdx, setTheaterSlotIdx] = useState<number | null>(null);
     const [isTheaterGenerating, setIsTheaterGenerating] = useState(false);
@@ -936,6 +941,19 @@ const Chat: React.FC = () => {
             if (clearTimer) clearTimeout(clearTimer);
         };
     }, []);
+
+    useEffect(() => {
+        const onScheduleChange = (event: Event) => {
+            const detail = (event as CustomEvent<ScheduleChangeEventDetail>).detail;
+            if (!detail || detail.charId !== activeCharIdRef.current) return;
+            setScheduleData(detail.schedule);
+            setScheduleChangeNotice(detail);
+        };
+        window.addEventListener(SCHEDULE_CHANGE_EVENT, onScheduleChange);
+        return () => window.removeEventListener(SCHEDULE_CHANGE_EVENT, onScheduleChange);
+    }, []);
+
+    useEffect(() => setScheduleChangeNotice(null), [activeCharacterId]);
 
     // Auto-generate daily schedule (fire-and-forget on chat load)
     // 总开关关闭时完全跳过：不查询 DB、不调用副 API、不跑兜底
@@ -1803,6 +1821,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        void queueBackendCalendarContexts([updated.charId]).catch(error => console.warn('[CalendarSync] 排队失败', error));
         syncScheduleSnapshot(char);
         markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
@@ -1813,6 +1832,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        void queueBackendCalendarContexts([updated.charId]).catch(error => console.warn('[CalendarSync] 排队失败', error));
         syncScheduleSnapshot(char);
         markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
@@ -3033,6 +3053,13 @@ const Chat: React.FC = () => {
                  守护样式统一放在气泡主题 customCss 之后（见下），保证对所有用户 CSS 都能兜底。 */}
              {osTheme.chatChromeCustomCss && <style>{osTheme.chatChromeCustomCss}</style>}
              {char.chromeCustomCss && <style>{char.chromeCustomCss}</style>}
+             {scheduleChangeNotice && (
+               <ScheduleChangeNotice
+                 key={scheduleChangeNotice.eventId}
+                 detail={scheduleChangeNotice}
+                 onDone={dismissScheduleChangeNotice}
+               />
+             )}
              {/* 角色「登场」过场：切换/进入时以 ta 的头像氛围铺底登场，再推进穿过进入聊天。key 切换即重放。 */}
              {showEntry && char && (
                <CharacterEntryTransition
