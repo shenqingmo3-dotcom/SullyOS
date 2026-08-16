@@ -3689,6 +3689,54 @@ export interface CoCModuleCheck {
     clueIds: string[];
 }
 
+export type CoCPlayMode = 'solo' | 'pc_kpc' | 'duo_pc' | 'party';
+export type CoCStoryTone = 'pink' | 'tea';
+export type CoCRequirementTarget = 'pc' | 'kpc' | 'both';
+export type CoCRequirementLevel = 'required' | 'recommended';
+
+export interface CoCCharacterRequirement {
+    id: string;
+    target: CoCRequirementTarget;
+    level: CoCRequirementLevel;
+    kind: string;
+    value: string | number | boolean | string[] | number[];
+    sourceLabel: string;
+    manual?: boolean;
+}
+
+export interface CoCModuleNode {
+    id: string;
+    name: string;
+    summary: string;
+    entrances: string[];
+    clueIds: string[];
+    revelationIds: string[];
+    nextNodeIds: string[];
+}
+
+export interface CoCModuleRevelation {
+    id: string;
+    statement: string;
+    required: boolean;
+    clueIds: string[];
+    nodeIds: string[];
+}
+
+export interface CoCModuleThreat {
+    id: string;
+    name: string;
+    trigger: string;
+    stages: string[];
+    nodeIds: string[];
+}
+
+export interface CoCModuleProgress {
+    currentNodeId?: string;
+    establishedRevelationIds: string[];
+    threatSteps: Record<string, number>;
+    stalledInvestigationTurns: number;
+}
+
 export interface CoCModuleAnalysis {
     title: string;
     keeperSummary: string;
@@ -3699,6 +3747,16 @@ export interface CoCModuleAnalysis {
     npcs: Array<{ name: string; role: string; motive: string; secret: string }>;
     endings: string[];
     safetyNotes: string[];
+    recommendedPlayMode?: CoCPlayMode;
+    recommendedStoryTones: CoCStoryTone[];
+    characterRequirements: CoCCharacterRequirement[];
+    nodes: CoCModuleNode[];
+    revelations: CoCModuleRevelation[];
+    threats: CoCModuleThreat[];
+    improvBoundaries: {
+        fixedFacts: string[];
+        flexibleDetails: string[];
+    };
 }
 
 export interface CoCModuleSource {
@@ -3707,6 +3765,7 @@ export interface CoCModuleSource {
     text: string;
     analysis?: CoCModuleAnalysis;
     analyzedAt?: number;
+    truncated?: boolean;
 }
 
 export interface CoCAftertalkMessage {
@@ -3744,6 +3803,8 @@ export interface GameSession {
     theme: GameTheme;
     worldSetting: string;
     playerCharIds: string[];
+    playMode?: CoCPlayMode;
+    storyTones?: CoCStoryTone[];
     logs: GameLog[];
     status: {
         location: string;
@@ -3762,6 +3823,7 @@ export interface GameSession {
     moduleSource?: CoCModuleSource;
     currentCheckId?: string;
     discoveredClueIds?: string[];
+    moduleProgress?: CoCModuleProgress;
     aftertalk?: CoCAftertalkMessage[];
     pendingCheck?: CoCPendingCheck;
     suggestedActions?: GameActionOption[];

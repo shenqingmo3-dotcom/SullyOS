@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createBlankInvestigator, evaluateCoCRoll, rollPercentile } from './cocRules';
+import { applyModuleRequirementsToInvestigator, createBlankInvestigator, evaluateCoCFormula, evaluateCoCRoll, rollPercentile } from './cocRules';
+import { normalizeCoCModuleAnalysis } from './cocModule';
 
 describe('CoC percentile rules', () => {
     it('uses 7e regular, hard, extreme, critical and conditional fumble bands', () => {
@@ -31,5 +32,24 @@ describe('CoC percentile rules', () => {
     it('derives edition-specific HP and MP when creating investigator sheets', () => {
         expect(createBlankInvestigator('user', 'User', '7e')).toMatchObject({ age: 28, maxHp: 10, maxMp: 12 });
         expect(createBlankInvestigator('user', 'User', '6e')).toMatchObject({ maxHp: 10, maxMp: 12, san: 60 });
+    });
+
+    it('evaluates only the whitelisted local card formula language', () => {
+        const rolls = [0, 0.5];
+        expect(evaluateCoCFormula('2D6 + age / 2', { AGE: 8, age: 8 }, () => rolls.shift() ?? 0)).toBe(9);
+        expect(() => evaluateCoCFormula('Math.random()', {})).toThrow('无法识别公式');
+        expect(() => evaluateCoCFormula('UNKNOWN + 1', {})).toThrow('未知变量');
+    });
+
+    it('applies required module identity and formula constraints without touching real profiles', () => {
+        const analysis = normalizeCoCModuleAnalysis({
+            characterRequirements: [
+                { id: 'age', target: 'pc', level: 'required', kind: 'age_range', value: '6–9岁', sourceLabel: '车卡规则' },
+                { id: 'era', target: 'pc', level: 'required', kind: 'era', value: '现代日本', sourceLabel: '背景' },
+                { id: 'edu', target: 'pc', level: 'required', kind: 'attribute_formula', value: 'EDU=age', sourceLabel: '车卡规则' },
+            ],
+        }, '儿童模组');
+        const sheet = applyModuleRequirementsToInvestigator(createBlankInvestigator('user', '玩家', '7e'), '7e', analysis, 'pc');
+        expect(sheet).toMatchObject({ age: 6, era: '现代日本', characteristics: { EDU: 6 } });
     });
 });

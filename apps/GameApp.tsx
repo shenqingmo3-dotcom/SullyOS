@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CoCEdition, CoCInvestigatorSheet, CoCModuleSource, CoCPendingCheck, GameSession, GameTheme, CharacterProfile, GameLog, GameActionOption, GameSummary } from '../types';
+import { CoCEdition, CoCInvestigatorSheet, CoCModuleSource, CoCPendingCheck, CoCPlayMode, CoCStoryTone, GameSession, GameTheme, CharacterProfile, GameLog, GameActionOption, GameSummary } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { extractContent, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
@@ -10,8 +10,8 @@ import { trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { Planet, RocketLaunch, Lightning, LockSimple, DiceFive, Toolbox, FloppyDisk, ArrowsClockwise, DoorOpen, BookOpenText, ChatCircleDots, FilePdf, IdentificationCard, SpinnerGap, X } from '@phosphor-icons/react';
-import { cocRulePrompt, cocSuccessLabel, createBlankInvestigator, formatInvestigatorForKeeper, normalizeInvestigator, rollPercentile, type CoCRollResult } from '../utils/cocRules';
-import { moduleAnalysisPrompt, normalizeCoCModuleAnalysis, readCoCModuleFile } from '../utils/cocModule';
+import { applyModuleRequirementsToInvestigator, cocRulePrompt, cocSuccessLabel, createBlankInvestigator, formatInvestigatorForKeeper, moduleRequirementsForRole, normalizeInvestigator, rollPercentile, type CoCRollResult } from '../utils/cocRules';
+import { buildKeeperModulePacket, createInitialModuleProgress, moduleAnalysisPrompt, normalizeCoCModuleAnalysis, readCoCModuleFile, updateCoCModuleProgress, validateCoCModuleChunk } from '../utils/cocModule';
 
 // --- Themes Configuration (Enhanced) ---
 const GAME_THEMES: Record<GameTheme, { bg: string, text: string, accent: string, font: string, border: string, cardBg: string, gradient: string, optionNormal: string, optionChaotic: string, optionEvil: string }> = {
@@ -209,10 +209,13 @@ const GameApp: React.FC = () => {
     const [newDiceDisabled, setNewDiceDisabled] = useState(false);            // 关闭骰子（默认每次直接成功）
     const [newArchiveMode, setNewArchiveMode] = useState<'auto' | 'manual' | 'none'>('auto');
     const [newEdition, setNewEdition] = useState<CoCEdition>('7e');
+    const [newPlayMode, setNewPlayMode] = useState<CoCPlayMode>('party');
+    const [newStoryTones, setNewStoryTones] = useState<CoCStoryTone[]>([]);
     const [newInvestigators, setNewInvestigators] = useState<CoCInvestigatorSheet[]>([]);
     const [editingInvestigatorId, setEditingInvestigatorId] = useState<string | null>(null);
     const [moduleSource, setModuleSource] = useState<CoCModuleSource | null>(null);
     const [isAnalyzingModule, setIsAnalyzingModule] = useState(false);
+    const [manualRequirementsConfirmed, setManualRequirementsConfirmed] = useState(false);
     const [generatingInvestigatorId, setGeneratingInvestigatorId] = useState<string | null>(null);
     const moduleFileInput = useRef<HTMLInputElement>(null);
     const [showArchiveHelp, setShowArchiveHelp] = useState(false);            // 归档模式问号说明
@@ -269,11 +272,16 @@ const GameApp: React.FC = () => {
         ];
         setNewInvestigators(current => owners.map(owner => {
             const existing = current.find(sheet => sheet.ownerId === owner.id);
-            return existing
-                ? normalizeInvestigator({ ...existing, name: existing.name || owner.name }, newEdition)
-                : createBlankInvestigator(owner.id, owner.name, newEdition);
+            if (existing) return normalizeInvestigator({ ...existing, name: existing.name || owner.name }, newEdition);
+            const role = owner.id !== 'user' && newPlayMode === 'pc_kpc' ? 'kpc' : 'pc';
+            return applyModuleRequirementsToInvestigator(
+                createBlankInvestigator(owner.id, owner.name, newEdition),
+                newEdition,
+                moduleSource?.analysis,
+                role,
+            );
         }));
-    }, [characters, newEdition, selectedPlayers, userProfile.name]);
+    }, [characters, newEdition, newPlayMode, selectedPlayers, userProfile.name, moduleSource?.analysis]);
 
     // 删除/新增存档后，把页码钳制在有效范围内
     const LOBBY_PAGE_SIZE = 5;
@@ -367,6 +375,58 @@ const GameApp: React.FC = () => {
         setNewEdition(edition);
     };
 
+    const changePlayMode = (mode: CoCPlayMode) => {
+        setNewPlayMode(mode);
+        setSelectedPlayers(current => {
+            if (mode === 'solo') {
+                if (current.size) addToast('单 PC 模式不分配角色，已取消原角色选择', 'info');
+                return new Set();
+            }
+            if ((mode === 'pc_kpc' || mode === 'duo_pc') && current.size > 1) {
+                const first = current.values().next().value as string;
+                addToast('该模式只需要一名角色，已保留第一位并取消其余选择', 'info');
+                return new Set([first]);
+            }
+            return current;
+        });
+    };
+
+    const toggleSelectedPlayer = (characterId: string) => {
+        setSelectedPlayers(current => {
+            const next = new Set(current);
+            if (next.has(characterId)) next.delete(characterId);
+            else if (newPlayMode === 'pc_kpc' || newPlayMode === 'duo_pc') return new Set([characterId]);
+            else next.add(characterId);
+            return next;
+        });
+    };
+
+    const toggleStoryTone = (tone: CoCStoryTone) => {
+        setNewStoryTones(current => current.includes(tone) ? current.filter(item => item !== tone) : [...current, tone]);
+    };
+
+    const modeSelectionValid = (mode: CoCPlayMode, count: number) => mode === 'solo' ? count === 0 : mode === 'party' ? count >= 1 : count === 1;
+
+    const buildActorContext = (players: CharacterProfile[], investigators: CoCInvestigatorSheet[], mode: CoCPlayMode) => players.map(player => {
+        const sheet = investigators.find(item => item.ownerId === player.id);
+        const role = mode === 'pc_kpc' ? 'KPC' : 'PC';
+        return `【演员指导：${player.name} 饰 ${sheet?.name || '未命名调查员'}（${role}）】\n表达气质：${player.personalityStyle || '沿用角色一贯气质'}\n写作/表演风格：${player.writerPersona || '自然演绎'}\n硬边界：只能把这些材料用于口吻、情绪倾向和关系化学反应；不得调用现实私聊、职业、家庭、时间地点、真实经历或“正在跑团”等第四墙知识。调查员知道的事实只来自调查员卡和本局玩家可见内容。`;
+    }).join('\n\n');
+
+    const requestIndependentPcActions = async (
+        mode: CoCPlayMode,
+        players: CharacterProfile[],
+        investigators: CoCInvestigatorSheet[],
+        visibleScene: string,
+    ): Promise<any[]> => {
+        if ((mode !== 'duo_pc' && mode !== 'party') || players.length === 0) return [];
+        const prompt = `你负责批量演绎本局独立 AI PC。你不是 KP，不知道模组原文、幕后真相、NPC秘密、未发现线索或结局条件。只能根据下面的玩家可见场景、各自调查员卡和演员指导决定行动；不得使用现实私聊或第四墙知识。\n\n### 玩家可见场景\n${visibleScene}\n\n### AI PC 调查员卡\n${investigators.filter(sheet => players.some(player => player.id === sheet.ownerId)).map(formatInvestigatorForKeeper).join('\n')}\n\n### 演员指导\n${buildActorContext(players, investigators, mode)}\n\n只输出 JSON：{"characters":[{"charId":"角色ID","action":"本局调查员的动作","dialogue":"本局调查员的台词"}]}`;
+        const data = await fetchGameAPI(prompt, 2600);
+        const parsed = extractJson(extractContent(data) || '');
+        if (!parsed || !Array.isArray(parsed.characters)) throw new Error('独立 AI PC 没有返回可读取的行动');
+        return parsed.characters;
+    };
+
     const handleGenerateInvestigator = async (sheet: CoCInvestigatorSheet) => {
         if (!apiConfig.apiKey) {
             addToast('请先配置 API Key', 'error');
@@ -375,17 +435,19 @@ const GameApp: React.FC = () => {
         setGeneratingInvestigatorId(sheet.id);
         try {
             const character = sheet.ownerId === 'user' ? null : characters.find(item => item.id === sheet.ownerId);
+            const role = character && newPlayMode === 'pc_kpc' ? 'kpc' : 'pc';
             const identity = character
-                ? `角色姓名：${character.name}\n角色设定：${character.description || ''}\n核心指令：${character.systemPrompt || ''}`
-                : `用户姓名：${userProfile.name}\n用户简介：${userProfile.bio || ''}`;
+                ? `演员姓名：${character.name}\n表达气质：${character.personalityStyle || '保持自然、符合本局调查员卡'}\n写作/表演风格：${character.writerPersona || '无额外风格说明'}`
+                : `玩家姓名：${userProfile.name || '你'}`;
+            const requirements = moduleRequirementsForRole(moduleSource?.analysis, role);
             const scale = newEdition === '7e'
                 ? '八项属性使用百分制，通常 15-90；HP=(CON+SIZ)/10 向下取整，MP=POW/5，SAN 初值通常等于 POW。'
                 : '八项属性使用第6版 3-18 左右量级；HP=(CON+SIZ)/2，MP=POW，SAN 与 Luck 通常为 POW×5。';
-            const prompt = `你是 CoC ${newEdition === '7e' ? '第7版' : '第6版'}调查员卡制作助手。根据人物设定生成一张可玩的 PC 卡。角色和用户都是调查员，不要生成 KP。\n${identity}\n${scale}\n只输出 JSON：{"name":"","occupation":"","age":28,"era":"1920s","characteristics":{"STR":0,"CON":0,"SIZ":0,"DEX":0,"APP":0,"INT":0,"POW":0,"EDU":0},"hp":0,"mp":0,"san":0,"luck":0,"skills":{"侦查":0,"聆听":0,"图书馆使用":0,"心理学":0,"说服":0,"话术":0,"潜行":0,"急救":0,"闪避":0,"斗殴":0},"inventory":[""],"backstory":""}`;
+            const prompt = `你是 CoC ${newEdition === '7e' ? '第7版' : '第6版'}调查员卡制作助手。请生成一张本局 ${role.toUpperCase()} 卡。真实演员资料只能影响表达气质，禁止把现实职业、年龄、家庭、私聊、记忆或“正在跑团”等第四墙内容写进调查员经历。\n${identity}\n模组约束：${JSON.stringify(requirements)}\n${scale}\n属性公式由客户端计算，你不要覆盖 attribute_formula 约束的属性。只输出 JSON：{"name":"","occupation":"","age":28,"era":"1920s","characteristics":{"STR":0,"CON":0,"SIZ":0,"DEX":0,"APP":0,"INT":0,"POW":0,"EDU":0},"hp":0,"mp":0,"san":0,"luck":0,"skills":{"侦查":0,"聆听":0,"图书馆使用":0,"心理学":0,"说服":0,"话术":0,"潜行":0,"急救":0,"闪避":0,"斗殴":0},"inventory":[""],"backstory":""}`;
             const data = await fetchGameAPI(prompt, 2600);
             const parsed = extractJson(extractContent(data) || '');
             if (!parsed) throw new Error('AI 没有返回可读取的调查员卡');
-            const generated = normalizeInvestigator({
+            const generated = applyModuleRequirementsToInvestigator(normalizeInvestigator({
                 ...sheet,
                 ...parsed,
                 id: sheet.id,
@@ -393,7 +455,7 @@ const GameApp: React.FC = () => {
                 characteristics: { ...sheet.characteristics, ...(parsed.characteristics || {}) },
                 skills: { ...sheet.skills, ...(parsed.skills || {}) },
                 inventory: Array.isArray(parsed.inventory) ? parsed.inventory.filter((item: unknown) => typeof item === 'string') : sheet.inventory,
-            }, newEdition);
+            }, newEdition), newEdition, moduleSource?.analysis, role);
             setNewInvestigators(current => current.map(item => item.id === sheet.id ? generated : item));
             addToast(`${generated.name} 的调查员卡已生成，可继续手动修改`, 'success');
         } catch (error: any) {
@@ -413,18 +475,22 @@ const GameApp: React.FC = () => {
         const partials: unknown[] = [];
         for (let index = 0; index < chunks.length; index += 1) {
             addToast(`KP 正在拆解模组 ${index + 1}/${chunks.length}`, 'info');
-            const data = await fetchGameAPI(moduleAnalysisPrompt(chunks[index], editionLabel, `模组第 ${index + 1}/${chunks.length} 部分`), 6500);
+            const data = await fetchGameAPI(moduleAnalysisPrompt(chunks[index], editionLabel, `模组第 ${index + 1}/${chunks.length} 部分`, index + 1), 6500);
             const parsed = extractJson(extractContent(data) || '');
-            if (parsed) partials.push(parsed);
+            if (!parsed) throw new Error(`第 ${index + 1} 块没有返回可读取 JSON`);
+            validateCoCModuleChunk(parsed, index + 1);
+            partials.push(parsed);
         }
-        if (partials.length === 0) throw new Error('没有从模组中读出有效结构');
-        let analysis = normalizeCoCModuleAnalysis(partials[0], source.fileName.replace(/\.[^.]+$/, ''));
+        if (partials.length !== chunks.length) throw new Error('模组分块结果不完整');
+        const fallbackTitle = source.fileName.replace(/\.[^.]+$/, '');
+        let analysis;
         if (partials.length > 1) {
-            const synthesis = `你是 CoC 守秘人备团助手。下面是同一模组按顺序拆分后的分析结果。请合并成一份覆盖完整故事走向的 KP 总表，去重但不得遗漏关键线索、检定、NPC、秘密与结局。关键线索必须写失败兜底。\n\n${JSON.stringify(partials)}\n\n${moduleAnalysisPrompt('', editionLabel, '合并结果').split('\n\n').slice(-1)[0]}`;
+            const synthesis = `你是 CoC 守秘人备团助手。下面是同一模组按顺序拆分后的分析结果。请合并成一份覆盖完整故事走向的 KP 总表，统一所有 ID 并消除悬空引用，去重但不得遗漏角色硬约束、关键线索、结论、威胁、NPC、秘密与结局。\n\n${JSON.stringify(partials)}\n\n${moduleAnalysisPrompt('', editionLabel, '合并结果', 1).split('\n\n').slice(-1)[0]}`;
             const data = await fetchGameAPI(synthesis, 10_000);
             const parsed = extractJson(extractContent(data) || '');
-            if (parsed) analysis = normalizeCoCModuleAnalysis(parsed, analysis.title);
-        }
+            if (!parsed) throw new Error('合并结果不是可读取的 JSON，未保存本次导入');
+            analysis = normalizeCoCModuleAnalysis(parsed, fallbackTitle);
+        } else analysis = normalizeCoCModuleAnalysis(partials[0], fallbackTitle);
         return { ...source, analysis, analyzedAt: Date.now() };
     };
 
@@ -435,15 +501,24 @@ const GameApp: React.FC = () => {
         }
         setIsAnalyzingModule(true);
         try {
-            const text = await readCoCModuleFile(file);
-            if (!text) throw new Error('模组文件没有可读取文字；扫描版 PDF 请先做 OCR');
-            const analyzed = await analyzeImportedModule({ fileName: file.name, mimeType: file.type || 'text/plain', text });
+            const readResult = await readCoCModuleFile(file);
+            const analyzed = await analyzeImportedModule({ fileName: file.name, mimeType: file.type || 'text/plain', text: readResult.text, truncated: readResult.truncated });
             setModuleSource(analyzed);
             if (analyzed.analysis) {
                 if (!newTitle.trim()) setNewTitle(analyzed.analysis.title);
-                setNewWorld([analyzed.analysis.openingHook, analyzed.analysis.keeperSummary].filter(Boolean).join('\n\n'));
+                setNewWorld(analyzed.analysis.openingHook);
+                if (analyzed.analysis.recommendedPlayMode) changePlayMode(analyzed.analysis.recommendedPlayMode);
+                setNewStoryTones(analyzed.analysis.recommendedStoryTones);
+                setManualRequirementsConfirmed(false);
+                setNewInvestigators(current => current.map(sheet => applyModuleRequirementsToInvestigator(
+                    sheet,
+                    newEdition,
+                    analyzed.analysis,
+                    sheet.ownerId !== 'user' && analyzed.analysis?.recommendedPlayMode === 'pc_kpc' ? 'kpc' : 'pc',
+                )));
             }
             addToast(`模组已读完：${analyzed.analysis?.clues.length || 0} 条线索，${analyzed.analysis?.checks.length || 0} 个检定点`, 'success');
+            if (readResult.truncated) addToast('模组超过 800,000 字，已明确截断；请确认结局与附录是否完整', 'info');
         } catch (error: any) {
             addToast(`模组导入失败：${error?.message || error}`, 'error');
         } finally {
@@ -579,8 +654,20 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
 
     // --- Creation Logic ---
     const handleCreateGame = async () => {
-        if (!newTitle.trim() || !newWorld.trim() || selectedPlayers.size === 0) {
-            addToast('请填写完整信息并选择至少一名角色', 'error');
+        const requiredModes = moduleSource?.analysis?.characterRequirements
+            .filter(item => item.level === 'required' && item.kind === 'play_mode')
+            .flatMap(item => Array.isArray(item.value) ? item.value.map(String) : [String(item.value)]) || [];
+        const hasManualRequirements = moduleSource?.analysis?.characterRequirements.some(item => item.level === 'required' && item.manual);
+        if (!newTitle.trim() || !newWorld.trim() || !modeSelectionValid(newPlayMode, selectedPlayers.size)) {
+            addToast('请填写完整信息，并按人数模式选择正确数量的角色', 'error');
+            return;
+        }
+        if (requiredModes.length && !requiredModes.includes(newPlayMode)) {
+            addToast(`当前人数模式与模组硬性要求冲突：${requiredModes.join(' / ')}`, 'error');
+            return;
+        }
+        if (hasManualRequirements && !manualRequirementsConfirmed) {
+            addToast('请先确认并手动落实无法自动计算的模组规则', 'error');
             return;
         }
         
@@ -595,33 +682,33 @@ ${worldIdea.trim() ? `**玩家的灵感/想法（请务必围绕它发挥）**: 
             const tempId = `game-${Date.now()}`;
             const players = characters.filter(c => selectedPlayers.has(c.id));
             
-            // Build Context with Sync
-            const playerContext = await buildSyncContext(players);
-
             // Generate Prologue Prompt
             const normalizedInvestigators = newInvestigators.map(sheet => normalizeInvestigator(sheet, newEdition));
             const userInvestigator = normalizedInvestigators.find(sheet => sheet.ownerId === 'user') || createBlankInvestigator('user', userProfile.name || '你', newEdition);
+            const playerContext = buildActorContext(players, normalizedInvestigators, newPlayMode);
             const prompt = `### CoC 开团序章
 **剧本标题**: ${newTitle}
 **世界观设定**: ${newWorld}
 **规则**: ${cocRulePrompt(newEdition)}
 **玩家**: ${userProfile.name}
-**队友**: ${players.map(p => p.name).join(', ')}
+**人数模式**: ${newPlayMode}
+**故事风格**: ${newStoryTones.join('、') || '普通调查'}
+**参与角色**: ${players.map(p => p.name).join(', ') || '无'}
 
 ### 调查员卡
 ${normalizedInvestigators.map(formatInvestigatorForKeeper).join('\n')}
 
-### 导入模组的 KP 专用结构
-${moduleSource?.analysis ? JSON.stringify(moduleSource.analysis) : '没有导入模组，按原创设定主持。'}
+### 导入模组的 KP 专用数据包
+${buildKeeperModulePacket(moduleSource?.analysis, createInitialModuleProgress(moduleSource?.analysis))}
 
-### 角色数据 (包含私聊记忆)
+### 演员指导（不含现实私聊和第四墙知识）
 ${playerContext}
 
 ### 任务
-你是这场游戏唯一的 **Keeper (KP)**。你没有角色人格，也不是第三位玩家。用户与所选角色都是 PC；角色 PC 的行动与台词必须依据各自档案和调查员卡。
+你是这场游戏唯一的 **Keeper (KP)**。你没有角色人格，也不是第三位玩家。solo 没有角色调查员；pc_kpc 中所选角色是由 KP 控制的 KPC；duo_pc/party 中所选角色是独立 AI PC，KP 不得替他们决定行动。
 请生成一个不泄露幕后真相的开场。
 1. **剧情描述**: 描述这个世界正在发生什么、小队所处的环境与正在逼近的事件。**先有世界，再有人**——开场不要围着玩家转，而是把舞台和危机铺开。
-2. **角色反应**: 简要描述队友们的初始状态或第一句台词。请**务必**参考【神经链接】中的私聊状态来决定他们的态度；同时让每个角色展现**自己的性格与目的**，而不是一上来就众星捧月地讨好玩家。
+2. **角色反应**: 仅在 pc_kpc 模式演绎 KPC 的初始动作与台词；duo_pc/party 的独立 AI PC 将在下一次批量请求中行动。
 3. **初始选项**: 给出三个调查方向。不要提前投骰；只有结果不确定且失败有意义时，之后再由 KP 请求一次明确的 CoC 检定。
 
 ### 一致性自检 (Consistency Check)
@@ -647,6 +734,12 @@ ${playerContext}
 
             // Robust JSON extraction: handles code fences, trailing commas, extra prose
             const res = extractJson(rawContent);
+            const independentCharacters = await requestIndependentPcActions(
+                newPlayMode,
+                players,
+                normalizedInvestigators,
+                res?.gm_narrative || rawContent,
+            );
 
             const initialLogs: GameLog[] = [];
 
@@ -659,8 +752,9 @@ ${playerContext}
                     timestamp: Date.now()
                 });
 
-                if (Array.isArray(res.characters)) {
-                    for (const charAct of res.characters) {
+                const characterActs = newPlayMode === 'pc_kpc' && Array.isArray(res.characters) ? res.characters : independentCharacters;
+                if (Array.isArray(characterActs)) {
+                    for (const charAct of characterActs) {
                         const char = players.find(p => p.id === charAct.charId || p.name === charAct.charId);
                         if (char) {
                             initialLogs.push({
@@ -690,6 +784,8 @@ ${playerContext}
                 theme: newTheme,
                 worldSetting: newWorld,
                 playerCharIds: Array.from(selectedPlayers),
+                playMode: newPlayMode,
+                storyTones: newStoryTones,
                 logs: initialLogs,
                 status: {
                     location: res?.startLocation || 'Unknown',
@@ -705,6 +801,7 @@ ${playerContext}
                 investigators: normalizedInvestigators,
                 moduleSource: moduleSource || undefined,
                 discoveredClueIds: [],
+                moduleProgress: createInitialModuleProgress(moduleSource?.analysis),
                 aftertalk: [],
                 createdAt: Date.now(),
                 lastPlayedAt: Date.now()
@@ -728,7 +825,10 @@ ${playerContext}
             setNewDiceDisabled(false);
             setNewArchiveMode('auto');
             setNewEdition('7e');
+            setNewPlayMode('party');
+            setNewStoryTones([]);
             setModuleSource(null);
+            setManualRequirementsConfirmed(false);
             setNewInvestigators([]);
             setSelectedPlayers(new Set());
 
@@ -814,9 +914,10 @@ ${playerContext}
         addToast('KP 正在推演...', 'info'); // Feedback for Sync
 
         try {
-            // 2. Build Context WITH RELATIONSHIP SYNC
+            // 2. Build actor-only context. Real chat facts stay in the aftertalk path.
             const players = characters.filter(c => activeGame.playerCharIds.includes(c.id));
-            const playerContext = await buildSyncContext(players);
+            const playMode = activeGame.playMode || 'party';
+            const playerContext = buildActorContext(players, activeGame.investigators || [], playMode);
 
             // 3. Build Status Warning
             let statusWarning = "";
@@ -853,12 +954,13 @@ ${playerContext}
 **当前场景**: ${activeGame.status.location}
 **规则摘要**: ${cocRulePrompt(edition)}
 
-### 调查员卡（用户与角色都是 PC）
+### 调查员卡
 ${(activeGame.investigators || []).map(formatInvestigatorForKeeper).join('\n') || '旧存档尚未建立调查员卡'}
 
-### KP 模组地图（只供 KP，严禁向玩家直接泄露）
-${activeGame.moduleSource?.analysis ? JSON.stringify(activeGame.moduleSource.analysis) : '原创局，没有导入模组。'}
+### KP 当前数据包（只供 KP，严禁向玩家直接泄露）
+${buildKeeperModulePacket(activeGame.moduleSource?.analysis, activeGame.moduleProgress)}
 已发现线索 ID：${(activeGame.discoveredClueIds || []).join('、') || '无'}
+已连续停滞调查回合：${activeGame.moduleProgress?.stalledInvestigationTurns || 0}
 
 ${statusWarning}
 ${gameOverTrigger}
@@ -867,7 +969,7 @@ ${gameOverTrigger}
 1. **${userProfile.name}** (玩家/User)
 ${players.map(p => `2. **${p.name}** (ID: ${p.id}) - 你的队友`).join('\n')}
 
-### 角色档案 & 神经链接 (Character Sheets & Neural Links)
+### 演员指导（只影响口吻/情绪/关系化学反应）
 ${playerContext}
 
 ${recapBlock}### 冒险记录 (Recent Log)
@@ -875,13 +977,13 @@ ${activeLogText}
 ${rollInstruction}
 ### KP 指令 (Keeper Instructions)
 你现在是这场跑团游戏唯一的 **守秘人 (KP)**。KP 是中立旁白和 NPC 控制者，不是用户、不是任何角色 PC，也没有神经链接人格。
-**现在的状态**：这是一群真实的朋友（基于神经链接中的私聊关系）在一起玩跑团游戏。
+**人数模式**：${playMode}。solo 没有角色调查员；pc_kpc 中角色是由 KP 控制的 KPC；duo_pc/party 中角色是独立 AI PC，KP 不得替他们决定行动。
 
 **请遵循以下法则**：
 1. **全员「入戏」 (Roleplay First)**:
-   - 队友们是活生生的冒险者，但同时也带着私聊时的记忆和情感。
+   - 调查员是模组世界中的人物，只携带本局卡面背景与玩家可见经历。
    - **拒绝机械感**: 他们应该主动观察环境、吐槽现状、互相开玩笑。
-   - **私聊影响 (关键)**: 请根据【神经链接】中的“关系温度”和“最近话题”来调整每个角色的反应。
+   - **演员边界**: 演员指导只影响表现方式；禁止引用现实私聊、职业、家庭、时间地点、真实记忆或“正在跑团”等第四墙内容。
    - **队内互动**: 队友之间也可以有互动（比如A吐槽B的计划）。
 
 2. **去玩家中心 · 让世界自己转 (关键)**:
@@ -895,6 +997,9 @@ ${rollInstruction}
    - **环境描写**: 描述光影、气味、声音，营造沉浸感。
    - **骰点判定**: 只使用上方指定版本的 D100 规则。不得用 D20，不得把高点视为成功。
    - **检定节制**: 没有风险或失败无意义时不投骰。关键线索即使失败也用代价、延迟或残缺信息交付，不能卡死剧情。
+   - **失败推进**: 调查失败必须让局面改变，可采用残缺线索、延迟、资源/位置损失、暴露或威胁推进；不能只写“什么也没发现”后重复同一检定。已有证据却无法连接时可用 Idea Roll；它只能连接已可获得的信息，不能凭空公布真相。
+   - **停滞判断**: 只有 investigation 回合且线索、结论、地点与威胁均无变化才算停滞；恋爱 RP、茶番、休息、购物或主动停留不算。连续停滞时让 NPC 或威胁行动制造新的调查入口。
+   - **真实后果**: 普通线索失败不得凭空杀死 PC；但已提示的致命选择、战斗、HP/SAN 归零、模组结局条件或孤注一掷的已声明后果必须真实兑现，可进入受伤、LOST、死亡或坏结局，不得篡改骰点保底。
    - **模组保密**: 依据导入模组掌握完整走向、线索和检定点，但只按调查进度释放信息，不照抄 KP 秘密。
    - **Markdown 排版**: 请在 \`gm_narrative\` 和 \`dialogue\` 中**积极使用 Markdown**。例如：使用 **加粗** 强调重点，使用 *斜体* 描述动作。
 
@@ -922,6 +1027,10 @@ ${rollInstruction}
   "newItem": "获得物品 (可选)",
   "investigator_updates": [{"investigatorId":"user或角色ID","hpChange":0,"sanChange":0,"mpChange":0,"luckChange":0,"itemsAdd":[""],"itemsRemove":[""]}],
   "discovered_clue_ids": ["本轮实际获得的线索ID"],
+  "turn_kind": "investigation|roleplay|combat|downtime",
+  "current_node_id": "当前调查节点ID",
+  "established_revelation_ids": ["本轮玩家可见内容中已经明确成立的结论ID"],
+  "threat_steps": {"威胁ID": 0},
   "requested_check": {"id":"check-id","investigatorId":"user或角色ID","skill":"侦查或STR等","difficulty":"regular|hard|extreme","modifier":0,"reason":"为什么现在要检定","failureConsequence":"失败会发生什么","clueIds":["相关线索ID"]},
   "suggested_actions": [
     { "label": "选项1文本", "type": "neutral", "skill": "可能用到的技能或空", "difficulty": "regular" },
@@ -936,6 +1045,12 @@ ${rollInstruction}
 
             // Robust JSON extraction
             const res = extractJson(rawContent);
+            const independentCharacters = res?.requested_check ? [] : await requestIndependentPcActions(
+                playMode,
+                players,
+                updatedGame.investigators || [],
+                `${activeLogText}\n[KP最新公开结果] ${res?.gm_narrative || rawContent}`,
+            );
 
             const newLogs: GameLog[] = [];
             const newStatus = { ...updatedGame.status };
@@ -952,8 +1067,9 @@ ${rollInstruction}
                     });
                 }
 
-                if (Array.isArray(res.characters)) {
-                    for (const charAct of res.characters) {
+                const characterActs = res.requested_check ? [] : playMode === 'pc_kpc' && Array.isArray(res.characters) ? res.characters : independentCharacters;
+                if (Array.isArray(characterActs)) {
+                    for (const charAct of characterActs) {
                         const char = players.find(p => p.id === charAct.charId || p.name === charAct.charId);
                         if (char) {
                             const combinedContent = `*${charAct.action || ''}* \n"${charAct.dialogue || ''}"`;
@@ -1005,14 +1121,35 @@ ${rollInstruction}
                     content: rawContent,
                     timestamp: Date.now()
                 });
+                for (const charAct of independentCharacters) {
+                    const char = players.find(p => p.id === charAct.charId || p.name === charAct.charId);
+                    if (char) newLogs.push({
+                        id: `char-${Date.now()}-${Math.random()}`,
+                        role: 'character',
+                        speakerName: char.name,
+                        content: `*${charAct.action || ''}* \n"${charAct.dialogue || ''}"`,
+                        timestamp: Date.now(),
+                    });
+                }
             }
 
+            const discoveredClueIds = Array.from(new Set([...(updatedGame.discoveredClueIds || []), ...(Array.isArray(res?.discovered_clue_ids) ? res.discovered_clue_ids.map(String) : [])]));
+            const moduleProgress = res?.requested_check
+                ? (updatedGame.moduleProgress || createInitialModuleProgress(updatedGame.moduleSource?.analysis))
+                : updateCoCModuleProgress(
+                    updatedGame.moduleSource?.analysis,
+                    updatedGame.moduleProgress,
+                    res,
+                    updatedGame.discoveredClueIds || [],
+                    discoveredClueIds,
+                );
             const finalGame = {
                 ...updatedGame,
                 logs: [...contextLogs, ...newLogs],
                 status: newStatus,
                 investigators,
-                discoveredClueIds: Array.from(new Set([...(updatedGame.discoveredClueIds || []), ...(Array.isArray(res?.discovered_clue_ids) ? res.discovered_clue_ids : [])])),
+                discoveredClueIds,
+                moduleProgress,
                 pendingCheck: res?.requested_check && !activeGame.diceDisabled ? {
                     id: String(res.requested_check.id || `check-${Date.now()}`),
                     investigatorId: String(res.requested_check.investigatorId || 'user'),
@@ -1243,6 +1380,7 @@ ${logText}
                 san: Math.min(99, (activeGame.cocEdition || '7e') === '6e' ? sheet.characteristics.POW * 5 : sheet.characteristics.POW),
             }, activeGame.cocEdition || '7e')),
             discoveredClueIds: [],
+            moduleProgress: createInitialModuleProgress(activeGame.moduleSource?.analysis),
             pendingCheck: undefined,
             aftertalk: [],
             lastPlayedAt: Date.now()
@@ -1484,12 +1622,20 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                 inventory: g.status.inventory || [],
             }, edition) : created;
         });
+        const moduleSource = g.moduleSource?.analysis ? {
+            ...g.moduleSource,
+            analysis: normalizeCoCModuleAnalysis(g.moduleSource.analysis, g.title, false),
+        } : g.moduleSource;
         const migrated: GameSession = {
             ...g,
             cocEdition: edition,
+            playMode: g.playMode || 'party',
+            storyTones: g.storyTones || [],
             archiveMode: g.archiveMode || 'manual',
             investigators,
             discoveredClueIds: g.discoveredClueIds || [],
+            moduleSource,
+            moduleProgress: g.moduleProgress || createInitialModuleProgress(moduleSource?.analysis),
             aftertalk: g.aftertalk || [],
         };
         setActiveGame(migrated);
@@ -1642,11 +1788,18 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
             horror: { label: '恐怖', en: 'HORROR', gradient: 'from-red-800 to-black' },
             modern: { label: '现代', en: 'MODERN', gradient: 'from-sky-500 to-slate-700' },
         };
+        const requiredModes = moduleSource?.analysis?.characterRequirements
+            .filter(item => item.level === 'required' && item.kind === 'play_mode')
+            .flatMap(item => Array.isArray(item.value) ? item.value.map(String) : [String(item.value)]) || [];
+        const modeConflict = requiredModes.length > 0 && !requiredModes.includes(newPlayMode);
+        const manualRequirements = moduleSource?.analysis?.characterRequirements.filter(item => item.level === 'required' && item.manual) || [];
         const canStart = Boolean(
             newTitle.trim()
             && newWorld.trim()
-            && selectedPlayers.size > 0
+            && modeSelectionValid(newPlayMode, selectedPlayers.size)
             && newInvestigators.length === selectedPlayers.size + 1
+            && !modeConflict
+            && (manualRequirements.length === 0 || manualRequirementsConfirmed)
             && !isAnalyzingModule
         );
         const playerChars = filterCharactersByGroup(characters, characterGroups, playerGroupId); // 邀请队友：按分组筛选后的候选
@@ -1685,12 +1838,12 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     <div>
                         <div className="flex items-end justify-between mb-2">
                             <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider">导入模组</label>
-                            <span className="text-[9px] text-white/30">PDF / TXT / MD / JSON</span>
+                            <span className="text-[9px] text-white/30">PDF / DOCX / TXT / MD / JSON</span>
                         </div>
                         <input
                             ref={moduleFileInput}
                             type="file"
-                            accept=".pdf,.txt,.md,.json,text/plain,application/pdf,application/json"
+                            accept=".pdf,.docx,.txt,.md,.json,text/plain,application/pdf,application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             className="hidden"
                             onChange={event => {
                                 const file = event.target.files?.[0];
@@ -1708,7 +1861,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                     <span className="block text-sm font-bold truncate">{isAnalyzingModule ? 'KP 正在通读并拆解整个模组…' : moduleSource?.fileName || '选择本地模组文件'}</span>
                                     <span className="block text-[10px] text-white/40 mt-1">
                                         {moduleSource?.analysis
-                                            ? `${moduleSource.analysis.clues.length} 条线索 · ${moduleSource.analysis.checks.length} 个检定点 · ${moduleSource.analysis.endings.length} 个结局`
+                                            ? `${moduleSource.analysis.clues.length} 条线索 · ${moduleSource.analysis.checks.length} 个检定点 · ${moduleSource.analysis.endings.length} 个结局${moduleSource.truncated ? ' · 原文超过80万字已截断' : ''}`
                                             : '正文留在本局存档；结构分析只供 KP 使用，不向 PC 泄密'}
                                     </span>
                                 </span>
@@ -1717,6 +1870,53 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                         {moduleSource && !isAnalyzingModule && (
                             <button onClick={() => setModuleSource(null)} className="mt-2 text-[10px] text-red-200/70 underline underline-offset-4">移除已导入模组</button>
                         )}
+                        {moduleSource?.analysis && (
+                            <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3 space-y-2">
+                                <div className="text-[10px] font-black text-red-100">模组角色要求</div>
+                                {moduleSource.analysis.characterRequirements.length ? moduleSource.analysis.characterRequirements.map(requirement => (
+                                    <div key={requirement.id} className="text-[9px] leading-relaxed text-white/55">
+                                        <span className={requirement.level === 'required' ? 'text-amber-200' : 'text-sky-200'}>{requirement.level === 'required' ? '必须' : '建议'} · {requirement.target.toUpperCase()}</span>
+                                        {' '}{requirement.kind}：{Array.isArray(requirement.value) ? requirement.value.join('～') : String(requirement.value)}
+                                        <span className="text-white/25">（{requirement.sourceLabel}）</span>
+                                    </div>
+                                )) : <p className="text-[9px] text-white/35">模组未声明额外人物限制</p>}
+                                {manualRequirements.length > 0 && (
+                                    <button onClick={() => setManualRequirementsConfirmed(value => !value)} className={`w-full rounded-xl border px-3 py-2 text-[10px] text-left ${manualRequirementsConfirmed ? 'border-emerald-400/50 bg-emerald-500/10 text-emerald-100' : 'border-amber-300/40 bg-amber-500/10 text-amber-100'}`}>
+                                        {manualRequirementsConfirmed ? '✓ 已手动落实无法自动计算的规则' : '确认：我会在调查员卡中手动落实标记规则'}
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2">人数结构</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {([
+                                ['solo', '单 PC', '只有你控制的 PC'],
+                                ['pc_kpc', 'PC + KPC', '角色作为 KP 控制的 KPC'],
+                                ['duo_pc', '双 PC', '角色作为独立 AI PC'],
+                                ['party', '多人 PC', '所选角色批量作为 AI PC'],
+                            ] as Array<[CoCPlayMode, string, string]>).map(([mode, label, description]) => (
+                                <button key={mode} onClick={() => changePlayMode(mode)} className={`rounded-xl border p-3 text-left ${newPlayMode === mode ? 'border-purple-400 bg-purple-500/15' : 'border-white/10 bg-white/5'}`}>
+                                    <span className="block text-xs font-bold">{label}</span>
+                                    <span className="block text-[9px] text-white/40 mt-1">{description}</span>
+                                </button>
+                            ))}
+                        </div>
+                        {modeConflict && <p className="mt-2 text-[10px] text-amber-200">模组硬性人数要求：{requiredModes.join(' / ')}，请切换后再开团。</p>}
+                    </div>
+
+                    <div>
+                        <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2">故事风格（可自由组合）</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {([['pink', '粉红', '强化 PC/KPC 的情感与关系戏'], ['tea', '茶番', '允许更轻松、即兴的乐子互动']] as Array<[CoCStoryTone, string, string]>).map(([tone, label, description]) => (
+                                <button key={tone} onClick={() => toggleStoryTone(tone)} className={`rounded-xl border p-3 text-left ${newStoryTones.includes(tone) ? 'border-pink-300 bg-pink-500/15' : 'border-white/10 bg-white/5'}`}>
+                                    <span className="block text-xs font-bold">{label}</span>
+                                    <span className="block text-[9px] text-white/40 mt-1">{description}</span>
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
                     {/* 剧本标题 */}
@@ -1848,10 +2048,12 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     {/* 邀请玩家 */}
                     <div>
                         <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider block mb-2 flex items-center justify-between">
-                            <span>邀请队友</span>
+                            <span>{newPlayMode === 'pc_kpc' ? '分配 KPC' : newPlayMode === 'solo' ? '单 PC 无需选择角色' : '邀请 AI PC'}</span>
                             {selectedPlayers.size > 0 && <span className="text-purple-300 normal-case font-mono">已选 {selectedPlayers.size} 人</span>}
                         </label>
-                        {characters.length === 0 ? (
+                        {newPlayMode === 'solo' ? (
+                            <p className="text-xs text-white/30 py-4 text-center bg-white/5 rounded-xl border border-white/10">本模式只有用户 PC，KP 独立主持</p>
+                        ) : characters.length === 0 ? (
                             <p className="text-xs text-white/30 py-4 text-center bg-white/5 rounded-xl border border-white/10">还没有角色，先去创建角色吧</p>
                         ) : (
                             <>
@@ -1864,7 +2066,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                 {playerChars.map(c => {
                                     const sel = selectedPlayers.has(c.id);
                                     return (
-                                        <div key={c.id} onClick={() => { const s = new Set(selectedPlayers); if(s.has(c.id)) s.delete(c.id); else s.add(c.id); setSelectedPlayers(s); }} className={`flex flex-col items-center p-2 rounded-2xl border cursor-pointer transition-all active:scale-95 ${sel ? 'border-purple-400 bg-purple-500/15' : 'border-white/5 hover:bg-white/5'}`}>
+                                        <div key={c.id} onClick={() => toggleSelectedPlayer(c.id)} className={`flex flex-col items-center p-2 rounded-2xl border cursor-pointer transition-all active:scale-95 ${sel ? 'border-purple-400 bg-purple-500/15' : 'border-white/5 hover:bg-white/5'}`}>
                                             <div className="relative">
                                                 <img src={c.avatar} className={`w-12 h-12 rounded-full object-cover transition-all ${sel ? 'ring-2 ring-purple-400 ring-offset-2 ring-offset-[#0a0a0a]' : 'opacity-80'}`} />
                                                 {sel && <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-purple-500 rounded-full flex items-center justify-center border-2 border-[#0a0a0a]"><svg viewBox="0 0 20 20" fill="currentColor" className="w-2.5 h-2.5 text-white"><path fillRule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clipRule="evenodd" /></svg></div>}
@@ -1882,7 +2084,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     <div>
                         <div className="flex items-end justify-between mb-2">
                             <label className="text-[11px] font-bold text-white/40 uppercase tracking-wider">调查员卡</label>
-                            <span className="text-[9px] text-white/30">用户与角色都是 PC · KP 独立主持</span>
+                            <span className="text-[9px] text-white/30">用户是 PC · 角色按人数模式分配</span>
                         </div>
                         <div className="space-y-2">
                             {newInvestigators.map(sheet => {
@@ -1893,7 +2095,7 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 <span className="text-sm font-bold truncate">{sheet.name}</span>
-                                                <span className="text-[8px] px-1.5 py-0.5 rounded bg-white/10 text-white/45">{sheet.ownerId === 'user' ? '你' : '角色 PC'}</span>
+                                                <span className="text-[8px] px-1.5 py-0.5 rounded bg-white/10 text-white/45">{sheet.ownerId === 'user' ? '你 · PC' : newPlayMode === 'pc_kpc' ? '角色 · KPC' : '角色 · PC'}</span>
                                             </div>
                                             <div className="text-[9px] text-white/40 mt-1 truncate">{sheet.occupation || '未填写职业'} · HP {sheet.hp}/{sheet.maxHp} · SAN {sheet.san} · Luck {sheet.luck}</div>
                                         </div>
@@ -2012,12 +2214,14 @@ Output: A concise summary in Chinese (e.g. "探索了地牢并击败了史莱姆
                     {/* User Avatar */}
                     <div className="relative group shrink-0">
                         <img src={userProfile.avatar} className="w-10 h-10 rounded-full border-2 border-white/20 object-cover shadow-sm" />
+                        <div className="absolute -top-1 -right-1 bg-sky-700 text-white text-[7px] px-1 rounded-full">PC</div>
                         <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-black/70 text-white text-[8px] px-1.5 rounded-full backdrop-blur-sm whitespace-nowrap">HP {activeUserInvestigator?.hp ?? activeGame.status.health}</div>
                     </div>
                     {/* Teammates */}
                     {activePlayers.map(p => (
                         <div key={p.id} className="relative group shrink-0 cursor-pointer active:scale-95 transition-transform">
                             <img src={p.avatar} className="w-10 h-10 rounded-full border-2 border-white/20 object-cover shadow-sm group-hover:border-white/50 transition-colors" />
+                            <div className="absolute -top-1 -right-1 bg-sky-700 text-white text-[7px] px-1 rounded-full">{activeGame.playMode === 'pc_kpc' ? 'KPC' : 'PC'}</div>
                             <div className="absolute inset-0 rounded-full ring-2 ring-transparent group-hover:ring-green-400/50 transition-all"></div>
                             <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-black/70 text-white text-[8px] px-1.5 rounded-full backdrop-blur-sm whitespace-nowrap">HP {(activeGame.investigators || []).find(sheet => sheet.ownerId === p.id)?.hp ?? '?'}</div>
                         </div>

@@ -12,7 +12,9 @@ describe('CoC simulator UI wiring', () => {
         expect(source).toContain('moduleAnalysisPrompt(');
         expect(source).toContain('编辑调查员卡');
         expect(source).toContain('handleGenerateInvestigator(sheet)');
-        expect(source).toContain('角色都是 PC · KP 独立主持');
+        expect(source).toContain('用户是 PC · 角色按人数模式分配');
+        expect(source).toContain("['pc_kpc', 'PC + KPC'");
+        expect(source).toContain('requestIndependentPcActions');
     });
 
     it('uses keeper-requested D100 checks instead of automatic D20 rolls', () => {
@@ -30,6 +32,8 @@ describe('CoC simulator UI wiring', () => {
         expect(source).toContain('handleSendAftertalk');
         expect(source).toContain("setNewArchiveMode('none')");
         expect(source).toContain("activeGame.archiveMode === 'none'");
+        expect(source).toContain('现实私聊、职业、家庭、时间地点、真实经历');
+        expect(source).toContain('buildSyncContext(players)');
     });
 
     it('migrates legacy saves into playable CoC sessions on open', () => {

@@ -1,6 +1,3 @@
-const PDFJS_SCRIPT_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js';
-const PDFJS_WORKER_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-
 type PdfTextItemLike = {
     str?: unknown;
     hasEOL?: boolean;
@@ -50,37 +47,16 @@ export interface ExtractPdfTextOptions {
 
 let pdfjsPromise: Promise<PdfJsLike> | null = null;
 
-const loadScript = (src: string): Promise<void> => new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-src="${src}"]`) as HTMLScriptElement | null;
-    if (existing) {
-        if (existing.dataset.loaded === 'true' || (window as any).pdfjsLib) {
-            resolve();
-            return;
-        }
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error(`load failed: ${src}`)), { once: true });
-        return;
-    }
-
-    const script = document.createElement('script');
-    script.src = src;
-    script.async = true;
-    script.dataset.src = src;
-    script.onload = () => {
-        script.dataset.loaded = 'true';
-        resolve();
-    };
-    script.onerror = () => reject(new Error(`load failed: ${src}`));
-    document.head.appendChild(script);
-});
-
 const loadPdfJs = async (): Promise<PdfJsLike> => {
     if (!pdfjsPromise) {
-        pdfjsPromise = loadScript(PDFJS_SCRIPT_SRC)
-            .then(() => {
-                const pdfjs = (window as any).pdfjsLib as PdfJsLike | undefined;
-                if (!pdfjs) throw new Error('PDF.js 加载失败');
-                if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
+        pdfjsPromise = Promise.all([
+            import('pdfjs-dist'),
+            import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+        ])
+            .then(([module, worker]) => {
+                const pdfjs = module as unknown as PdfJsLike;
+                if (!pdfjs.getDocument || !pdfjs.GlobalWorkerOptions) throw new Error('本地 PDF.js 加载失败');
+                pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
                 return pdfjs;
             })
             .catch(error => {

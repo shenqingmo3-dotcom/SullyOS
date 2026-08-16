@@ -1,9 +1,12 @@
 import type {
+    CoCModuleAnalysis,
     CoCDifficulty,
     CoCEdition,
     CoCInvestigatorSheet,
     CoCSuccessLevel,
 } from '../types';
+
+export type CoCInvestigatorRole = 'pc' | 'kpc';
 
 export interface CoCRollResult {
     edition: CoCEdition;
@@ -132,6 +135,102 @@ export function createBlankInvestigator(ownerId: string, name: string, edition: 
         inventory: [],
         backstory: '',
     };
+}
+
+export function evaluateCoCFormula(
+    expression: string,
+    variables: Record<string, number>,
+    random: () => number = Math.random,
+): number {
+    const compact = expression.replace(/\s+/g, '');
+    const tokens = compact.match(/\d*[dD]\d+|\d+(?:\.\d+)?|[A-Za-z_]+|[()+\-*/]/g) || [];
+    if (!compact || tokens.join('').toLowerCase() !== compact.toLowerCase()) throw new Error(`无法识别公式：${expression}`);
+    let index = 0;
+    const valueOf = (token: string): number => {
+        if (/^\d+(?:\.\d+)?$/.test(token)) return Number(token);
+        const dice = token.match(/^(\d*)[dD](\d+)$/);
+        if (dice) {
+            const count = Number(dice[1] || 1);
+            const faces = Number(dice[2]);
+            if (count < 1 || count > 20 || faces < 2 || faces > 1000) throw new Error(`骰子公式超出范围：${token}`);
+            return Array.from({ length: count }, () => Math.floor(random() * faces) + 1).reduce((sum, value) => sum + value, 0);
+        }
+        const key = token.toUpperCase();
+        const value = variables[key] ?? variables[token];
+        if (!Number.isFinite(value)) throw new Error(`公式引用了未知变量：${token}`);
+        return value;
+    };
+    const primary = (): number => {
+        const token = tokens[index++];
+        if (token === '+' || token === '-') return (token === '-' ? -1 : 1) * primary();
+        if (token === '(') {
+            const result = addition();
+            if (tokens[index++] !== ')') throw new Error(`公式缺少右括号：${expression}`);
+            return result;
+        }
+        if (!token) throw new Error(`公式不完整：${expression}`);
+        return valueOf(token);
+    };
+    const multiplication = (): number => {
+        let result = primary();
+        while (tokens[index] === '*' || tokens[index] === '/') {
+            const operator = tokens[index++];
+            const right = primary();
+            if (operator === '/' && right === 0) throw new Error('公式不能除以零');
+            result = operator === '*' ? result * right : result / right;
+        }
+        return result;
+    };
+    const addition = (): number => {
+        let result = multiplication();
+        while (tokens[index] === '+' || tokens[index] === '-') {
+            const operator = tokens[index++];
+            const right = multiplication();
+            result = operator === '+' ? result + right : result - right;
+        }
+        return result;
+    };
+    const result = addition();
+    if (index !== tokens.length || !Number.isFinite(result)) throw new Error(`公式无法完整求值：${expression}`);
+    return Math.round(result);
+}
+
+export function moduleRequirementsForRole(analysis: CoCModuleAnalysis | undefined, role: CoCInvestigatorRole) {
+    return (analysis?.characterRequirements || []).filter(requirement => requirement.target === role || requirement.target === 'both');
+}
+
+export function applyModuleRequirementsToInvestigator(
+    sheet: CoCInvestigatorSheet,
+    edition: CoCEdition,
+    analysis: CoCModuleAnalysis | undefined,
+    role: CoCInvestigatorRole,
+    random: () => number = Math.random,
+): CoCInvestigatorSheet {
+    const requirements = moduleRequirementsForRole(analysis, role).filter(item => item.level === 'required' && !item.manual);
+    let next: CoCInvestigatorSheet = { ...sheet, characteristics: { ...sheet.characteristics } };
+    for (const requirement of requirements) {
+        if (requirement.kind === 'age_range') {
+            const ages = (Array.isArray(requirement.value)
+                ? requirement.value.map(Number)
+                : String(requirement.value).match(/\d+/g)?.map(Number) || [])
+                .filter(Number.isFinite);
+            if (ages.length) next.age = Math.min(...ages);
+        } else if (requirement.kind === 'era' && typeof requirement.value === 'string') {
+            next.era = requirement.value;
+        } else if (requirement.kind === 'occupation' && typeof requirement.value === 'string') {
+            next.occupation = requirement.value;
+        } else if ((requirement.kind === 'background' || requirement.kind === 'relationship') && typeof requirement.value === 'string') {
+            next.backstory = [next.backstory, requirement.value].filter(Boolean).join('；');
+        } else if (requirement.kind === 'attribute_formula' && typeof requirement.value === 'string') {
+            const match = requirement.value.match(/^([A-Za-z]+)\s*=\s*(.+)$/);
+            const key = match?.[1].toUpperCase() as keyof CoCInvestigatorSheet['characteristics'];
+            if (match && key in next.characteristics) {
+                const variables = { ...next.characteristics, AGE: next.age || 0, age: next.age || 0 };
+                next.characteristics[key] = evaluateCoCFormula(match[2], variables, random);
+            }
+        }
+    }
+    return normalizeInvestigator(next, edition);
 }
 
 export function normalizeInvestigator(sheet: CoCInvestigatorSheet, edition: CoCEdition): CoCInvestigatorSheet {
