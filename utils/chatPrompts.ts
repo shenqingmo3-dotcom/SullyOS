@@ -612,7 +612,12 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
 
         const strictModeBoundary = char.interactionMode === 'offline'
             ? buildOfflineSceneRules()
-            : `Internal chat state: follow the original SullyOS mobile-chat rules below. Never mention the state name or any mode label. Do not output internal labels such as [text message], [线上聊天], or speaker/log prefixes.`;
+            : `### 线上输出格式
+- 将回复拆分成简短的气泡，每条气泡使用真正的换行符分隔。
+- 不要输出时间戳、名字前缀、[text message]、[线上聊天] 或系统日志格式。
+- 发送表情包必须且只能使用命令：\`[[SEND_EMOJI: 表情名称]]\`。
+- 只能从以下当前可用表情库中原样选择名称，不要编造或改写名称：
+  ${emojiContextStr}`;
 
         baseSystemPrompt += `### 同一互动平台行为规范
 **当前线上 / 线下状态块是唯一有效的互动形式。打开这个页面、发送消息、使用平台工具或调用 MCP 都不会自动把线下状态改成线上。**
