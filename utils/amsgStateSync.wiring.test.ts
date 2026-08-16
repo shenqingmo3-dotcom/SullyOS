@@ -44,6 +44,25 @@ describe('打脏入口接线（保存后调 markAmsgStateDirty）', () => {
   it('OSContext 启动路径接了底账补传 resumePendingAmsgStateSync', () => {
     expect(read('../context/OSContext.tsx')).toContain('resumePendingAmsgStateSync({');
   });
+
+  it('私聊编辑保存失败会解锁并保留弹层供重试', () => {
+    const chat = read('../apps/Chat.tsx');
+    const save = sliceBetween(chat, 'const confirmEditMessage', 'const handleQuickReply');
+    expect(save).toContain('if (!selectedMessage || isSavingEditMessage) return');
+    expect(save).toContain("addToast(`保存失败：${detail || '本地存储不可用'}。修改仍保留，可重试`, 'error')");
+    expect(save).toMatch(/finally\s*{[\s\S]*?setIsSavingEditMessage\(false\)/);
+
+    const modals = read('../components/chat/ChatModals.tsx');
+    expect(modals).toContain("{isSavingEditMessage ? '保存中…' : '保存'}");
+    expect(modals).toContain('disabled={isSavingEditMessage}');
+  });
+
+  it('角色资料落库失败有用户提示且不会进入成功后的同步块', () => {
+    const src = read('../context/OSContext.tsx');
+    const fn = sliceBetween(src, 'const updateCharacter = async', 'const deleteCharacter');
+    expect(fn).toMatch(/DB\.saveCharacter\(target\)\.then\([\s\S]*?markAmsgStateDirty\([\s\S]*?\)\.catch\(error\s*=>/);
+    expect(fn).toContain('人设未能保存到本机');
+  });
 });
 
 // 换 Key 之后云端那几行凭据不重传的话，已排程的任务到点全部 401，而界面上一切正常。

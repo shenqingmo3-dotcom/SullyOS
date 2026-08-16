@@ -128,3 +128,32 @@ describe('openDB blocked-then-unblocked 不泄漏连接', () => {
     })).resolves.toBeUndefined();
   });
 });
+
+describe('消息更新等待事务提交', () => {
+  it('正文和 metadata 更新完成后可立即从数据库读到新值', async () => {
+    const charId = `tx-update-${Date.now()}`;
+    const id = await DB.saveMessage({ charId, role: 'user', type: 'text', content: '旧内容' });
+
+    await DB.updateMessage(id, '新内容');
+    await DB.updateMessageMetadata(id, () => ({ edited: true }));
+
+    const [saved] = await DB.getMessagesByCharId(charId, true);
+    expect(saved.content).toBe('新内容');
+    expect(saved.metadata).toEqual({ edited: true });
+  });
+
+  it('put 无法结构化克隆时明确 reject，不把排队动作误报为成功', async () => {
+    const charId = `tx-reject-${Date.now()}`;
+    const id = await DB.saveMessage({ charId, role: 'user', type: 'text', content: '保留内容' });
+
+    await expect(DB.updateMessageMetadata(id, () => ({ invalid: () => undefined }))).rejects.toBeTruthy();
+
+    const [saved] = await DB.getMessagesByCharId(charId, true);
+    expect(saved.content).toBe('保留内容');
+    expect(saved.metadata).toBeUndefined();
+  });
+
+  it('消息不存在时 reject，不留下永远 pending 的保存操作', async () => {
+    await expect(DB.updateMessage(Number.MAX_SAFE_INTEGER, '不会写入')).rejects.toThrow('Message not found');
+  });
+});

@@ -1012,6 +1012,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interceptorsInitialized = useRef(false);
+  const characterSaveErrorToastAtRef = useRef(0);
   
   // Back Handler Ref
   const backHandlerRef = useRef<(() => boolean) | null>(null);
@@ -3156,6 +3157,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             ActiveMsgClient.refreshCharPendingTaskRow(target, { timeZone, contactName }).catch((error) => {
               console.warn('[amsg2] 角色资料变更后刷新远端任务行失败', target.id, error);
             });
+          }
+        }).catch(error => {
+          console.error('[DB] 角色资料本地保存失败', error);
+          const now = Date.now();
+          if (now - characterSaveErrorToastAtRef.current >= 3000) {
+            characterSaveErrorToastAtRef.current = now;
+            const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+            addToast(`人设未能保存到本机：${detail || '本地存储不可用'}。请保留当前页面并稍后重试`, 'error');
           }
         });
       }

@@ -28,6 +28,7 @@ interface ChatModalsProps {
     setPreserveContext: (v: boolean) => void;
     editContent: string;
     setEditContent: (v: string) => void;
+    isSavingEditMessage: boolean;
     
     // New Category Props
     newCategoryName: string;
@@ -234,7 +235,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     settingsContextRangeMode, setSettingsContextRangeMode,
     settingsHideSysLogs, setSettingsHideSysLogs,
     preserveContext, setPreserveContext,
-    editContent, setEditContent,
+    editContent, setEditContent, isSavingEditMessage,
     newCategoryName, setNewCategoryName, onAddCategory,
     newEmojiName, setNewEmojiName, onRenameEmoji,
     archivePrompts, selectedPromptId, setSelectedPromptId,
@@ -1108,13 +1109,14 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             </Modal>
 
             <Modal
-                isOpen={modalType === 'edit-message'} title="编辑内容" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onConfirmEditMessage} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
+                isOpen={modalType === 'edit-message'} title="编辑内容" onClose={() => { if (!isSavingEditMessage) setModalType('none'); }}
+                footer={<><button disabled={isSavingEditMessage} onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl disabled:opacity-50">取消</button><button disabled={isSavingEditMessage} onClick={onConfirmEditMessage} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl disabled:opacity-50">{isSavingEditMessage ? '保存中…' : '保存'}</button></>}
             >
                 <textarea
+                    disabled={isSavingEditMessage}
                     value={editContent}
                     onChange={e => setEditContent(e.target.value)}
-                    className="w-full h-32 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed"
+                    className="w-full h-32 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed disabled:opacity-60"
                 />
             </Modal>
 

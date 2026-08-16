@@ -882,43 +882,59 @@ export const DB = {
 
   updateMessage: async (id: number, content: string): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
-    const store = transaction.objectStore(STORE_MESSAGES);
-    
     return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+        const store = transaction.objectStore(STORE_MESSAGES);
+        let failure: Error | null = null;
         const req = store.get(id);
         req.onsuccess = () => {
             const data = req.result as Message;
             if (data) {
-                data.content = content;
-                store.put(data);
-                resolve();
+                try {
+                    data.content = content;
+                    store.put(data);
+                } catch (error) {
+                    failure = error instanceof Error ? error : new Error(String(error));
+                    transaction.abort();
+                }
             } else {
-                reject(new Error('Message not found'));
+                failure = new Error('Message not found');
+                transaction.abort();
             }
         };
-        req.onerror = () => reject(req.error);
+        req.onerror = () => { failure = req.error; };
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(failure || transaction.error || new Error('updateMessage failed'));
+        transaction.onabort = () => reject(failure || transaction.error || new Error('updateMessage aborted'));
     });
   },
 
   updateMessageMetadata: async (id: number, updater: (prev: any) => any): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
-    const store = transaction.objectStore(STORE_MESSAGES);
-
     return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+        const store = transaction.objectStore(STORE_MESSAGES);
+        let failure: Error | null = null;
         const req = store.get(id);
         req.onsuccess = () => {
             const data = req.result as Message | undefined;
             if (data) {
-                (data as any).metadata = updater((data as any).metadata);
-                store.put(data);
-                resolve();
+                try {
+                    (data as any).metadata = updater((data as any).metadata);
+                    store.put(data);
+                } catch (error) {
+                    failure = error instanceof Error ? error : new Error(String(error));
+                    transaction.abort();
+                }
             } else {
-                reject(new Error('Message not found'));
+                failure = new Error('Message not found');
+                transaction.abort();
             }
         };
-        req.onerror = () => reject(req.error);
+        req.onerror = () => { failure = req.error; };
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(failure || transaction.error || new Error('updateMessageMetadata failed'));
+        transaction.onabort = () => reject(failure || transaction.error || new Error('updateMessageMetadata aborted'));
     });
   },
 

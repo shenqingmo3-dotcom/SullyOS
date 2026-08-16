@@ -182,6 +182,7 @@ const Chat: React.FC = () => {
     const [selectedEmoji, setSelectedEmoji] = useState<Emoji | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<EmojiCategory | null>(null); // For deletion modal
     const [editContent, setEditContent] = useState('');
+    const [isSavingEditMessage, setIsSavingEditMessage] = useState(false);
     const [isSummarizing, setIsSummarizing] = useState(false);
     const [archiveProgress, setArchiveProgress] = useState('');
     const [showThinkingChainModal, setShowThinkingChainModal] = useState(false);
@@ -2631,18 +2632,27 @@ const Chat: React.FC = () => {
     };
 
     const confirmEditMessage = async () => {
-        if (!selectedMessage) return;
-        const contentChanged = editContent !== selectedMessage.content;
-        await DB.updateMessage(selectedMessage.id, editContent);
-        // 内容变了旧语音就作废，否则语音条仍会播放编辑前的音频。
-        if (contentChanged) discardVoiceForMessages([selectedMessage.id]);
-        // 同 handleDeleteMessage：正文改了要让云端 fire_pack 跟上。
-        if (contentChanged) markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
-        setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, content: editContent } : m));
-        setModalType('none');
-        setSelectedMessage(null);
-        addToast('消息已修改', 'success');
-        trackEvent('编辑一条消息');
+        if (!selectedMessage || isSavingEditMessage) return;
+        setIsSavingEditMessage(true);
+        try {
+            const contentChanged = editContent !== selectedMessage.content;
+            await DB.updateMessage(selectedMessage.id, editContent);
+            // 内容变了旧语音就作废，否则语音条仍会播放编辑前的音频。
+            if (contentChanged) discardVoiceForMessages([selectedMessage.id]);
+            // 同 handleDeleteMessage：正文改了要让云端 fire_pack 跟上。
+            if (contentChanged) markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
+            setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, content: editContent } : m));
+            setModalType('none');
+            setSelectedMessage(null);
+            addToast('消息已修改', 'success');
+            trackEvent('编辑一条消息');
+        } catch (error) {
+            const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+            console.error('[Chat] 编辑消息本地保存失败', error);
+            addToast(`保存失败：${detail || '本地存储不可用'}。修改仍保留，可重试`, 'error');
+        } finally {
+            setIsSavingEditMessage(false);
+        }
     };
 
     const handleQuickReply = useCallback((message: Message) => {
@@ -3264,6 +3274,7 @@ const Chat: React.FC = () => {
                 settingsHideSysLogs={settingsHideSysLogs} setSettingsHideSysLogs={setSettingsHideSysLogs}
                 preserveContext={preserveContext} setPreserveContext={setPreserveContext}
                 editContent={editContent} setEditContent={setEditContent}
+                isSavingEditMessage={isSavingEditMessage}
                 archivePrompts={archivePrompts} selectedPromptId={selectedPromptId} setSelectedPromptId={(id: string) => {
                     setSelectedPromptId(id);
                     // 同步写 localStorage，让 palace extraction 的风格追加能读到最新选择
